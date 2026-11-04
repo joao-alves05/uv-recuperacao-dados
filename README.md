@@ -48,4 +48,6 @@ Nenhuma ferramenta recupera dados sobrescritos. Em SSDs e pen drives com TRIM, o
 
 ## Licença
 
-© 2026 João Vitor Medeiros Alves e Fabio (UV Informática). Todos os direitos reservados.
+Código aberto, sob a [licença MIT](LICENSE). © 2026 João Vitor Medeiros Alves e Fabio (UV Informática).
+
+As ferramentas citadas em Referências têm licenças próprias (várias são GPL). Delas este projeto usa só ideias e formatos públicos, ou as chama como programas separados: nenhum código delas é copiado para cá.
