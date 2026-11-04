@@ -29,6 +29,8 @@ EDGE = next((p for p in (r'C:\Program Files (x86)\Microsoft\Edge\Application\mse
 if not EDGE:
     print('sem Edge neste PC: teste pulado')
     sys.exit(0)
+sys.path.insert(0, str(AQUI))
+from painel_falso import XSS_ROTULO  # noqa: E402
 FOTOS = Path(os.environ['PAINEL_FOTOS']) if os.environ.get('PAINEL_FOTOS') else None
 
 
@@ -149,6 +151,7 @@ class Pag:
         return s.ev(f"(()=>{{const e=document.querySelector({json.dumps(seletor)});if(!e)return null;const r=e.getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2]}})()")
 
     def clica(s, seletor, depois=.35):
+        s.ev(f"document.querySelector({json.dumps(seletor)})?.scrollIntoView({{block:'nearest'}})")
         c = s.centro(seletor)
         if not c:
             raise RuntimeError('sem elemento ' + seletor)
@@ -379,9 +382,157 @@ def main():
         conferir('"Tentar de novo" recupera a lista', p.espera("document.querySelectorAll('.item').length===7 && document.getElementById('lista-erro').hidden", 12))
         p.espera("document.getElementById('conexao-texto').textContent==='Ao vivo'", 20)
 
-        # ---- formulario
-        p.ir(base + '/', .8)
-        conferir('inicio mostra o formulario de nova imagem (computador)', p.ev("!document.getElementById('v-nova').hidden&&document.getElementById('v-job').hidden"))
+        # ---- tela inicial: os discos como em "Meu computador"
+        p.tema('light')
+        p.tamanho(1366, 768)
+        p.ir(base + '/', 1)
+        conferir('inicio: pergunta "Onde estavam os seus arquivos?"', p.espera("document.getElementById('t-inicio').textContent==='Onde estavam os seus arquivos?' && !document.getElementById('v-inicio').hidden") and p.ev("document.getElementById('v-nova').hidden&&document.getElementById('v-job').hidden"))
+        conferir('inicio: 7 cartoes de volume', p.espera("document.querySelectorAll('#i-volumes .fonte').length===7"))
+        titulos = p.ev("[...document.querySelectorAll('#i-volumes .fonte-nome')].map(n=>n.textContent)")
+        conferir('inicio: ordem = removiveis, discos fixos, leitores vazios, disco do Windows por ultimo',
+                 titulos == ['Pen drive (E:)', 'Cartão de memória (F:)', 'Dados (D:)', XSS_ROTULO + ' (G:)', 'Leitor de cartões USB', 'CD/DVD (H:)', 'Disco local (C:)'], titulos)
+        conferir('inicio: so o disco do Windows leva o selo', p.ev("[...document.querySelectorAll('#i-volumes .fonte')].map(c=>c.querySelector('.tag')?c.querySelector('.tag').textContent:'').join('|')") == '||||||Disco do Windows')
+        conferir('inicio: pen drive mostra tipo, sistema de arquivos, barra e espaco',
+                 p.ev("(()=>{const c=document.querySelector('#i-volumes .fonte');return c.querySelector('.fonte-sub').textContent==='Pen drive · FAT32'&&c.querySelector('.fonte-meta').textContent==='12 GB livres de 29 GB'&&c.querySelector('.barra-cheia').style.width==='57%'&&c.querySelector('svg')!==null})()"))
+        conferir('inicio: cada tipo tem seu icone (todos diferentes entre pen drive, cartao, DVD e disco)',
+                 p.ev("new Set([...document.querySelectorAll('#i-volumes .fonte svg')].map(s=>s.innerHTML.length+s.querySelector('path').getAttribute('d'))).size")>=4)
+        conferir('inicio: leitor sem cartao e DVD sem disco aparecem apagados e desabilitados',
+                 p.ev("(()=>{const v=[...document.querySelectorAll('#i-volumes .fonte.sem-midia')];return v.length===2&&v.every(c=>c.disabled&&parseFloat(getComputedStyle(c).opacity)<1)&&v[0].querySelector('.fonte-sub').textContent==='Sem cartão'&&v[1].querySelector('.fonte-sub').textContent==='Sem disco'&&!v[0].querySelector('.barra')})()"))
+        h0 = p.ev('location.hash')
+        p.clica('#i-volumes .fonte.sem-midia', .2)
+        conferir('inicio: clicar no leitor vazio nao faz nada', p.ev('location.hash') == h0)
+        conferir('XSS no rotulo do volume: aparece como texto, nada executa',
+                 p.ev("document.querySelectorAll('#i-volumes img,#i-volumes .fonte *[onerror]').length")==0 and p.ev('window.__xss')is None and '<img src=x' in p.ev("document.querySelectorAll('#i-volumes .fonte-nome')[3].textContent"))
+        conferir('inicio: "Discos inteiros (avancado)" comeca recolhido', not p.ev("document.getElementById('i-discos').open") and 'Discos inteiros (avançado)' in p.ev("document.querySelector('#i-discos summary').textContent"))
+        p.ev("document.getElementById('i-discos').open=true")
+        conferir('discos inteiros: quantidade e letras', p.ev("document.querySelectorAll('#i-discos-grade .fonte').length")==4 and p.ev("[...document.querySelectorAll('#i-discos-grade .fonte-meta')].some(m=>m.textContent.includes('D:, G:'))"))
+        p.foto('1366-inicio-claro-discos-abertos')
+        p.ev("document.getElementById('i-discos').open=false")
+        p.foto('1366-inicio-claro')
+        conferir('inicio: botao "Atualizar" e link "Avancado: digitar caminhos"', p.ev("document.getElementById('i-atualizar').textContent")=='Atualizar' and p.ev("document.getElementById('avancado-link').textContent")=='Avançado: digitar caminhos')
+        conferir('selo do topo diz "Original protegido" com a dica',
+                 p.ev("document.querySelector('.selo span').textContent")=='Original protegido' and 'nunca grava no disco que você quer recuperar' in p.ev("document.querySelector('.selo').title")
+                 and 'Os arquivos recuperados vão para outro disco.' in p.ev("document.querySelector('.selo').title") and 'Somente leitura' not in p.ev('document.body.textContent'))
+
+        # painel do volume (pen drive)
+        p.clica('#i-volumes .fonte')
+        conferir('clicar no cartao abre o painel do volume (URL #volume/E)', p.espera("location.hash==='#volume/E' && !document.getElementById('v-volume').hidden && document.getElementById('v-inicio').hidden"), p.ev('location.hash'))
+        conferir('painel: botao principal "Recuperar arquivos" e ao lado "Fazer copia de seguranca (imagem)"',
+                 p.ev("(()=>{const a=[...document.querySelectorAll('#vol-corpo .acoes .btn')];return a.length===2&&a[0].textContent==='Recuperar arquivos'&&a[0].classList.contains('btn-primario')&&a[1].textContent==='Fazer cópia de segurança (imagem)'&&a.every(b=>!b.disabled)})()"))
+        av = p.ev("document.getElementById('vol-corpo').querySelector('.avisos').textContent")
+        conferir('painel do pen drive: avisos de TRIM e de parar de usar, sem aviso de administrador', 'TRIM' in av and 'Pare de usar o pen drive' in av and 'administrador' not in av, av)
+        p.foto('1366-volume-claro')
+        p.ev('history.back()')
+        conferir('voltar do navegador volta aos discos', p.espera("location.hash==='' && !document.getElementById('v-inicio').hidden"))
+
+        # administrador
+        http(porta, '/_teste/admin?on=0')
+        p.clica('#i-atualizar', .6)
+        p.clica('#i-volumes .fonte:nth-child(2)')
+        p.espera("location.hash==='#volume/F'")
+        av = p.ev("document.getElementById('vol-corpo').querySelector('.avisos').textContent")
+        conferir('sem administrador: aviso claro com o passo do iniciar-admin.cmd',
+                 'Para ler o cartão, o programa precisa de permissão de administrador: feche e abra pelo atalho “iniciar-admin.cmd”.' in av, av)
+        conferir('aviso de administrador vem primeiro e em destaque', p.ev("document.querySelector('#vol-corpo .avisos .alerta').dataset.tipo")=='aviso' and 'administrador' in p.ev("document.querySelector('#vol-corpo .avisos .alerta').textContent"))
+        conferir('cartao: pede para parar de usar, sem TRIM', 'Pare de usar o cartão até terminar' in av and 'TRIM' not in av, av)
+        p.foto('1366-volume-sem-admin-claro')
+        http(porta, '/_teste/admin?on=1')
+
+        # Recuperar arquivos: tela honesta
+        p.clica('#b-recuperar')
+        conferir('"Recuperar arquivos" leva a tela honesta (busca na proxima atualizacao)',
+                 p.espera("location.hash==='#volume/F/recuperar' && !document.getElementById('v-buscar').hidden") and 'chega na próxima atualização' in p.ev("document.getElementById('buscar-corpo').textContent"))
+        conferir('tela honesta oferece a copia de seguranca e nao tem botao morto', p.ev("(()=>{const b=[...document.querySelectorAll('#v-buscar .btn')].filter(b=>b.getClientRects().length);return b.length===2&&b.every(x=>!x.disabled)&&b.map(x=>x.textContent).join('|')==='‹ Voltar|Fazer cópia de segurança'})()"))
+        p.foto('1366-buscar-claro')
+        p.clica('#b-buscar-imagem')
+        conferir('da tela honesta vai direto ao fluxo da copia', p.espera("location.hash==='#volume/F/imagem' && !document.getElementById('v-imagem').hidden"))
+
+        # copia em 3 passos: pen drive E
+        p.ir(base + '/?r=1#volume/E/imagem', 1)
+        p.espera("document.getElementById('img-nome')")
+        conferir('copia: passo 1 (origem) feito, passo 2 (onde salvar) atual, passo 3 pendente',
+                 p.ev("[...document.querySelectorAll('.passos li')].map(l=>l.className+':'+l.querySelector('.passo-nome').textContent).join('|')")=='feito:Origem|atual:Onde salvar|:Confirmar')
+        conferir('copia: origem ja escolhida aparece', 'Pen drive (E:)' in p.ev("document.querySelector('#imagem-corpo > .fonte').textContent"))
+        conferir('copia: "Onde salvar?"', 'Onde salvar?' in p.ev("document.querySelector('#imagem-corpo h2').textContent"))
+        opcs = p.ev("[...document.querySelectorAll('.opcao .opcao-nome')].map(n=>n.textContent)")
+        conferir('copia: destinos sao so de OUTROS volumes (sem o E:, sem leitor vazio, sem DVD)', len(opcs) == 4 and not any('(E:)' in o or '(H:)' in o for o in opcs), opcs)
+        sug = p.ev("(()=>{const l=document.querySelector('.opcao:has(input:checked)');return l.querySelector('.opcao-nome').textContent+'|'+(l.querySelector('.tag')?l.querySelector('.tag').textContent:'')})()")
+        conferir('copia: destino sugerido = o volume com mais espaco livre que nao e a origem (G:), marcado "Sugerido"', sug == XSS_ROTULO + ' (G:)|Sugerido', sug)
+        nome = p.ev("document.getElementById('img-nome').value")
+        conferir('copia: nome automatico Recuperacao-E-AAAA-MM-DD.img', __import__('re').fullmatch(r'Recuperacao-E-\d{4}-\d{2}-\d{2}\.img', nome) is not None, nome)
+        cam = p.ev("document.getElementById('img-caminho').textContent")
+        conferir('copia: caminho mostrado = letra do destino + nome', cam == 'G:\\' + nome, cam)
+        conferir('copia: sem aviso de espaco quando cabe e "Continuar" liberado', p.ev("document.getElementById('img-aviso').hidden && !document.getElementById('img-continuar').disabled"))
+        p.foto('1366-copia-passo2-claro')
+        p.ev("(()=>{const i=document.getElementById('img-nome');i.value='a/b.img';i.dispatchEvent(new Event('input'))})()")
+        conferir('copia: nome com caractere proibido bloqueia o Continuar com aviso', p.ev("!document.getElementById('img-aviso').hidden&&document.getElementById('img-continuar').disabled&&document.getElementById('img-aviso').textContent.includes('O nome não pode ter')"))
+        p.ev("(()=>{const i=document.getElementById('img-nome');i.value='minha-copia.img';i.dispatchEvent(new Event('input'))})()")
+        p.ev("[...document.querySelectorAll('.opcao')].find(l=>l.textContent.includes('Dados')).querySelector('input').click()")
+        p.espera("document.getElementById('img-caminho').textContent.startsWith('D:')")
+        conferir('copia: trocar de destino muda o caminho e guarda o nome digitado', p.ev("document.getElementById('img-caminho').textContent")=='D:\\minha-copia.img' and p.ev("document.getElementById('img-nome').value")=='minha-copia.img', p.ev("document.getElementById('img-caminho').textContent"))
+        p.clica('#img-continuar')
+        conferir('copia: passo 3 (confirmar) com origem, destino e tamanho',
+                 p.espera("location.hash==='#volume/E/imagem/confirmar' && !!document.getElementById('conf-destino')") and p.ev("document.getElementById('conf-destino').textContent")=='D:\\minha-copia.img'
+                 and p.ev("[...document.querySelectorAll('.passos li')].map(l=>l.className).join('|')")=='feito|feito|atual' and 'Pen drive (E:)' in p.ev("document.querySelector('#imagem-corpo .dados').textContent") and p.ev("document.querySelector('#imagem-corpo .dados').textContent.includes('29 GB')"))
+        p.foto('1366-copia-passo3-claro')
+        p.clica('#conf-iniciar', .8)
+        conferir('copia: "Iniciar copia" cria o job com a origem do volume e o destino escolhido',
+                 p.espera("/^\\/jobs\\/j-20261104-01\\d\\d$/.test(location.pathname)") and http(porta, '/_teste/ultimo')['ultimo'] == {'tipo': 'imagem', 'origem': '\\\\.\\E:', 'destino': 'D:\\minha-copia.img'}, http(porta, '/_teste/ultimo'))
+
+        # falta de espaco: copiar o D: (500 GB) para qualquer outro volume nao cabe
+        p.ir(base + '/?r=2#volume/D/imagem', 1)
+        p.espera("document.getElementById('img-nome')")
+        conferir('copia: aviso quando falta espaco e Continuar bloqueado',
+                 p.ev("!document.getElementById('img-aviso').hidden&&document.getElementById('img-aviso').textContent.includes('Não cabe: faltam')&&document.getElementById('img-continuar').disabled"))
+        conferir('copia: destino que nao cabe vem marcado na lista', 'não cabe' in p.ev("document.querySelector('.opcao .fonte-meta.falta').textContent"))
+        p.foto('1366-copia-sem-espaco-claro')
+
+        # disco inteiro e disco do Windows
+        p.ir(base + '/?r=3#disco/disco-1/imagem', 1)
+        p.espera("document.getElementById('img-nome')")
+        opcs = p.ev("[...document.querySelectorAll('.opcao .opcao-nome')].map(n=>n.textContent)")
+        conferir('disco inteiro: destinos nao incluem partes do proprio disco (D:, G:)', len(opcs) == 3 and not any('(D:)' in o or '(G:)' in o for o in opcs), opcs)
+        conferir('disco inteiro: nome automatico usa o disco', __import__('re').fullmatch(r'Recuperacao-disco1-\d{4}-\d{2}-\d{2}\.img', p.ev("document.getElementById('img-nome').value")) is not None)
+        p.ir(base + '/?r=4#volume/C', 1)
+        p.espera("document.getElementById('vol-corpo').textContent.length>10")
+        av = p.ev("document.querySelector('#vol-corpo .avisos').textContent")
+        conferir('disco do Windows: avisos de TRIM (SSD) e de uso minimo', 'TRIM' in av and 'disco do Windows' in av and 'Pare de usar' not in av, av)
+        p.ir(base + '/?r=5#volume/Z', 1)
+        conferir('volume que sumiu: mensagem clara e saida para o inicio', p.espera("document.getElementById('vol-corpo').textContent.includes('Não encontramos mais este disco')") and p.ev("document.querySelector('#vol-corpo .btn').textContent")=='Voltar ao início')
+
+        # CD/DVD com disco: leitura chega depois
+        http(porta, '/_teste/dvd?on=1')
+        p.ir(base + '/?r=6#volume/H', 1)
+        p.espera("document.querySelector('#vol-corpo .avisos')")
+        conferir('CD/DVD: aviso de que a leitura chega numa proxima versao e botoes desabilitados',
+                 'A leitura de CD/DVD chega numa próxima versão.' in p.ev("document.querySelector('#vol-corpo .avisos').textContent") and p.ev("[...document.querySelectorAll('#vol-corpo .acoes .btn')].every(b=>b.disabled)"))
+        p.foto('1366-dvd-claro')
+        http(porta, '/_teste/dvd?on=0')
+
+        # sem discos, erro e carregando
+        http(porta, '/_teste/fontes_vazias?on=1')
+        p.ir(base + '/?r=7', 1)
+        conferir('nenhum disco: mensagem de vazio', p.espera("!document.getElementById('i-vazio').hidden") and p.ev("document.getElementById('i-conteudo').hidden"))
+        http(porta, '/_teste/fontes_vazias?on=0')
+        p.clica('#i-atualizar', .8)
+        conferir('"Atualizar" traz os discos', p.espera("document.querySelectorAll('#i-volumes .fonte').length===7 && document.getElementById('i-vazio').hidden"))
+        http(porta, '/_teste/quebrar?on=1')
+        p.ir(base + '/?r=8', 1.2)
+        conferir('listar discos falhou: erro claro com "Tentar de novo"', p.espera("!document.getElementById('i-erro').hidden") and 'Não consegui listar os discos' in p.ev("document.getElementById('i-erro-texto').textContent"))
+        p.foto('1366-inicio-erro-claro')
+        http(porta, '/_teste/quebrar?on=0')
+        p.clica('#i-tentar')
+        conferir('"Tentar de novo" mostra os discos', p.espera("document.querySelectorAll('#i-volumes .fonte').length===7", 12))
+        http(porta, '/_teste/atraso?s=1.5')
+        p.ir(base + '/?r=9', .5)
+        conferir('procurando os discos: estado de carregando', p.ev("!document.getElementById('i-carregando').hidden&&document.getElementById('i-conteudo').hidden"))
+        http(porta, '/_teste/atraso?s=0')
+        p.espera("document.querySelectorAll('#i-volumes .fonte').length===7", 8)
+
+        # avancado: digitar caminhos
+        p.clica('#avancado-link')
+        conferir('"Avancado: digitar caminhos" abre o formulario antigo', p.espera("location.hash==='#avancado' && !document.getElementById('v-nova').hidden && document.getElementById('v-inicio').hidden") and p.ev("document.getElementById('t-nova').textContent")=='Avançado: digitar caminhos')
+        p.foto('1366-avancado-claro')
         p.clica('#f-enviar')
         conferir('campos vazios: pede para preencher', p.ev("document.getElementById('f-erro').textContent")=='Preencha os dois campos.')
         p.ev("document.getElementById('f-origem').value='html';document.getElementById('f-destino').value='D:\\\\x.img'")
@@ -452,22 +603,81 @@ def main():
         medidas('390x844 escuro', 390, 844, 'dark')
         medidas('360x640 claro', 360, 640, 'light')
 
+        # ---- medidas da tela de discos e do painel do volume
+        def medidas_discos(nome, w, h, tema):
+            p.tema(tema)
+            p.tamanho(w, h)
+            p.ir(base + '/', 1)
+            p.espera("document.querySelectorAll('#i-volumes .fonte').length===7")
+            r = p.ev("""(()=>{const d=document.documentElement,out={};
+              out.semRolagemLateral=d.scrollWidth<=innerWidth;
+              const m=document.querySelector('.principal').getBoundingClientRect();
+              const cs=[...document.querySelectorAll('#i-volumes .fonte')];
+              out.cartoesDentro=cs.every(e=>{const r=e.getBoundingClientRect();return r.left>=m.left-.5&&r.right<=m.right+.5});
+              const linhas={};cs.forEach(c=>{const r=c.getBoundingClientRect();(linhas[Math.round(r.top)]=linhas[Math.round(r.top)]||[]).push(Math.round(r.height))});
+              out.linhasIguais=Object.values(linhas).every(a=>a.every(x=>x===a[0]));
+              const lefts=new Set(cs.map(c=>Math.round(c.getBoundingClientRect().left)));out.colunas=lefts.size;
+              const bs=[...document.querySelectorAll('.principal .btn')].filter(b=>b.getClientRects().length);
+              out.botoesMesmaAltura=bs.every(b=>Math.abs(b.getBoundingClientRect().height-bs[0].getBoundingClientRect().height)<=.5);
+              out.alturaBotao=Math.round(bs[0].getBoundingClientRect().height);
+              out.nomesCortados=cs.filter(c=>{const n=c.querySelector('.fonte-nome');return n.scrollWidth>n.clientWidth&&!n.title}).length;
+              out.tituloMaior=Math.max(...[...document.querySelectorAll('.principal *')].filter(e=>e.getClientRects().length&&e.children.length===0&&e.textContent.trim()).map(e=>parseFloat(getComputedStyle(e).fontSize)))===parseFloat(getComputedStyle(document.getElementById('t-inicio')).fontSize);
+              return out;})()""")
+            p.foto(f'{w}x{h}-inicio-{"claro" if tema == "light" else "escuro"}')
+            conferir(f'{nome} (discos): sem rolagem lateral', r['semRolagemLateral'])
+            conferir(f'{nome} (discos): cartoes dentro da area principal', r['cartoesDentro'])
+            conferir(f'{nome} (discos): cartoes da mesma linha com a mesma altura ({r["colunas"]} colunas)', r['linhasIguais'])
+            conferir(f'{nome} (discos): botoes com a mesma altura ({r["alturaBotao"]} px)', r['botoesMesmaAltura'])
+            conferir(f'{nome} (discos): nome cortado sempre tem dica', r['nomesCortados'] == 0)
+            conferir(f'{nome} (discos): o titulo e o maior texto', r['tituloMaior'])
+            return r
+        medidas_discos('1366x768 claro', 1366, 768, 'light')
+        medidas_discos('1366x768 escuro', 1366, 768, 'dark')
+        medidas_discos('1280x720 claro', 1280, 720, 'light')
+        medidas_discos('1500x900 claro', 1500, 900, 'light')
+        medidas_discos('1920x1080 claro', 1920, 1080, 'light')
+        r = medidas_discos('390x844 claro', 390, 844, 'light')
+        conferir('390 (discos): uma coluna e botao de toque (>=40)', r['colunas'] == 1 and r['alturaBotao'] >= 40, r)
+        medidas_discos('390x844 escuro', 390, 844, 'dark')
+        for (w, h, tema) in ((1366, 768, 'dark'), (390, 844, 'light'), (1280, 720, 'light')):
+            p.tema(tema)
+            p.tamanho(w, h)
+            p.ir(base + '/?m=%d#volume/F/imagem' % w, 1)
+            p.espera("document.getElementById('img-nome')")
+            ok = p.ev("""(()=>{const d=document.documentElement,m=document.querySelector('.principal').getBoundingClientRect();
+              const bs=[...document.querySelectorAll('.principal .btn')].filter(b=>b.getClientRects().length);
+              const fora=[...document.querySelectorAll('.principal .cartao,.principal .fonte,.principal .passos,.principal .opcao')].filter(e=>e.getClientRects().length).filter(e=>{const r=e.getBoundingClientRect();return !(r.left>=m.left-.5&&r.right<=m.right+.5)}).map(e=>e.className);
+              const alt=bs.map(b=>Math.round(b.getBoundingClientRect().height));
+              return d.scrollWidth<=innerWidth&&fora.length===0&&alt.every(x=>x===alt[0])||JSON.stringify([d.scrollWidth,innerWidth,fora,alt])})()""")
+            p.foto(f'{w}x{h}-copia-{"claro" if tema == "light" else "escuro"}')
+            conferir(f'{w}x{h} {tema} (copia): sem rolagem lateral, tudo dentro, botoes iguais', ok is True, ok)
+        p.tema('dark')
+        p.tamanho(1366, 768)
+        p.ir(base + '/?m=9#volume/E', 1)
+        p.espera("document.getElementById('b-recuperar')")
+        p.foto('1366-volume-escuro')
+        p.tema('light')
+        p.tamanho(390, 844)
+        p.ir(base + '/?m=10#volume/F', 1)
+        p.espera("document.getElementById('b-recuperar')")
+        p.foto('390x844-volume-claro')
+
         # ---- celular: uma coluna e navegacao
         p.tema('light')
         p.tamanho(390, 844)
-        p.ir(base + '/', 1)
+        p.ir(base + '/#lista', 1)
         p.espera("document.querySelectorAll('.item').length>=7")
-        conferir('celular: o inicio mostra so a lista', p.ev("getComputedStyle(document.querySelector('.principal')).display==='none'&&document.getElementById('lista').getBoundingClientRect().width>=390"))
+        conferir('celular: "Ver recuperacoes" mostra so a lista', p.ev("getComputedStyle(document.querySelector('.principal')).display==='none'&&document.getElementById('lista').getBoundingClientRect().width>=390"))
         conferir('celular: itens inteiros na tela', p.ev("[...document.querySelectorAll('.item')].every(a=>{const r=a.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth})"))
         conferir('celular: itens com altura de toque', p.ev("[...document.querySelectorAll('.item')].every(a=>a.getBoundingClientRect().height>=44)"))
         p.foto('390x844-lista-claro')
         p.clica('.item')
         conferir('celular: tocar abre o detalhe e esconde a lista', p.espera("getComputedStyle(document.getElementById('lista')).display==='none'&&!document.getElementById('v-job').hidden"))
-        p.clica('#v-job [data-voltar]')
+        p.clica('#v-job [data-voltar-lista]')
         conferir('celular: "Recuperações" volta a lista', p.espera("location.pathname==='/'&&getComputedStyle(document.getElementById('lista')).display!=='none'"))
         p.clica('#nova-link')
-        conferir('celular: "Nova imagem" abre o formulario', p.espera("location.hash==='#nova'&&getComputedStyle(document.querySelector('.principal')).display!=='none'&&!document.getElementById('v-nova').hidden"))
-        p.foto('390x844-nova-claro')
+        conferir('celular: "Nova recuperacao" abre a escolha de disco', p.espera("location.hash===''&&getComputedStyle(document.querySelector('.principal')).display!=='none'&&!document.getElementById('v-inicio').hidden&&document.querySelectorAll('#i-volumes .fonte').length===7"))
+        p.foto('390x844-inicio-claro')
         p.ev('history.back()')
         conferir('celular: voltar do navegador tambem volta a lista', p.espera("getComputedStyle(document.getElementById('lista')).display!=='none'"))
 
@@ -476,7 +686,7 @@ def main():
         p.ir(base + '/', 1)
         conferir('marca: nome e empresa vem de /api/marca', p.espera("document.getElementById('marca-nome').textContent==='Marca de Teste'") and p.ev("document.getElementById('marca-sub').textContent")=='Empresa de Teste' and p.ev('document.title')=='Marca de Teste')
         p.ir(base + '/', .3)
-        conferir('marca: cor do botao vem do servico', p.ev("getComputedStyle(document.getElementById('f-enviar')).backgroundColor")=='rgb(122, 63, 176)')
+        conferir('marca: cor do botao vem do servico', p.espera("getComputedStyle(document.getElementById('nova-link')).backgroundColor==='rgb(122, 63, 176)'", 3) and p.ev("getComputedStyle(document.getElementById('nova-link')).backgroundColor")=='rgb(122, 63, 176)')
         proibidos = ('uv' + 'informatica', 'Cachoeir' + 'inha', '@' + 'uv', '(5' + '1)', '+5' + '5')
         achados = [(f.name, t) for f in (AQUI.parent / 'recuperacao' / 'painel').glob('*') for t in proibidos if t in f.read_text(encoding='utf-8')]
         achados += [(f.name, t) for f in (AQUI / 'testar_painel.py', AQUI / 'painel_falso.py') for t in proibidos if t in f.read_text(encoding='utf-8')]

@@ -26,7 +26,7 @@
   let carregou = false;
   let erroLista = '';
   let abertoId = null;
-  let nova = false;
+  let rota = { tela: 'inicio', id: null };
   let detalhe = null;            // { id, eventos }
   let detEstado = 'nada';        // nada | carregando | ok | naoachado | erro
   let detErro = '';
@@ -278,11 +278,21 @@
   }
 
   /* ---------- rotas ---------- */
+  function decodificar(t) {
+    try { return decodeURIComponent(t); } catch (e) { return t; }
+  }
   function lerRota() {
     const m = location.pathname.match(/^\/jobs\/([^/]+)\/?$/);
-    let id = null;
-    if (m) { try { id = decodeURIComponent(m[1]); } catch (e) { id = m[1]; } }
-    return { id, nova: !id && location.hash === '#nova' };
+    if (m) return { tela: 'job', id: decodificar(m[1]) };
+    const h = location.hash.replace(/^#/, '');
+    if (h === 'lista') return { tela: 'lista', id: null };
+    if (h === 'avancado' || h === 'nova') return { tela: 'avancado', id: null };
+    const seg = h.split('/').map(decodificar);
+    if ((seg[0] === 'volume' || seg[0] === 'disco') && seg[1]) {
+      const tela = seg[2] === 'recuperar' ? 'buscar' : seg[2] === 'imagem' ? 'imagem' : 'alvo';
+      return { tela, id: null, alvoTipo: seg[0], alvoId: seg[1], passo: seg[3] === 'confirmar' ? 3 : 2 };
+    }
+    return { tela: 'inicio', id: null };
   }
   function ir(url) {
     history.pushState(null, '', url);
@@ -290,7 +300,7 @@
   }
   function aplicarRota() {
     const r = lerRota();
-    nova = r.nova;
+    rota = r;
     if (r.id !== abertoId) {
       abertoId = r.id;
       confirmando = false;
@@ -306,6 +316,7 @@
         return;
       }
     }
+    if (r.tela === 'inicio' && fontesEstado === 'ok' && Date.now() - fontesQuando > 5000) carregarFontes();
     render();
   }
 
@@ -321,11 +332,13 @@
     desenharTopo();
     desenharLista();
     desenharPagina();
+    desenharInicio();
+    desenharFluxo();
     atualizarAvisoDeSaida();
   }
 
   function desenharTopo() {
-    document.body.dataset.tela = abertoId ? 'job' : nova ? 'nova' : 'lista';
+    document.body.dataset.tela = rota.tela === 'lista' ? 'lista' : rota.tela === 'job' ? 'job' : 'inicio';
     const c = $('conexao');
     c.dataset.modo = modo;
     $('conexao-texto').textContent = MODOS[modo];
@@ -403,7 +416,12 @@
   }
 
   function desenharPagina() {
-    $('v-nova').hidden = !!abertoId;
+    const vt = rota.tela === 'lista' ? 'inicio' : rota.tela;
+    $('v-inicio').hidden = vt !== 'inicio';
+    $('v-volume').hidden = vt !== 'alvo';
+    $('v-buscar').hidden = vt !== 'buscar';
+    $('v-imagem').hidden = vt !== 'imagem';
+    $('v-nova').hidden = vt !== 'avancado';
     $('v-job').hidden = !abertoId;
     if (!abertoId) return;
     const j = jobs.get(abertoId);
@@ -502,6 +520,426 @@
     else if (!rodando && avisandoSaida) { window.removeEventListener('beforeunload', aoSair); avisandoSaida = false; }
   }
 
+  /* ---------- discos: o que aparece em "Meu computador" ---------- */
+  const NS = 'http://www.w3.org/2000/svg';
+  const ICONES = {
+    hd: ['M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1z', 'M3 14h18', 'M7 16h.01'],
+    ssd: ['M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z', 'M8 9h8v6H8z', 'M6 12h2M16 12h2'],
+    usb: ['M9 2.5h6V8H9z', 'M7 8h10v13.5H7z', 'M12 12v5'],
+    cartao: ['M7 2h8l4 4v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z', 'M9 6v3M12 6v3M15 6v3'],
+    optico: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'],
+    disquete: ['M5 3h12l3 3v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z', 'M8 3v5h7V3', 'M8 21v-7h8v7'],
+  };
+  const TIPO_NOME = { hd: 'Disco rígido (HD)', ssd: 'SSD', usb: 'Pen drive', cartao: 'Cartão de memória', optico: 'CD/DVD', disquete: 'Disquete' };
+  const TIPO_TITULO = { hd: 'Disco local', ssd: 'Disco local', usb: 'Pen drive', cartao: 'Cartão de memória', optico: 'CD/DVD', disquete: 'Disquete' };
+  const SEM_MIDIA = { cartao: 'Sem cartão', usb: 'Sem cartão', optico: 'Sem disco', disquete: 'Sem disquete' };
+  const ADMIN_OBJETO = { cartao: 'o cartão', usb: 'o pen drive' };
+
+  function el(tag, cls, texto) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (texto != null) e.textContent = texto;
+    return e;
+  }
+  function icone(tipo) {
+    const s = document.createElementNS(NS, 'svg');
+    s.setAttribute('viewBox', '0 0 24 24');
+    s.setAttribute('aria-hidden', 'true');
+    for (const d of ICONES[tipo] || ICONES.hd) {
+      const p = document.createElementNS(NS, 'path');
+      p.setAttribute('d', d);
+      s.append(p);
+    }
+    return s;
+  }
+  const tipoDe = (f) => (ICONES[f.tipo] ? f.tipo : 'hd');
+  const textoDe = (v) => String(v == null ? '' : v);
+
+  function montarAlvos(lista) {
+    const volumes = [], discos = [];
+    for (const f of lista) {
+      if (!f || typeof f !== 'object') continue;
+      const tipo = tipoDe(f);
+      const vols = Array.isArray(f.volumes) ? f.volumes.filter((v) => v && typeof v === 'object') : [];
+      const doSistema = !!f.sistema;
+      const marcado = doSistema ? (vols.find((v) => /^c:?$/i.test(textoDe(v.letra))) || vols[0]) : null;
+      const base = { fonte: f, tipoFonte: tipo, removivel: !!f.removivel };
+      for (const v of vols) {
+        const letra = textoDe(v.letra);
+        const tam = Number(v.tamanho) || 0;
+        const rotulo = textoDe(v.rotulo).trim();
+        const titulo = (rotulo || TIPO_TITULO[tipo]) + (letra ? ' (' + letra + ')' : '');
+        const l = letra.replace(':', '');
+        volumes.push(Object.assign({}, base, {
+          tipo: 'volume', hash: 'volume/' + encodeURIComponent(l), letra, l, titulo, tamanho: tam, livre: Number(v.livre) || 0,
+          fs: textoDe(v.sistema_arquivos), sistema: v === marcado, vazio: tam === 0,
+          caminho: /^[A-Za-z]:$/.test(letra) && tipo !== 'optico' ? '\\\\.\\' + letra : textoDe(f.caminho),
+        }));
+      }
+      if (!vols.length && !(Number(f.tamanho) > 0)) {
+        volumes.push(Object.assign({}, base, { tipo: 'vazio', titulo: textoDe(f.nome) || TIPO_TITULO[tipo], tamanho: 0, livre: 0, fs: '', sistema: false, vazio: true, caminho: textoDe(f.caminho) }));
+      }
+      if (Number(f.tamanho) > 0 && tipo !== 'optico') {
+        const letras = vols.map((v) => textoDe(v.letra)).filter(Boolean);
+        discos.push(Object.assign({}, base, {
+          tipo: 'disco', hash: 'disco/' + encodeURIComponent(textoDe(f.id)), titulo: textoDe(f.nome) || TIPO_TITULO[tipo], tamanho: Number(f.tamanho) || 0, livre: 0,
+          fs: '', sistema: doSistema, vazio: false, caminho: textoDe(f.caminho), letras,
+        }));
+      }
+    }
+    // removíveis com mídia, depois discos fixos, depois leitores vazios; o disco do Windows por último
+    const peso = (a) => (a.sistema ? 3 : a.vazio ? 2 : a.removivel ? 0 : 1);
+    const ordenar = (arr) => arr.map((a, i) => [a, i]).sort((x, y) => peso(x[0]) - peso(y[0]) || x[1] - y[1]).map((x) => x[0]);
+    return { volumes: ordenar(volumes), discos: ordenar(discos) };
+  }
+  function subtitulo(a) {
+    if (a.vazio) return SEM_MIDIA[a.tipoFonte] || 'Sem mídia';
+    const t = TIPO_NOME[a.tipoFonte] || 'Disco';
+    return a.tipo === 'disco' ? t : [t, a.fs].filter(Boolean).join(' · ');
+  }
+  function meta(a) {
+    if (a.vazio) return '';
+    if (a.tipo === 'disco') return bytes(a.tamanho) + ' · ' + (a.letras.length ? a.letras.join(', ') : 'sem letra');
+    if (a.tipoFonte === 'optico') return bytes(a.tamanho);
+    return bytes(a.livre) + ' livres de ' + bytes(a.tamanho);
+  }
+  function cartaoFonte(a, botao) {
+    const c = el(botao ? 'button' : 'div', 'fonte');
+    if (botao) c.type = 'button';
+    if (a.vazio) { c.classList.add('sem-midia'); if (botao) c.disabled = true; }
+    c.dataset.tipo = a.tipoFonte;
+    const ic = el('span', 'fonte-icone');
+    ic.append(icone(a.tipoFonte));
+    const topo = el('span', 'fonte-topo');
+    const nome = el('span', 'fonte-nome', a.titulo);
+    nome.title = a.titulo;
+    topo.append(nome);
+    const sub = el('span', 'fonte-sub', subtitulo(a));
+    c.append(ic, topo, sub);
+    if (!a.vazio && a.tipo === 'volume' && a.tipoFonte !== 'optico' && a.tamanho > 0) {
+      const barra = el('span', 'barra');
+      const cheia = el('span', 'barra-cheia');
+      cheia.style.width = Math.max(0, Math.min(100, Math.round((1 - a.livre / a.tamanho) * 100))) + '%';
+      barra.append(cheia);
+      c.append(barra);
+    }
+    const m = meta(a);
+    if (m) c.append(el('span', 'fonte-meta', m));
+    if (a.sistema) c.append(el('span', 'tag', 'Disco do Windows'));
+    return c;
+  }
+
+  /* ---------- estado dos discos ---------- */
+  let fontes = null;
+  let alvos = { volumes: [], discos: [] };
+  let fontesEstado = 'carregando';       // carregando | ok | erro
+  let fontesErro = '';
+  let fontesVer = 0;
+  let fontesAtualizando = false;
+  let fontesQuando = 0;
+  let seqFontes = 0;
+  let admin = null;                      // true | false | null (o serviço não disse)
+
+  async function carregarFontes() {
+    const meu = ++seqFontes;
+    fontesAtualizando = true;
+    if (!fontes) fontesEstado = 'carregando';
+    render();
+    try {
+      const s = await api('GET', '/api/saude').catch(() => null);
+      admin = s && typeof s.admin === 'boolean' ? s.admin : null;
+      const d = await api('GET', '/api/fontes');
+      if (meu !== seqFontes) return;
+      fontes = Array.isArray(d) ? d : d && Array.isArray(d.fontes) ? d.fontes : [];
+      alvos = montarAlvos(fontes);
+      fontesEstado = 'ok';
+      fontesQuando = Date.now();
+      fontesVer++;
+    } catch (e) {
+      if (meu !== seqFontes) return;
+      if (!fontes) { fontesEstado = 'erro'; fontesErro = e.message; }
+    } finally {
+      if (meu === seqFontes) fontesAtualizando = false;
+    }
+    render();
+  }
+
+  /* ---------- tela inicial ---------- */
+  let inicioVer = -1;
+  function desenharInicio() {
+    const ok = fontesEstado === 'ok';
+    $('i-carregando').hidden = fontesEstado !== 'carregando';
+    $('i-erro').hidden = fontesEstado !== 'erro';
+    $('i-erro-texto').textContent = fontesErro;
+    $('i-vazio').hidden = !(ok && alvos.volumes.length === 0 && alvos.discos.length === 0);
+    $('i-conteudo').hidden = !(ok && (alvos.volumes.length || alvos.discos.length));
+    const bt = $('i-atualizar');
+    bt.disabled = fontesAtualizando;
+    bt.textContent = fontesAtualizando ? 'Atualizando…' : 'Atualizar';
+    $('ver-lista').textContent = jobs.size ? 'Ver recuperações (' + jobs.size + ')' : 'Ver recuperações';
+    if (!ok || inicioVer === fontesVer) return;
+    inicioVer = fontesVer;
+    const g = $('i-volumes'), d = $('i-discos-grade');
+    g.replaceChildren();
+    d.replaceChildren();
+    for (const a of alvos.volumes) g.append(ligar(cartaoFonte(a, true), a));
+    for (const a of alvos.discos) d.append(ligar(cartaoFonte(a, true), a));
+    $('i-sem-volumes').hidden = alvos.volumes.length > 0;
+    if (!alvos.volumes.length && alvos.discos.length) $('i-discos').open = true;
+  }
+  function ligar(c, a) {
+    if (a.hash) c.addEventListener('click', () => ir('/#' + a.hash));
+    return c;
+  }
+
+  /* ---------- avisos por tipo ---------- */
+  function avisosDe(a) {
+    const l = [];
+    const t = a.tipoFonte;
+    if (admin === false && t !== 'optico') {
+      l.push({ tipo: 'aviso', texto: 'Para ler ' + (ADMIN_OBJETO[t] || 'o disco') + ', o programa precisa de permissão de administrador: feche e abra pelo atalho “iniciar-admin.cmd”.' });
+    }
+    if (t === 'optico') l.push({ tipo: 'aviso', texto: 'A leitura de CD/DVD chega numa próxima versão.' });
+    if (t === 'usb' || t === 'ssd') l.push({ tipo: '', texto: 'Neste tipo de disco o sistema pode apagar de vez o que foi excluído (TRIM): quanto antes, melhor.' });
+    if (t === 'cartao') l.push({ tipo: '', texto: 'Pare de usar o cartão até terminar: não tire fotos nem salve nada nele.' });
+    if (t === 'usb') l.push({ tipo: '', texto: 'Pare de usar o pen drive até terminar: não salve nada nele.' });
+    if (a.sistema) l.push({ tipo: '', texto: 'Este é o disco do Windows. Use o computador o mínimo possível até terminar.' });
+    return l;
+  }
+  function blocoAvisos(a) {
+    const bloco = el('div', 'avisos');
+    for (const v of avisosDe(a)) {
+      const p = el('p', 'alerta', v.texto);
+      if (v.tipo) p.dataset.tipo = v.tipo;
+      bloco.append(p);
+    }
+    return bloco.children.length ? bloco : null;
+  }
+
+  /* ---------- painel do volume, busca e cópia ---------- */
+  let alvoAtual = null;
+  let fluxoChave = '';
+  const img = { chave: '', destino: null, nome: '', erro: '', enviando: false };
+
+  function acharAlvo(r) {
+    if (!r.alvoTipo || !fontes) return null;
+    const lista = r.alvoTipo === 'disco' ? alvos.discos : alvos.volumes;
+    const h = (r.alvoTipo + '/' + encodeURIComponent(r.alvoId)).toLowerCase();
+    return lista.find((a) => a.hash && a.hash.toLowerCase() === h && !a.vazio) || null;
+  }
+  const botao = (texto, cls, fn) => {
+    const b = el('button', 'btn ' + cls, texto);
+    b.type = 'button';
+    b.addEventListener('click', fn);
+    return b;
+  };
+  const urlAlvo = (a, resto) => '/#' + a.hash + (resto ? '/' + resto : '');
+
+  function desenharFluxo() {
+    const t = rota.tela;
+    if (t !== 'alvo' && t !== 'buscar' && t !== 'imagem') { alvoAtual = null; fluxoChave = ''; return; }
+    alvoAtual = acharAlvo(rota);
+    const corpo = t === 'alvo' ? $('vol-corpo') : t === 'buscar' ? $('buscar-corpo') : $('imagem-corpo');
+    const chave = [t, rota.passo, rota.alvoTipo, rota.alvoId, fontesVer, fontesEstado, admin, img.destino, alvoAtual ? 1 : 0].join('|');
+    if (chave === fluxoChave) return;
+    fluxoChave = chave;
+    corpo.replaceChildren();
+    if (!alvoAtual) {
+      const v = el('div', 'vazio' + (fontesEstado === 'erro' ? ' vazio-erro' : ''));
+      v.append(el('p', null, fontesEstado === 'carregando' ? 'Procurando os discos…' : fontesEstado === 'erro' ? fontesErro : 'Não encontramos mais este disco. Ele pode ter sido removido.'));
+      if (fontesEstado !== 'carregando') v.append(botao('Voltar ao início', 'btn-suave', () => ir('/')));
+      corpo.append(v);
+      return;
+    }
+    if (t === 'alvo') fluxoVolume(corpo, alvoAtual);
+    else if (t === 'buscar') fluxoBuscar(corpo, alvoAtual);
+    else fluxoImagem(corpo, alvoAtual);
+  }
+  function fluxoVolume(corpo, a) {
+    corpo.append(cartaoFonte(a, false));
+    const av = blocoAvisos(a);
+    if (av) corpo.append(av);
+    const ac = el('div', 'acoes');
+    const bloqueado = a.tipoFonte === 'optico';
+    const b1 = botao('Recuperar arquivos', 'btn-primario', () => ir(urlAlvo(a, 'recuperar')));
+    const b2 = botao('Fazer cópia de segurança (imagem)', 'btn-suave', () => ir(urlAlvo(a, 'imagem')));
+    b1.id = 'b-recuperar';
+    b2.id = 'b-imagem';
+    b1.disabled = b2.disabled = bloqueado;
+    ac.append(b1, b2);
+    corpo.append(ac);
+  }
+  function fluxoBuscar(corpo, a) {
+    $('buscar-volta').onclick = () => ir(urlAlvo(a));
+    corpo.append(cartaoFonte(a, false));
+    const c = el('div', 'cartao coluna');
+    c.append(el('p', null, 'A busca de fotos, vídeos e documentos chega na próxima atualização.'));
+    c.append(el('p', 'ajuda', 'Você já pode fazer a cópia de segurança, que é o primeiro passo dela: a busca vai trabalhar na cópia e o original fica protegido.'));
+    const ac = el('div', 'acoes');
+    const b = botao('Fazer cópia de segurança', 'btn-primario', () => ir(urlAlvo(a, 'imagem')));
+    b.id = 'b-buscar-imagem';
+    b.disabled = a.tipoFonte === 'optico';
+    ac.append(b);
+    c.append(ac);
+    corpo.append(c);
+  }
+
+  /* cópia de segurança: 1 origem, 2 onde salvar, 3 confirmar */
+  const hoje = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+  function nomeSugerido(a) {
+    const parte = a.tipo === 'volume' ? a.l : textoDe(a.fonte.id).replace(/[^A-Za-z0-9]/g, '');
+    return 'Recuperacao-' + parte + '-' + hoje() + '.img';
+  }
+  function candidatos(a) {
+    const mesmo = (v) => v.fonte.id === a.fonte.id;
+    const lista = alvos.volumes.filter((v) => v.tipo === 'volume' && !v.vazio && v.tipoFonte !== 'optico' && /^[A-Za-z]:$/.test(v.letra) &&
+      !(a.tipo === 'volume' ? v.hash === a.hash : mesmo(v)));
+    return lista.map((v, i) => [v, i]).sort((x, y) => (mesmo(x[0]) - mesmo(y[0])) || (y[0].livre - x[0].livre) || (x[1] - y[1])).map((x) => x[0]);
+  }
+  function sugerido(a, lista) {
+    return lista.find((v) => v.livre >= a.tamanho && v.fonte.id !== a.fonte.id) || lista.find((v) => v.livre >= a.tamanho) || lista[0] || null;
+  }
+  const NOME_RUIM = /[\\/:*?"<>|]/;
+  function problemaNome(n) {
+    if (!n.trim()) return 'Escreva um nome para o arquivo.';
+    if (NOME_RUIM.test(n)) return 'O nome não pode ter \\ / : * ? " < > |';
+    return '';
+  }
+  function destinoCompleto(d, nome) { return d.letra + '\\' + nome.trim(); }
+
+  function fluxoImagem(corpo, a) {
+    $('imagem-volta').onclick = () => (rota.passo === 3 ? ir(urlAlvo(a, 'imagem')) : ir(urlAlvo(a)));
+    const cand = candidatos(a);
+    const sug = sugerido(a, cand);
+    if (img.chave !== a.hash) {                    // origem nova: recomeça com a sugestão
+      img.chave = a.hash;
+      img.destino = sug ? sug.hash : null;
+      img.nome = nomeSugerido(a);
+      img.erro = '';
+    }
+    let dest = cand.find((v) => v.hash === img.destino) || null;
+    if (!dest) { dest = sug; img.destino = dest ? dest.hash : null; }
+    const passo = rota.passo === 3 && dest && !problemaNome(img.nome) ? 3 : 2;
+
+    const ol = el('ol', 'passos');
+    [['Origem', 1], ['Onde salvar', 2], ['Confirmar', 3]].forEach(([n, i]) => {
+      const li = el('li', i < passo ? 'feito' : i === passo ? 'atual' : '');
+      if (i === passo) li.setAttribute('aria-current', 'step');
+      li.append(el('span', 'passo-num', i < passo ? '✓' : String(i)), el('span', 'passo-nome', n));
+      ol.append(li);
+    });
+    corpo.append(ol);
+    corpo.append(cartaoFonte(a, false));
+
+    const caixa = el('div', 'cartao formulario');
+    corpo.append(caixa);
+
+    if (passo === 2) {
+      caixa.append(el('h2', null, 'Onde salvar?'));
+      if (!cand.length) {
+        caixa.append(el('p', 'alerta alerta-perigo', 'Não há outro disco com letra para guardar a cópia. Conecte um disco externo e toque em Atualizar, ou use “Avançado: digitar caminhos”.'));
+        const ac = el('div', 'acoes');
+        ac.append(botao('Voltar', 'btn-suave', () => ir(urlAlvo(a))));
+        caixa.append(ac);
+        return;
+      }
+      caixa.append(el('p', 'dica', 'Guarde a cópia em outro disco, nunca dentro do que está sendo copiado.'));
+      const grupo = el('div', 'opcoes');
+      grupo.setAttribute('role', 'radiogroup');
+      grupo.setAttribute('aria-label', 'Onde salvar');
+      for (const v of cand) {
+        const lab = el('label', 'opcao');
+        const r = el('input');
+        r.type = 'radio';
+        r.name = 'destino';
+        r.checked = v.hash === img.destino;
+        r.addEventListener('change', () => { img.destino = v.hash; render(); });
+        const txt = el('span', 'opcao-txt');
+        const topo = el('span', 'opcao-topo');
+        const nome = el('span', 'opcao-nome', v.titulo);
+        nome.title = v.titulo;
+        topo.append(nome);
+        if (sug && v.hash === sug.hash) topo.append(el('span', 'tag', 'Sugerido'));
+        const falta = v.livre < a.tamanho;
+        txt.append(topo, el('span', 'fonte-meta' + (falta ? ' falta' : ''), bytes(v.livre) + ' livres' + (falta ? ' · não cabe' : '') + (v.fonte.id === a.fonte.id ? ' · mesmo disco' : '')));
+        lab.append(r, txt);
+        grupo.append(lab);
+      }
+      caixa.append(grupo);
+      const rot = el('label', null, 'Nome do arquivo');
+      rot.htmlFor = 'img-nome';
+      caixa.append(rot);
+      const inp = el('input');
+      inp.type = 'text'; inp.id = 'img-nome'; inp.value = img.nome; inp.autocomplete = 'off'; inp.spellcheck = false;
+      caixa.append(inp);
+      const alerta = el('p', 'alerta alerta-perigo');
+      alerta.id = 'img-aviso';
+      alerta.setAttribute('role', 'alert');
+      caixa.append(alerta);
+      const dl = el('dl', 'dados');
+      const dd = el('dd');
+      dd.id = 'img-caminho';
+      dl.append(el('dt', null, 'A cópia vai ficar em'), dd);
+      caixa.append(dl);
+      const ac = el('div', 'acoes');
+      ac.append(botao('Voltar', 'btn-suave', () => ir(urlAlvo(a))));
+      const seguir = botao('Continuar', 'btn-primario', () => ir(urlAlvo(a, 'imagem/confirmar')));
+      seguir.id = 'img-continuar';
+      ac.append(seguir);
+      caixa.append(ac);
+      const atualizar = () => {
+        img.nome = inp.value;
+        const pn = problemaNome(img.nome);
+        const falta = dest.livre < a.tamanho;
+        const msg = pn || (falta ? 'Não cabe: faltam ' + bytes(a.tamanho - dest.livre) + ' em ' + dest.titulo + '. Escolha outro lugar.' : '');
+        alerta.textContent = msg;
+        alerta.hidden = !msg;
+        dd.textContent = pn ? '—' : destinoCompleto(dest, img.nome);
+        dd.title = dd.textContent;
+        seguir.disabled = !!msg;
+      };
+      inp.addEventListener('input', atualizar);
+      atualizar();
+      return;
+    }
+
+    caixa.append(el('h2', null, 'Confirmar'));
+    const dl = el('dl', 'dados');
+    const linha = (k, v, id) => { const dd = el('dd', null, v); dd.title = v; if (id) dd.id = id; dl.append(el('dt', null, k), dd); };
+    linha('Copiar de', a.titulo);
+    linha('Salvar em', destinoCompleto(dest, img.nome), 'conf-destino');
+    linha('Tamanho da cópia', bytes(a.tamanho));
+    caixa.append(dl);
+    caixa.append(el('p', 'dica', 'O original não será alterado. Depois de iniciar, pode fechar o programa: a cópia continua em segundo plano.'));
+    const erro = el('p', 'alerta alerta-perigo', img.erro);
+    erro.setAttribute('role', 'alert');
+    erro.hidden = !img.erro;
+    erro.id = 'conf-erro';
+    caixa.append(erro);
+    const ac = el('div', 'acoes');
+    ac.append(botao('Voltar', 'btn-suave', () => ir(urlAlvo(a, 'imagem'))));
+    const ini = botao('Iniciar cópia', 'btn-primario', async () => {
+      if (img.enviando) return;
+      img.enviando = true; img.erro = '';
+      ini.disabled = true; ini.textContent = 'Iniciando…'; erro.hidden = true;
+      try {
+        const j = jobDe(await api('POST', '/api/jobs', { tipo: 'imagem', origem: a.caminho, destino: destinoCompleto(dest, img.nome), opcoes: {} }));
+        aplicarJob(j);
+        img.chave = '';
+        if (j && j.id) ir('/jobs/' + encodeURIComponent(j.id));
+      } catch (e) {
+        img.erro = e.message;
+        erro.textContent = e.message; erro.hidden = false;
+      } finally {
+        img.enviando = false;
+        ini.disabled = false; ini.textContent = 'Iniciar cópia';
+      }
+    });
+    ini.id = 'conf-iniciar';
+    ac.append(ini);
+    caixa.append(ac);
+  }
+
   /* ---------- ações ---------- */
   async function acao(nome) {
     if (ocupado || !abertoId) return;
@@ -533,12 +971,21 @@
   $('j-tentar').addEventListener('click', () => abertoId && carregarDetalhe(abertoId));
   $('lista-tentar').addEventListener('click', () => { carregarLista().catch(() => {}); });
   for (const b of document.querySelectorAll('[data-voltar]')) b.addEventListener('click', () => ir('/'));
+  for (const b of document.querySelectorAll('[data-voltar-lista]')) b.addEventListener('click', () => ir('/#lista'));
+  $('i-atualizar').addEventListener('click', () => carregarFontes());
+  $('i-tentar').addEventListener('click', () => carregarFontes());
+  for (const a of [$('avancado-link'), $('ver-lista')]) {
+    a.addEventListener('click', (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+      e.preventDefault();
+      ir(a.getAttribute('href'));
+    });
+  }
   for (const a of document.querySelectorAll('[data-inicio]')) a.addEventListener('click', (e) => { e.preventDefault(); ir('/'); });
   $('nova-link').addEventListener('click', (e) => {
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
     e.preventDefault();
-    ir('/#nova');
-    if (document.body.dataset.tela === 'nova' || innerWidth > 760) $('f-origem').focus();
+    ir('/');
   });
   window.addEventListener('popstate', aplicarRota);
 
@@ -648,7 +1095,11 @@
   aplicarRota();
   carregarLista().catch(() => {});
   carregarMarca();
+  carregarFontes();
   conectar();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && fontesEstado === 'ok' && Date.now() - fontesQuando > 5000) carregarFontes();
+  });
   window.__painel = { // só para leitura nos testes de tela
     estado: () => ({ modo, falhas, emConsulta, abertoId, detEstado, avisandoSaida, jobs: jobs.size }),
   };

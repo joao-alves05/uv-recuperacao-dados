@@ -34,8 +34,8 @@ body{margin:0;font-family:var(--font);background:var(--bg);color:var(--ink);font
 h1{font-size:20px;line-height:28px;font-weight:650;margin:0;letter-spacing:-.01em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 h2{font-size:14px;line-height:20px;font-weight:650;margin:0}
 p{margin:0}
-dl,dd,ul{margin:0;padding:0}
-ul{list-style:none}
+dl,dd,ul,ol{margin:0;padding:0}
+ul,ol{list-style:none}
 svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
 [hidden]{display:none !important}
 a{color:inherit}
@@ -55,6 +55,7 @@ a{color:inherit}
 .topo-fim{margin-left:auto;display:flex;align-items:center;gap:16px;min-width:0}
 .selo{display:flex;align-items:center;gap:8px;font-size:12px;color:#8fe3d6;background:rgba(15,156,140,.14);border:1px solid rgba(15,156,140,.28);padding:4px 12px;border-radius:999px;white-space:nowrap}
 .selo svg{width:14px;height:14px}
+.selo{cursor:help}
 .conexao{display:flex;align-items:center;gap:8px;font-size:12px;color:#c9d6e8;white-space:nowrap}
 .ponto{width:8px;height:8px;border-radius:50%;background:#8fa3bd;flex:none}
 .conexao[data-modo=ao_vivo] .ponto{background:#3ddc97}
@@ -165,12 +166,60 @@ body.arrastando-lista{cursor:col-resize;user-select:none}
 .formulario{display:flex;flex-direction:column;gap:8px}
 .formulario label{font-size:12px;line-height:16px;font-weight:600;color:var(--ink-soft);margin-top:8px}
 .formulario label:first-child{margin-top:0}
-.formulario input{font:inherit;height:var(--h-botao);padding:0 12px;border:1px solid var(--line);border-radius:var(--radius-p);background:var(--bg);color:var(--ink);width:100%;min-width:0}
-.formulario input:hover{border-color:var(--line-forte)}
-.formulario input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}
-.formulario input:disabled{opacity:.5}
+.formulario input:not([type=radio]){font:inherit;height:var(--h-botao);padding:0 12px;border:1px solid var(--line);border-radius:var(--radius-p);background:var(--bg);color:var(--ink);width:100%;min-width:0}
+.formulario input:not([type=radio]):hover{border-color:var(--line-forte)}
+.formulario input:not([type=radio]):focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}
+.formulario input:not([type=radio]):disabled{opacity:.5}
+.formulario .dados{border:0;padding:0;background:none}
 .dica{font-size:12px;line-height:16px;color:var(--muted)}
 .formulario .acoes{margin-top:8px}
+
+/* ---------- escolha do disco ---------- */
+.cab-inicio{justify-content:space-between;flex-wrap:wrap}
+.cab-inicio h1{white-space:normal;overflow:visible}
+.coluna{display:flex;flex-direction:column;gap:16px}
+.cartao.coluna{gap:12px}
+.volta{align-self:flex-start;margin-left:-12px}
+.fontes{display:grid;grid-template-columns:repeat(auto-fill,minmax(264px,1fr));gap:16px}
+.fonte{font:inherit;color:inherit;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);
+  display:grid;grid-template-columns:40px minmax(0,1fr);column-gap:12px;row-gap:4px;align-content:start;min-width:0;transition:border-color .13s,background .13s}
+button.fonte{cursor:pointer}
+button.fonte:not(:disabled):hover{border-color:var(--primary);background:var(--primary-soft)}
+button.fonte:not(:disabled):active{filter:brightness(.96)}
+.fonte.sem-midia{opacity:.55;border-style:dashed;box-shadow:none;cursor:not-allowed}
+.fonte-icone{grid-row:1 / span 4;width:40px;height:40px;border-radius:var(--radius-p);background:var(--primary-soft);color:var(--primary-ink);display:grid;place-items:center}
+.fonte-icone svg{width:24px;height:24px}
+.fonte-topo{display:flex;align-items:center;gap:8px;min-width:0}
+.fonte-nome{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fonte-sub,.fonte-meta{font-size:12px;line-height:16px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.fonte .barra{display:block;margin-top:4px}
+.fonte .barra-cheia{display:block}
+.fonte .tag{grid-column:2;justify-self:start;margin-top:4px}
+.fonte-meta.falta{color:var(--danger-ink);font-weight:600}
+.historico .fontes{padding:8px 0 16px}
+.historico>.dica{margin-top:12px}
+.avisos{display:flex;flex-direction:column;gap:8px}
+.acoes-fim{justify-content:space-between}
+#avancado-link{margin-left:-12px}
+.ver-lista{display:none}
+
+.passos{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;line-height:16px;color:var(--muted)}
+.passos li{display:flex;align-items:center;gap:8px}
+.passo-num{width:24px;height:24px;border-radius:50%;border:1px solid var(--line-forte);display:grid;place-items:center;font-weight:600}
+.passos .atual{color:var(--ink);font-weight:600}
+.passos .atual .passo-num{background:var(--btn);border-color:var(--btn);color:#fff}
+.passos .feito .passo-num{background:var(--primary-soft);border-color:var(--primary-line);color:var(--primary-ink)}
+.opcoes{display:flex;flex-direction:column;gap:8px}
+.opcao{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--line);border-radius:var(--radius-p);cursor:pointer;margin:0;transition:border-color .13s,background .13s}
+.formulario .opcao{margin-top:0;font-size:14px;line-height:20px;font-weight:400;color:var(--ink)}
+.opcao:hover{border-color:var(--line-forte);background:var(--line-soft)}
+.opcao:has(input:checked){border-color:var(--primary);background:var(--primary-soft)}
+.opcao:has(input:focus-visible){outline:2px solid var(--primary);outline-offset:2px}
+.opcao input{width:16px;height:16px;margin:0;accent-color:var(--btn);flex:none}
+.opcao-txt{display:flex;flex-direction:column;min-width:0;flex:1}
+.opcao-topo{display:flex;align-items:center;gap:8px;min-width:0}
+.opcao-nome{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#img-caminho{white-space:normal;overflow-wrap:anywhere}
 
 /* ---------- sem acesso ---------- */
 .sem-acesso{position:fixed;inset:0;background:var(--bg);display:grid;place-items:center;padding:24px;z-index:10}
@@ -180,7 +229,8 @@ body.arrastando-lista{cursor:col-resize;user-select:none}
 /* ---------- telas pequenas: uma coluna ---------- */
 @media (max-width:760px){
   :root{--h-botao:40px}
-  .marca-sub,.selo span{display:none}
+  .marca-sub{display:none}
+  .selo span{display:none}
   .selo{padding:4px 8px}
   #alternar-lista,.alca{display:none}
   .topo{padding:0 12px}
@@ -190,6 +240,8 @@ body.arrastando-lista{cursor:col-resize;user-select:none}
   body:not([data-tela=lista]) .lista{display:none}
   .principal{padding:16px}
   .voltar{display:inline-flex}
+  .ver-lista{display:inline-flex}
+  .fontes{grid-template-columns:minmax(0,1fr)}
   .cartao{padding:16px}
   .numeros{grid-template-columns:repeat(2,minmax(0,1fr))}
   .acoes .btn{flex:1 1 0}

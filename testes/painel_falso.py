@@ -24,6 +24,28 @@ from urllib.parse import parse_qs, urlparse
 PAINEL = Path(__file__).resolve().parent.parent / 'recuperacao' / 'painel'
 TOKEN = 'teste'
 XSS_CAMINHO = 'C:\\Clientes\\<img src=x onerror="window.__xss=1">\\disco.img'
+XSS_ROTULO = '<img src=x onerror="window.__xss=5">Fotos'
+GB = 1024 ** 3
+BARRAS = chr(92) * 2 + '.' + chr(92)      # prefixo de disco do Windows
+
+
+def fontes_falsas(dvd=False):
+    """Como o Windows mostraria: SSD do sistema, HD com duas partições, pen drive, cartão, leitor vazio e DVD vazio."""
+    def vol(letra, rotulo, fs, tam, livre):
+        return {'letra': letra, 'rotulo': rotulo, 'sistema_arquivos': fs, 'tamanho': tam, 'livre': livre}
+    def disco(id_, caminho, nome, tam, tipo, rem, sistema, vols):
+        return {'id': id_, 'caminho': caminho, 'nome': nome, 'tamanho': tam, 'tipo': tipo, 'removivel': rem, 'setor': 512, 'sistema': sistema, 'volumes': vols}
+    return [
+        disco('disco-0', BARRAS + 'PhysicalDrive0', 'Samsung SSD 860 EVO 500GB', 465 * GB, 'ssd', False, True, [vol('C:', '', 'NTFS', 465 * GB, 120 * GB)]),
+        disco('disco-1', BARRAS + 'PhysicalDrive1', 'ST1000DM010-2EP102', 931 * GB, 'hd', False, False,
+              [vol('D:', 'Dados', 'NTFS', 500 * GB, 310 * GB), vol('G:', XSS_ROTULO, 'NTFS', 431 * GB, 400 * GB)]),
+        disco('disco-2', BARRAS + 'PhysicalDrive2', 'Kingston DataTraveler 3.0', int(28.8 * GB), 'usb', True, False, [vol('E:', '', 'FAT32', int(28.8 * GB), int(12.4 * GB))]),
+        disco('disco-3', BARRAS + 'PhysicalDrive3', 'Generic SD Card', 59 * GB, 'cartao', True, False, [vol('F:', '', 'exFAT', 59 * GB, 41 * GB)]),
+        disco('disco-4', BARRAS + 'PhysicalDrive4', 'Leitor de cartões USB', 0, 'usb', True, False, []),
+        disco('optico-0', BARRAS + 'CdRom0', 'HL-DT-ST DVDRAM GH24NSD1', 4 * GB if dvd else 0, 'optico', True, False, [vol('H:', 'FILMES', 'UDF', 4 * GB, 0) if dvd else vol('H:', '', '', 0, 0)]),
+    ]
+
+
 XSS_MSG = '<img src=x onerror="window.__xss=2"> lendo o setor <b>42</b>'
 
 
@@ -67,6 +89,10 @@ class Estado:
         s.sse_abertos = 0
         s.sse_total = 0
         s.contador = 100
+        s.admin = True
+        s.dvd = False
+        s.fontes_vazias = False
+        s.ultimo = None
 
     def lista(s):
         return sorted(s.jobs.values(), key=lambda j: j['criado_em'], reverse=True)
@@ -129,7 +155,7 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         p, q = u.path, parse_qs(u.query)
         if p == '/api/saude':
-            return self._json(200, {'ok': True, 'versao': 'falso', 'pid': 0})
+            return self._json(200, {'ok': True, 'versao': 'falso', 'pid': 0, 'admin': E.admin})
         if p.startswith('/_teste/'):
             return self._teste(p, q)
         if p == '/' or p.startswith('/jobs/'):
@@ -157,6 +183,13 @@ class H(BaseHTTPRequestHandler):
                 return self._json(401, {'erro': 'abra pelo atalho do programa'})
             if p == '/api/marca':
                 return self._json(200, {'app': 'Marca de Teste', 'empresa': 'Empresa de Teste', 'site': '', 'cor': '#7a3fb0'})
+            if p == '/api/fontes':
+                with E.trava:
+                    atraso, quebrado, vazias = E.atraso, E.quebrado, E.fontes_vazias
+                time.sleep(atraso)
+                if quebrado:
+                    return self._json(500, {'erro': 'Não consegui listar os discos.'})
+                return self._json(200, [] if vazias else fontes_falsas(E.dvd))
             if p == '/api/jobs':
                 with E.trava:
                     E.consultas += 1
@@ -193,6 +226,7 @@ class H(BaseHTTPRequestHandler):
                 if o == d:
                     return self._json(400, {'erro': 'O destino não pode ser a própria origem.'})
                 E.contador += 1
+                E.ultimo = {'tipo': corpo.get('tipo'), 'origem': o, 'destino': d}
                 id_ = f'j-20261104-{E.contador:04d}'
                 j = novo(id_, 'rodando', o, 0.0, vel=1024 ** 2, criado_em=agora() + 1)
                 j['destino'] = d
@@ -263,6 +297,14 @@ class H(BaseHTTPRequestHandler):
                 E.quebrado = q.get('on', ['1'])[0] == '1'
             elif p == '/_teste/atraso':
                 E.atraso = float(q.get('s', ['0'])[0])
+            elif p == '/_teste/admin':
+                E.admin = q.get('on', ['1'])[0] == '1'
+            elif p == '/_teste/dvd':
+                E.dvd = q.get('on', ['1'])[0] == '1'
+            elif p == '/_teste/fontes_vazias':
+                E.fontes_vazias = q.get('on', ['1'])[0] == '1'
+            elif p == '/_teste/ultimo':
+                return self._json(200, {'ultimo': E.ultimo})
             elif p == '/_teste/zerar':
                 E.jobs.clear()
                 E.avisar('jobs', [])

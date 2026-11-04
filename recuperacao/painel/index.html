@@ -21,7 +21,7 @@
     </div>
   </div>
   <div class="topo-fim">
-    <span class="selo" title="O original nunca é alterado"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5z"/></svg><span>Somente leitura</span></span>
+    <span class="selo" tabindex="0" title="O programa nunca grava no disco que você quer recuperar. Os arquivos recuperados vão para outro disco."><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5z"/></svg><span>Original protegido</span></span>
     <span class="conexao" id="conexao" data-modo="conectando" role="status" aria-live="polite"><i class="ponto"></i><span id="conexao-texto">Conectando…</span></span>
   </div>
 </header>
@@ -31,7 +31,7 @@
   <aside class="lista" id="lista" aria-label="Recuperações">
     <div class="lista-cab">
       <h2>Recuperações</h2>
-      <a class="btn btn-primario" id="nova-link" href="/#nova">Nova imagem</a>
+      <a class="btn btn-primario" id="nova-link" href="/">Nova recuperação</a>
     </div>
     <div class="lista-rolagem">
       <p class="vazio" id="lista-carregando">Carregando…</p>
@@ -39,7 +39,7 @@
         <p id="lista-erro-texto"></p>
         <button type="button" class="btn btn-suave" id="lista-tentar">Tentar de novo</button>
       </div>
-      <p class="vazio" id="lista-vazia" hidden>Nenhuma recuperação ainda. Use “Nova imagem” para começar.</p>
+      <p class="vazio" id="lista-vazia" hidden>Nenhuma recuperação ainda. Use “Nova recuperação” para começar.</p>
       <ul class="itens" id="lista-itens"></ul>
     </div>
   </aside>
@@ -48,9 +48,55 @@
 
   <main class="principal" id="principal">
 
-    <section class="pagina" id="v-nova" aria-labelledby="t-nova">
-      <button type="button" class="btn btn-fantasma voltar" data-voltar>‹ Recuperações</button>
-      <h1 id="t-nova">Nova imagem</h1>
+    <section class="pagina" id="v-inicio" aria-labelledby="t-inicio">
+      <div class="cab cab-inicio">
+        <h1 id="t-inicio">Onde estavam os seus arquivos?</h1>
+        <button type="button" class="btn btn-suave" id="i-atualizar">Atualizar</button>
+      </div>
+      <p class="ajuda">Escolha o pen drive, cartão ou disco de onde os arquivos sumiram.</p>
+      <p class="vazio" id="i-carregando">Procurando os discos…</p>
+      <div class="vazio vazio-erro" id="i-erro" hidden>
+        <p id="i-erro-texto"></p>
+        <button type="button" class="btn btn-suave" id="i-tentar">Tentar de novo</button>
+      </div>
+      <p class="vazio" id="i-vazio" hidden>Não encontramos nenhum disco. Conecte o pen drive ou o cartão e toque em Atualizar.</p>
+      <div id="i-conteudo" hidden>
+        <p class="dica" id="i-sem-volumes" hidden>Nenhum disco com letra apareceu. Veja “Discos inteiros” logo abaixo.</p>
+        <div class="fontes" id="i-volumes"></div>
+        <details class="historico" id="i-discos">
+          <summary>Discos inteiros (avançado)</summary>
+          <p class="dica">Use para uma partição perdida ou um disco que não aparece com letra.</p>
+          <div class="fontes" id="i-discos-grade"></div>
+        </details>
+      </div>
+      <div class="acoes acoes-fim">
+        <a class="btn btn-fantasma" href="/#avancado" id="avancado-link">Avançado: digitar caminhos</a>
+        <a class="btn btn-fantasma ver-lista" href="/#lista" id="ver-lista">Ver recuperações</a>
+      </div>
+    </section>
+
+    <section class="pagina" id="v-volume" aria-labelledby="t-volume" hidden>
+      <button type="button" class="btn btn-fantasma volta" data-voltar>‹ Início</button>
+      <h1 id="t-volume">O que você quer fazer?</h1>
+      <div id="vol-corpo" class="coluna"></div>
+    </section>
+
+    <section class="pagina" id="v-buscar" aria-labelledby="t-buscar" hidden>
+      <button type="button" class="btn btn-fantasma volta" id="buscar-volta">‹ Voltar</button>
+      <h1 id="t-buscar">Recuperar arquivos</h1>
+      <div id="buscar-corpo" class="coluna"></div>
+    </section>
+
+    <section class="pagina" id="v-imagem" aria-labelledby="t-imagem" hidden>
+      <button type="button" class="btn btn-fantasma volta" id="imagem-volta">‹ Voltar</button>
+      <h1 id="t-imagem">Cópia de segurança (imagem)</h1>
+      <p class="ajuda">Cria uma cópia exata do disco em um arquivo. Depois você trabalha na cópia, sem arriscar o original.</p>
+      <div id="imagem-corpo" class="coluna"></div>
+    </section>
+
+    <section class="pagina" id="v-nova" aria-labelledby="t-nova" hidden>
+      <button type="button" class="btn btn-fantasma volta" data-voltar>‹ Início</button>
+      <h1 id="t-nova">Avançado: digitar caminhos</h1>
       <p class="ajuda">Cria uma cópia exata de um arquivo ou disco. O original nunca é alterado.</p>
       <form class="cartao formulario" id="f-nova" novalidate>
         <label for="f-origem">O que copiar</label>
@@ -66,7 +112,7 @@
     </section>
 
     <section class="pagina" id="v-job" aria-labelledby="j-nome" hidden>
-      <button type="button" class="btn btn-fantasma voltar" data-voltar>‹ Recuperações</button>
+      <button type="button" class="btn btn-fantasma voltar" data-voltar-lista>‹ Recuperações</button>
       <div class="cab">
         <h1 id="j-nome"></h1>
         <span class="tag" id="j-tag"></span>
