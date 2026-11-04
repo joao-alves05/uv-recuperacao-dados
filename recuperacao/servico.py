@@ -24,7 +24,7 @@ from urllib.parse import urlencode
 from flask import Flask, Response, abort, jsonify, make_response, redirect, request, send_from_directory
 from werkzeug.serving import ThreadedWSGIServer
 
-from . import config
+from . import config, fontes
 from .executor import ErroAcao, Executor
 from .jobs import DestinoEmUso, JobStore
 from .tipos import imagem
@@ -60,12 +60,13 @@ class ServidorExclusivo(ThreadedWSGIServer):
 class Contexto:
     """Tudo o que o serviço tem de vivo: banco, executor, token. O app Flask só guarda uma referência."""
 
-    def __init__(self):
+    def __init__(self, provedor_fontes=None):
         config.garantir_pastas()
         self.porta = config.porta()
         self.token = config.obter_token()
         self.store = JobStore(config.caminho_db())
         self.executor = Executor(self.store, TIPOS)
+        self.provedor_fontes = provedor_fontes          # injetável nos testes; None = discos de verdade (só metadados)
         self.parar = threading.Event()
         self.servidor = None
         self.relogio = time.monotonic          # os testes trocam por um relógio falso
@@ -217,6 +218,10 @@ def criar_app(ctx=None):
         if not token_valido(request.headers.get('X-RecDados-Token')):
             return _erro('abra pelo atalho do programa', 401)       # o cookie de sessão não gera ticket
         return jsonify({'ticket': ctx.criar_ticket(), 'expira_em': TICKET_S})
+
+    @app.get('/api/fontes')
+    def listar_fontes():
+        return jsonify(fontes.listar(ctx.provedor_fontes))
 
     @app.get('/api/marca')
     def marca():
