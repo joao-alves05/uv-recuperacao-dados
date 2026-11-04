@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+# imagens e mapas gerados em teste ou em uso real nunca sobem
+*.img
+*.dd
+*.E01
+*.mapa.json
+dados/
+logs/
+# a tela do app antigo fica so como referencia local
+referencia-antiga/
