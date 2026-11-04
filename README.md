@@ -1,8 +1,10 @@
 # UV Recuperação de Dados
 
-Ferramenta de recuperação de dados da [UV Informática](https://uvinformatica.com.br), assistência técnica de Cachoeirinha/RS com 19 anos de mercado.
+Ferramenta de recuperação de dados para pen drives, cartões, HDs, SSDs e mídias ópticas.
 
-Feita por **João Vitor Medeiros Alves** ([@joao-alves05](https://github.com/joao-alves05)) em parceria com **Fabio**, da UV Informática, que criou a primeira versão do app e traz a experiência de bancada com recuperação de pen drives, cartões, HDs e mídias ópticas.
+Feita por **João Vitor Medeiros Alves** ([@joao-alves05](https://github.com/joao-alves05)) em parceria com **Fabio**, da UV Informática, que criou a primeira versão do app e traz a experiência de bancada em recuperação.
+
+Nome, empresa, contato e cores do app vêm de configuração: nenhum dado de empresa fica no código.
 
 > **Status:** em desenvolvimento. Esta é a reconstrução completa da primeira versão, com uma arquitetura nova.
 
