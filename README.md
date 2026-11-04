@@ -8,14 +8,23 @@ Nome, empresa, contato e cores do app vêm de configuração: nenhum dado de emp
 
 > **Status:** em desenvolvimento. Esta é a reconstrução completa da primeira versão, com uma arquitetura nova. **Fase 1 pronta:** serviço local, jobs persistentes e painel que se reconecta. Ainda não lê disco real nem recupera arquivos: isso começa na fase 2.
 
-## Como rodar
+## Como baixar e rodar (Windows)
 
-Requisitos: Python 3.11+ e Flask 3.
+1. **Instale o Python** 3.11 ou mais novo em [python.org/downloads](https://www.python.org/downloads/). Na primeira tela do instalador, marque **"Add python.exe to PATH"**.
+2. **Baixe o programa:** nesta página, clique no botão verde **Code** e depois em **Download ZIP**. Extraia o ZIP numa pasta, por exemplo `Documentos\uv-recuperacao-dados`.
+   - Quem usa git pode clonar: `git clone https://github.com/joao-alves05/uv-recuperacao-dados.git`
+3. **Abra o terminal na pasta:** abra a pasta extraída, clique na barra de endereço do Explorador, digite `cmd` e aperte Enter.
+4. **Instale o Flask** (só na primeira vez):
+   ```
+   pip install flask
+   ```
+5. **Inicie:**
+   ```
+   python iniciar.py
+   ```
+   O painel abre no navegador. Pode fechar a aba quando quiser: o trabalho continua, e `python iniciar.py` abre o painel de novo.
 
-```
-pip install flask
-python iniciar.py
-```
+No Linux é igual, com `python3` e `pip3`.
 
 O `iniciar.py` sobe o serviço, se ele ainda não estiver no ar, e abre o painel no navegador. Testes: `python -m unittest discover -s testes`. O teste de tela usa o Edge: `python testes/testar_painel.py`. Detalhes técnicos em [docs/TECNICO.md](docs/TECNICO.md) e o contrato da API em [docs/FASE1.md](docs/FASE1.md).
 
