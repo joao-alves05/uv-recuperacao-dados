@@ -48,7 +48,8 @@ Só usam arquivos temporários, porta livre e pasta de dados temporária; nunca 
 - O mapfile fica ao lado da imagem (`<destino>.mapa.json`), não na pasta de dados.
 - Não há autenticação além do token local: quem lê a pasta de dados do usuário lê o token.
 - Só arquivos locais: caminhos de rede, `\.\`, `\?\` e nomes de dispositivo do Windows (NUL, CON, COM1...) são recusados; disco bruto entra na fase 2.
-- Fica para a fase 2: bisseção de setor dentro do bloco ruim (hoje o bloco inteiro vira `ruim`) e o caso de queda do serviço antes de o primeiro mapa ser gravado (destino sem mapa: o job falha em vez de sobrescrever, e o usuário escolhe outro nome).
+- Fica para a fase 2: bisseção de setor dentro do bloco ruim (hoje o bloco inteiro vira `ruim`).
+- Queda antes do primeiro mapa: o mapa (com marca de dono e `etapa: criando`) é gravado antes da imagem; se o serviço cair, a retomada recria a imagem ou usa a vazia que ele mesmo tinha criado. Destino que já existe sem mapa nosso nunca é tocado; se a queda ocorrer depois de a imagem receber o tamanho e antes do mapa final, o job recusa seguir (não dá para provar que o arquivo é nosso) e o usuário escolhe outro nome.
 
 ## Acesso e segurança
 

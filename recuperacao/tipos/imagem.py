@@ -25,6 +25,7 @@ TENTATIVAS = 2
 SETOR = 512
 BLOCO_HASH = 4 * 1024 * 1024
 ESTADOS_FAIXA = ('ok', 'ruim', 'pendente')
+DONO = 'recdados'            # marca no mapa: este programa criou esta recuperação
 MODO_PRIVADO = 0o600          # imagem e mapa só do dono (no Windows o arquivo herda as permissões da pasta)
 NOMES_RESERVADOS = frozenset(['CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$']
                              + ['COM%d' % i for i in range(1, 10)] + ['LPT%d' % i for i in range(1, 10)])
@@ -165,11 +166,11 @@ def primeira_pendente(faixas):
     return None
 
 
-def salvar_mapa(caminho, faixas, origem=None, tamanho=None):
+def salvar_mapa(caminho, faixas, origem=None, tamanho=None, etapa='pronto'):
     """Grava o mapa de forma atômica. O temporário tem nome aleatório e é criado com O_EXCL: nunca sobrescreve
     um arquivo que já exista e não seja nosso."""
     tmp = '%s.%s.tmp' % (caminho, secrets.token_hex(4))
-    conteudo = {'versao': 1, 'origem': origem, 'tamanho': tamanho, 'faixas': faixas}
+    conteudo = {'versao': 1, 'dono': DONO, 'etapa': etapa, 'origem': origem, 'tamanho': tamanho, 'faixas': faixas}
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, MODO_PRIVADO)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -185,7 +186,7 @@ def salvar_mapa(caminho, faixas, origem=None, tamanho=None):
         raise
 
 
-def carregar_mapa(caminho, tamanho, origem=None):
+def carregar_mapa(caminho, tamanho, origem=None, completo=False):
     """Lê e confere o mapa. Se `origem` vier, tem de ser a mesma da primeira vez (senão: ErroJob, sem tocar em nada)."""
     try:
         with open(caminho, 'r', encoding='utf-8') as f:
@@ -195,6 +196,8 @@ def carregar_mapa(caminho, tamanho, origem=None):
     if not isinstance(conteudo, dict):
         raise ErroJob('O mapa desta imagem está danificado.')
     faixas = conteudo.get('faixas')
+    if conteudo.get('dono') != DONO:
+        raise ErroJob('Este mapa não foi criado por este programa. Por segurança, nada foi alterado.')
     if origem is not None and conteudo.get('origem') != origem:
         raise ErroJob('Esta imagem foi começada com outra origem. Por segurança, nada foi alterado.')
     if conteudo.get('tamanho') != tamanho:
@@ -209,6 +212,8 @@ def carregar_mapa(caminho, tamanho, origem=None):
         pos = f[1]
     if not ok or pos != tamanho:
         raise ErroJob('O mapa desta imagem não confere com a origem (o arquivo mudou de tamanho ou o mapa está danificado).')
+    if completo:
+        return faixas, conteudo.get('etapa', 'pronto')
     return faixas
 
 
@@ -241,15 +246,32 @@ def _sha256(aberto, ctrl):
         pos += len(b)
 
 
+def _criar_destino(destino, mapa, tamanho, remover_mapa):
+    """Cria a imagem (O_EXCL: nunca toca em arquivo que já exista) e dá o tamanho. Se um arquivo alheio apareceu
+    no lugar, apaga o mapa que acabamos de criar (senão ele faria o arquivo alheio parecer nosso)."""
+    try:
+        fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, MODO_PRIVADO)
+    except FileExistsError:
+        if remover_mapa:
+            try:
+                os.remove(mapa)
+            except OSError:
+                pass
+        raise ErroJob('Apareceu um arquivo no destino enquanto a imagem era preparada. '
+                      'Por segurança, nada foi sobrescrito. Escolha outro nome.') from None
+    os.ftruncate(fd, tamanho)
+    return fd
+
+
 def executar(job, ctrl):
     origem, destino = job['origem'], job['destino']
     bloco = bloco_de(job.get('opcoes'))
     mapa = caminho_mapa(destino)
     tem_dest, tem_mapa = os.path.exists(destino), os.path.exists(mapa)
-    if tem_dest != tem_mapa:
-        raise ErroJob('O destino e o mapa desta imagem não estão juntos (falta um dos dois). '
-                      'Por segurança, nada foi sobrescrito.')
-    retomada = tem_dest
+    if tem_dest and not tem_mapa:
+        raise ErroJob('Já existe um arquivo no destino que não é de uma recuperação deste programa. '
+                      'Por segurança, nada foi sobrescrito. Escolha outro nome.')
+    retomada = tem_mapa                         # mapa sem destino = queda antes de criar a imagem (ver abaixo)
     erro = validar(origem, destino, job.get('opcoes'), retomada=retomada)
     if erro:
         raise ErroJob(erro)
@@ -264,16 +286,34 @@ def executar(job, ctrl):
         tamanho = fd_o.tamanho
         origem_real = _normal(origem)
         if retomada:
-            faixas = carregar_mapa(mapa, tamanho, origem_real)
-            if os.path.getsize(destino) != tamanho:
-                raise ErroJob('A imagem parcial não tem o tamanho esperado. Nada foi alterado.')
-            fd_d = os.open(destino, os.O_WRONLY | O_BINARY)
+            faixas, etapa = carregar_mapa(mapa, tamanho, origem_real, completo=True)
+            if etapa == 'criando':
+                # Caiu antes de a imagem ficar pronta: nada foi copiado. Só aceita destino ausente ou vazio (criado por nós).
+                if not tem_dest:
+                    fd_d = _criar_destino(destino, mapa, tamanho, remover_mapa=False)
+                elif os.path.getsize(destino) == 0:
+                    fd_d = os.open(destino, os.O_WRONLY | O_BINARY)
+                    os.ftruncate(fd_d, tamanho)
+                else:
+                    raise ErroJob('O destino já existe e não dá para confirmar que foi criado por este programa. '
+                                  'Por segurança, nada foi alterado. Escolha outro nome.')
+                os.fsync(fd_d)
+                salvar_mapa(mapa, faixas, origem_real, tamanho)
+                ctrl.evento('Imagem preparada de novo depois de uma queda: %d bytes.' % tamanho)
+            else:
+                if not tem_dest:
+                    raise ErroJob('A imagem desta recuperação não está mais no destino (foi apagada?). '
+                                  'Nada foi recriado, para não perder o que já tinha sido copiado.')
+                if os.path.getsize(destino) != tamanho:
+                    raise ErroJob('A imagem parcial não tem o tamanho esperado. Nada foi alterado.')
+                fd_d = os.open(destino, os.O_WRONLY | O_BINARY)
             ctrl.evento('Retomando: %d bytes já prontos, %d ainda por ler.'
                         % (somar(faixas, 'ok') + somar(faixas, 'ruim'), somar(faixas, 'pendente')))
         else:
             faixas = [[0, tamanho, 'pendente']] if tamanho else []
-            fd_d = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, MODO_PRIVADO)
-            os.ftruncate(fd_d, tamanho)
+            salvar_mapa(mapa, faixas, origem_real, tamanho, etapa='criando')      # o mapa nasce ANTES da imagem
+            fd_d = _criar_destino(destino, mapa, tamanho, remover_mapa=True)
+            os.fsync(fd_d)
             salvar_mapa(mapa, faixas, origem_real, tamanho)
             ctrl.evento('Imagem criada: %d bytes, blocos de %d.' % (tamanho, bloco))
 
