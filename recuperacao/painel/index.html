@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>UV Recuperação de Dados</title>
+<link rel="stylesheet" href="/painel.css">
+</head>
+<body data-tela="lista">
+
+<header class="topo">
+  <button type="button" class="icone" id="alternar-lista" aria-label="Mostrar ou esconder a lista" aria-expanded="true" title="Mostrar ou esconder a lista">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+  </button>
+  <div class="marca">
+    <div class="marca-icone"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5z"/></svg></div>
+    <div>
+      <div class="marca-nome" id="marca-nome">UV Recuperação de Dados</div>
+      <div class="marca-sub" id="marca-sub" hidden></div>
+    </div>
+  </div>
+  <div class="topo-fim">
+    <span class="selo" title="O original nunca é alterado"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5z"/></svg><span>Somente leitura</span></span>
+    <span class="conexao" id="conexao" data-modo="conectando" role="status" aria-live="polite"><i class="ponto"></i><span id="conexao-texto">Conectando…</span></span>
+  </div>
+</header>
+
+<div class="corpo" id="corpo">
+
+  <aside class="lista" id="lista" aria-label="Recuperações">
+    <div class="lista-cab">
+      <h2>Recuperações</h2>
+      <a class="btn btn-primario" id="nova-link" href="/#nova">Nova imagem</a>
+    </div>
+    <div class="lista-rolagem">
+      <p class="vazio" id="lista-carregando">Carregando…</p>
+      <div class="vazio vazio-erro" id="lista-erro" hidden>
+        <p id="lista-erro-texto"></p>
+        <button type="button" class="btn btn-suave" id="lista-tentar">Tentar de novo</button>
+      </div>
+      <p class="vazio" id="lista-vazia" hidden>Nenhuma recuperação ainda. Use “Nova imagem” para começar.</p>
+      <ul class="itens" id="lista-itens"></ul>
+    </div>
+  </aside>
+
+  <div class="alca" id="alca" role="separator" aria-orientation="vertical" aria-label="Largura da lista" tabindex="0" title="Arraste para mudar a largura"></div>
+
+  <main class="principal" id="principal">
+
+    <section class="pagina" id="v-nova" aria-labelledby="t-nova">
+      <button type="button" class="btn btn-fantasma voltar" data-voltar>‹ Recuperações</button>
+      <h1 id="t-nova">Nova imagem</h1>
+      <p class="ajuda">Cria uma cópia exata de um arquivo ou disco. O original nunca é alterado.</p>
+      <form class="cartao formulario" id="f-nova" novalidate>
+        <label for="f-origem">O que copiar</label>
+        <input type="text" id="f-origem" name="origem" autocomplete="off" spellcheck="false" placeholder="C:\Pasta\arquivo.img">
+        <label for="f-destino">Onde guardar a cópia</label>
+        <input type="text" id="f-destino" name="destino" autocomplete="off" spellcheck="false" placeholder="D:\Copias\arquivo-copia.img">
+        <p class="dica">Guarde a cópia em outro disco, nunca dentro do que está sendo copiado.</p>
+        <p class="alerta alerta-perigo" id="f-erro" role="alert" hidden></p>
+        <div class="acoes">
+          <button type="submit" class="btn btn-primario" id="f-enviar">Iniciar</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="pagina" id="v-job" aria-labelledby="j-nome" hidden>
+      <button type="button" class="btn btn-fantasma voltar" data-voltar>‹ Recuperações</button>
+      <div class="cab">
+        <h1 id="j-nome"></h1>
+        <span class="tag" id="j-tag"></span>
+      </div>
+
+      <p class="vazio" id="j-carregando" hidden>Carregando…</p>
+      <div class="vazio" id="j-naoachado" hidden>
+        <p>Não encontramos esta recuperação.</p>
+        <a class="btn btn-suave" href="/" data-inicio>Ver todas</a>
+      </div>
+      <div class="vazio vazio-erro" id="j-erro" hidden>
+        <p id="j-erro-texto"></p>
+        <button type="button" class="btn btn-suave" id="j-tentar">Tentar de novo</button>
+      </div>
+
+      <div id="j-conteudo" hidden>
+        <div class="cartao progresso">
+          <div class="pct-linha">
+            <span class="pct" id="j-pct">0%</span>
+            <span class="fase" id="j-msg"></span>
+          </div>
+          <div class="barra barra-grande" id="j-barra" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-estado="">
+            <div class="barra-cheia" id="j-barra-cheia"></div>
+          </div>
+          <dl class="numeros">
+            <div><dt>Copiado</dt><dd id="j-copiado">—</dd></div>
+            <div><dt>Velocidade</dt><dd id="j-vel">—</dd></div>
+            <div><dt>Tempo restante</dt><dd id="j-resta">—</dd></div>
+            <div><dt>Trechos ilegíveis</dt><dd id="j-ruins">0</dd></div>
+          </dl>
+        </div>
+
+        <div class="alerta" id="j-alerta" hidden></div>
+
+        <div class="acoes" id="j-acoes">
+          <button type="button" class="btn btn-primario" data-acao="retomar">Retomar</button>
+          <button type="button" class="btn btn-suave" data-acao="pausar">Pausar</button>
+          <button type="button" class="btn btn-suave" data-acao="cancelar">Cancelar</button>
+        </div>
+        <div class="confirma" id="j-confirma" hidden>
+          <p>Cancelar esta recuperação? O que já foi copiado continua guardado.</p>
+          <div class="acoes">
+            <button type="button" class="btn btn-perigo" id="j-confirma-sim">Sim, cancelar</button>
+            <button type="button" class="btn btn-suave" id="j-confirma-nao">Não, continuar</button>
+          </div>
+        </div>
+        <p class="alerta alerta-perigo" id="j-acao-erro" role="alert" hidden></p>
+
+        <dl class="dados">
+          <dt>Origem</dt><dd id="j-origem"></dd>
+          <dt>Cópia</dt><dd id="j-destino"></dd>
+        </dl>
+
+        <details class="historico" id="j-hist">
+          <summary>Histórico</summary>
+          <p class="vazio" id="j-hist-vazio">Nada registrado ainda.</p>
+          <ul id="j-eventos"></ul>
+        </details>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div class="sem-acesso" id="sem-acesso" hidden>
+  <div class="cartao">
+    <h1 id="sem-acesso-titulo">Abra pelo atalho UV Recuperação de Dados</h1>
+    <p>Esta página só mostra informações quando aberta pelo atalho do programa.</p>
+  </div>
+</div>
+
+<script src="/painel.js"></script>
+</body>
+</html>

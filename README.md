@@ -6,7 +6,18 @@ Feita por **João Vitor Medeiros Alves** ([@joao-alves05](https://github.com/joa
 
 Nome, empresa, contato e cores do app vêm de configuração: nenhum dado de empresa fica no código.
 
-> **Status:** em desenvolvimento. Esta é a reconstrução completa da primeira versão, com uma arquitetura nova.
+> **Status:** em desenvolvimento. Esta é a reconstrução completa da primeira versão, com uma arquitetura nova. **Fase 1 pronta:** serviço local, jobs persistentes e painel que se reconecta. Ainda não lê disco real nem recupera arquivos: isso começa na fase 2.
+
+## Como rodar
+
+Requisitos: Python 3.11+ e Flask 3.
+
+```
+pip install flask
+python iniciar.py
+```
+
+O `iniciar.py` sobe o serviço, se ele ainda não estiver no ar, e abre o painel no navegador. Testes: `python -m unittest discover -s testes`. O teste de tela usa o Edge: `python testes/testar_painel.py`. Detalhes técnicos em [docs/TECNICO.md](docs/TECNICO.md) e o contrato da API em [docs/FASE1.md](docs/FASE1.md).
 
 ## O princípio que não se negocia
 
