@@ -48,7 +48,7 @@ Só usam arquivos temporários, porta livre e pasta de dados temporária; nunca 
 - O mapfile fica ao lado da imagem (`<destino>.mapa.json`), não na pasta de dados.
 - Não há autenticação além do token local: quem lê a pasta de dados do usuário lê o token.
 - Só arquivos locais: caminhos de rede, `\.\`, `\?\` e nomes de dispositivo do Windows (NUL, CON, COM1...) são recusados; disco bruto entra na fase 2.
-- Fica para a fase 2: bisseção de setor dentro do bloco ruim (hoje o bloco inteiro vira `ruim`).
+- Setor ruim (como no ddrescue): primeira passada em blocos grandes (bloco com erro vira `suspeito`, sem zerar o vizinho; depois de 3 erros seguidos pula áreas cada vez maiores, `pulado`, e volta depois); bisseção só dentro dos blocos suspeitos até o tamanho do setor; segunda passada nos setores ruins, do fim para o começo, com `tentativas` leituras (padrão 1, 0 = não relê). Opções: `tentativas`, `limite_velocidade` (B/s, 0 = sem limite) e `pular` (padrão verdadeiro). A fase em andamento fica no mapa, então pausar, cair e retomar continua de onde parou sem reler o que está `ok`. `GET /api/jobs/<id>/mapa` devolve as faixas resumidas (no máximo 2000) para a barra de setores.
 - Queda antes do primeiro mapa: o mapa (com marca de dono e `etapa: criando`) é gravado antes da imagem; se o serviço cair, a retomada recria a imagem ou usa a vazia que ele mesmo tinha criado. Destino que já existe sem mapa nosso nunca é tocado; se a queda ocorrer depois de a imagem receber o tamanho e antes do mapa final, o job recusa seguir (não dá para provar que o arquivo é nosso) e o usuário escolhe outro nome.
 
 ## Acesso e segurança

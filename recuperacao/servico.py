@@ -266,6 +266,14 @@ def criar_app(ctx=None):
         job = job_ou_404(job_id)
         return jsonify({**job, 'eventos': store.eventos(job_id, 200)})
 
+    @app.get('/api/jobs/<job_id>/mapa')
+    def mapa_do_job(job_id):
+        job = job_ou_404(job_id)
+        resumo = imagem.resumir_mapa(job['destino'])
+        if resumo is None:
+            return _erro('Ainda não há mapa para este trabalho.', 404)
+        return jsonify(resumo)
+
     def acao(nome):
         def rota(job_id):
             job_ou_404(job_id)

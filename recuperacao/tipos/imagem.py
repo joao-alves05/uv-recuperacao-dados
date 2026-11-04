@@ -21,10 +21,15 @@ O_BINARY = getattr(os, 'O_BINARY', 0)
 BLOCO_PADRAO = 1024 * 1024
 BLOCO_MIN = 4096
 BLOCO_MAX = 64 * 1024 * 1024
-TENTATIVAS = 2
+TENTATIVAS_PADRAO = 1          # opção `tentativas`: leituras de cada setor ruim na segunda passada
+MAX_TENTATIVAS = 20
+SEGUIDOS_PARA_PULAR = 3        # blocos com erro em sequência até começar a pular áreas
+TETO_PULO = 1 << 30
 SETOR = 512
+FASES = ('copia', 'retorno', 'bissecao', 'repasse', 'fim')
+MAX_EVENTOS_DE_FAIXA = 50
 BLOCO_HASH = 4 * 1024 * 1024
-ESTADOS_FAIXA = ('ok', 'ruim', 'pendente')
+ESTADOS_FAIXA = ('ok', 'ruim', 'pendente', 'suspeito', 'pulado')     # suspeito = bloco que falhou, a bisseccionar; pulado = área pulada, a voltar
 DONO = 'recdados'            # marca no mapa: este programa criou esta recuperação
 MODO_PRIVADO = 0o600          # imagem e mapa só do dono (no Windows o arquivo herda as permissões da pasta)
 NOMES_RESERVADOS = frozenset(['CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$']
@@ -43,6 +48,12 @@ def _normal(caminho):
 
 def bloco_de(opcoes):
     return (opcoes or {}).get('bloco', BLOCO_PADRAO)
+
+
+def opcoes_de(opcoes):
+    o = opcoes or {}
+    return {'bloco': bloco_de(o), 'tentativas': o.get('tentativas', TENTATIVAS_PADRAO),
+            'limite_velocidade': o.get('limite_velocidade', 0), 'pular': o.get('pular', True)}
 
 
 def caminho_proibido(caminho):
@@ -69,6 +80,14 @@ def validar(origem, destino, opcoes, retomada=False):
     bloco = bloco_de(opcoes)
     if type(bloco) is not int or not BLOCO_MIN <= bloco <= BLOCO_MAX:
         return 'O tamanho do bloco precisa ser um número entre %d e %d bytes.' % (BLOCO_MIN, BLOCO_MAX)
+    o = opcoes_de(opcoes)
+    if type(o['tentativas']) is not int or not 0 <= o['tentativas'] <= MAX_TENTATIVAS:
+        return 'As tentativas precisam ser um número inteiro de 0 a %d.' % MAX_TENTATIVAS
+    if isinstance(o['limite_velocidade'], bool) or not isinstance(o['limite_velocidade'], (int, float)) \
+            or not 0 <= o['limite_velocidade'] <= 1e12:
+        return 'O limite de velocidade precisa ser um número de bytes por segundo (0 = sem limite).'
+    if type(o['pular']) is not bool:
+        return 'A opção "pular" precisa ser verdadeiro ou falso.'
     erro = caminho_proibido(destino)
     if erro:
         return erro
@@ -155,29 +174,100 @@ def somar(faixas, estado):
     return sum(b - a for a, b, e in faixas if e == estado)
 
 
-def setores_ruins(faixas):
-    return sum(-(-(b - a) // SETOR) for a, b, e in faixas if e == 'ruim')
+def setores_ruins(faixas, setor=SETOR):
+    """Setores (não blocos) que falharam: os já confirmados ruins e os suspeitos ainda por bisseccionar."""
+    return sum(-(-(b - a) // setor) for a, b, e in faixas if e in ('ruim', 'suspeito'))
 
 
-def primeira_pendente(faixas):
+def primeira(faixas, estado):
     for a, b, e in faixas:
-        if e == 'pendente':
+        if e == estado:
             return a, b
     return None
 
 
-def salvar_mapa(caminho, faixas, origem=None, tamanho=None, etapa='pronto'):
+def primeira_pendente(faixas):
+    return primeira(faixas, 'pendente')
+
+
+def resumir_mapa(destino, maximo=2000):
+    """Lê o mapa da imagem e devolve as faixas resumidas para o painel desenhar a barra de setores.
+
+    Estados do painel: ok, ruim, pendente (suspeito conta como ruim; pulado, como pendente). Vizinhas do mesmo estado
+    são juntadas; se ainda passar de `maximo`, o arquivo é dividido em `maximo` pedaços iguais e cada pedaço fica com o
+    pior estado que contém (ruim > pendente > ok), então setor ruim nunca some da barra. None se ainda não há mapa."""
+    try:
+        with open(caminho_mapa(destino), 'r', encoding='utf-8') as f:
+            conteudo = json.load(f)
+    except (OSError, ValueError):
+        return None
+    faixas = conteudo.get('faixas') if isinstance(conteudo, dict) else None
+    tamanho = conteudo.get('tamanho') if isinstance(conteudo, dict) else None
+    if not isinstance(faixas, list) or type(tamanho) is not int:
+        return None
+    traducao = {'ok': 'ok', 'ruim': 'ruim', 'suspeito': 'ruim', 'pendente': 'pendente', 'pulado': 'pendente'}
+    simples, totais = [], {'ok': 0, 'ruim': 0, 'pendente': 0}
+    for a, b, e in faixas:
+        e = traducao.get(e, 'pendente')
+        totais[e] += b - a
+        if simples and simples[-1][2] == e:
+            simples[-1][1] = b
+        else:
+            simples.append([a, b, e])
+    resumido = len(simples) > maximo
+    if resumido:
+        passo = -(-tamanho // maximo)
+        peso = {'ok': 0, 'pendente': 1, 'ruim': 2}
+        baldes, i = [], 0
+        for k in range(maximo):
+            ini, fim = k * passo, min(tamanho, (k + 1) * passo)
+            if ini >= fim:
+                break
+            pior = 'ok'
+            while i < len(simples) and simples[i][1] <= ini:
+                i += 1
+            j = i
+            while j < len(simples) and simples[j][0] < fim:
+                if peso[simples[j][2]] > peso[pior]:
+                    pior = simples[j][2]
+                j += 1
+            if baldes and baldes[-1][2] == pior:
+                baldes[-1][1] = fim
+            else:
+                baldes.append([ini, fim, pior])
+        simples = baldes
+    return {'tamanho': tamanho, 'totais': totais, 'resumido': resumido,
+            'faixas': [{'inicio': a, 'fim': b, 'estado': e, 'fracao': (b - a) / tamanho if tamanho else 0.0} for a, b, e in simples]}
+
+
+def fase_do_mapa(caminho):
+    try:
+        with open(caminho, 'r', encoding='utf-8') as f:
+            fase = json.load(f).get('fase', 'copia')
+    except (OSError, ValueError, AttributeError):
+        return 'copia'
+    return fase if fase in FASES else 'copia'
+
+
+def salvar_mapa(caminho, faixas, origem=None, tamanho=None, etapa='pronto', fase='copia'):
     """Grava o mapa de forma atômica. O temporário tem nome aleatório e é criado com O_EXCL: nunca sobrescreve
     um arquivo que já exista e não seja nosso."""
     tmp = '%s.%s.tmp' % (caminho, secrets.token_hex(4))
-    conteudo = {'versao': 1, 'dono': DONO, 'etapa': etapa, 'origem': origem, 'tamanho': tamanho, 'faixas': faixas}
+    conteudo = {'versao': 1, 'dono': DONO, 'etapa': etapa, 'fase': fase, 'origem': origem, 'tamanho': tamanho, 'faixas': faixas}
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, MODO_PRIVADO)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(conteudo, f)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, caminho)
+        for tentativa in range(100):                  # no Windows o painel lendo o mapa pode segurar o arquivo por um instante
+            try:
+                os.replace(tmp, caminho)
+                break
+            except PermissionError:
+                if tentativa == 99:
+                    raise
+                time.sleep(0.02)
     except BaseException:
         try:
             os.remove(tmp)
@@ -317,54 +407,172 @@ def executar(job, ctrl):
             salvar_mapa(mapa, faixas, origem_real, tamanho)
             ctrl.evento('Imagem criada: %d bytes, blocos de %d.' % (tamanho, bloco))
 
-        def salvar():
-            os.fsync(fd_d)                  # os dados vão para o disco antes do mapa que diz que estão prontos
-            salvar_mapa(mapa, faixas, origem_real, tamanho)
-
-        def andamento(texto=None):
-            ctrl.progresso(somar(faixas, 'ok') + somar(faixas, 'ruim'), tamanho, texto, setores_ruins(faixas))
-
+        op = opcoes_de(job.get('opcoes'))
+        tentativas, limite, pular = op['tentativas'], float(op['limite_velocidade']), op['pular']
+        setor = max(1, getattr(fd_o, 'setor', SETOR))
+        est = {'fase': fase_do_mapa(mapa) if retomada else 'copia', 'lidos': 0}
+        t0 = time.monotonic()
+        teto = min(64 * bloco, TETO_PULO)
         atraso = config.atraso_bloco()
         registro = open(config.log_leituras(), 'a', encoding='ascii', buffering=1) if config.log_leituras() else None
-        andamento('Copiando')
-        while True:
-            parar = 'cancelado' if ctrl.cancelamento_pedido() else 'pausado' if ctrl.pausa_pedida() else None
-            if parar:
-                andamento()
-                ctrl.checkpoint(salvar, forcar=True)
-                return parar
-            prox = primeira_pendente(faixas)
-            if prox is None:
-                break
-            ini = prox[0]
-            fim = min(prox[1], ini + bloco)
-            dados = None
-            for tentativa in range(TENTATIVAS):
-                try:
-                    dados = _ler_bloco(fd_o, ini, fim - ini)
-                    if len(dados) != fim - ini:
-                        raise OSError('leitura curta')
-                    break
-                except OSError:
-                    dados = None
-            if registro:
-                registro.write('%d %d\n' % (ini, fim - ini))      # só para os testes provarem o que foi lido
-            if dados is None:
-                _escrever(fd_d, ini, bytes(fim - ini))
-                marcar(faixas, ini, fim, 'ruim')
-                ctrl.evento('Não consegui ler %d bytes a partir da posição %d; marquei como ruim e segui.' % (fim - ini, ini))
-            else:
-                _escrever(fd_d, ini, dados)
-                marcar(faixas, ini, fim, 'ok')
-            andamento()
-            ctrl.checkpoint(salvar, bytes_novos=fim - ini)
+
+        def salvar():
+            os.fsync(fd_d)                  # os dados vão para o disco antes do mapa que diz que estão prontos
+            salvar_mapa(mapa, faixas, origem_real, tamanho, fase=est['fase'])
+
+        def andamento(texto=None):
+            ctrl.progresso(somar(faixas, 'ok') + somar(faixas, 'ruim'), tamanho, texto, setores_ruins(faixas, setor))
+
+        def parar():
+            return 'cancelado' if ctrl.cancelamento_pedido() else 'pausado' if ctrl.pausa_pedida() else None
+
+        def esperar_limite():
+            if limite > 0:
+                while not parar():
+                    falta = est['lidos'] / limite - (time.monotonic() - t0)
+                    if falta <= 0:
+                        break
+                    time.sleep(min(falta, 0.1))
             if atraso:
                 time.sleep(atraso)
+
+        def tentar(ini, fim, vezes=1):
+            """Lê [ini, fim) até `vezes` vezes. Devolve os bytes, ou None se todas falharem."""
+            for _ in range(max(1, vezes)):
+                if registro:
+                    registro.write('%d %d\n' % (ini, fim - ini))      # só para os testes provarem o que foi lido
+                est['lidos'] += fim - ini
+                try:
+                    dados = _ler_bloco(fd_o, ini, fim - ini)
+                    if len(dados) == fim - ini:
+                        return dados
+                except OSError:
+                    pass
+            return None
+
+        def gravar(ini, fim, dados):
+            _escrever(fd_d, ini, dados)
+            marcar(faixas, ini, fim, 'ok')
+
+        def passo(n):
+            andamento()
+            ctrl.checkpoint(salvar, bytes_novos=n)
+            esperar_limite()
+
+        def passada_de_copia(pode_pular):
+            """Blocos grandes, do começo ao fim. Bloco com erro vira `suspeito` (sem zerar nada); depois de erros seguidos
+            pula áreas cada vez maiores (marcadas `pulado`) e volta a elas depois."""
+            seguidos, salto = 0, bloco
+            while True:
+                p = parar()
+                if p:
+                    return p
+                prox = primeira(faixas, 'pendente')
+                if prox is None:
+                    return None
+                ini = prox[0]
+                fim = min(prox[1], ini + bloco)
+                dados = tentar(ini, fim)
+                if dados is not None:
+                    gravar(ini, fim, dados)
+                    seguidos, salto = 0, bloco
+                else:
+                    marcar(faixas, ini, fim, 'suspeito')
+                    seguidos += 1
+                    if pode_pular and seguidos >= SEGUIDOS_PARA_PULAR:
+                        for a, b, e in faixas:
+                            if a == fim and e == 'pendente':
+                                marcar(faixas, fim, min(b, fim + salto), 'pulado')
+                                salto = min(salto * 2, teto)
+                                break
+                passo(fim - ini)
+
+        def passada_de_retorno():
+            for a, b, e in [f for f in faixas if f[2] == 'pulado']:
+                marcar(faixas, a, b, 'pendente')
+            return passada_de_copia(False)
+
+        def passada_de_bisseccao():
+            """Dentro de cada bloco suspeito, lê em metades até o tamanho do setor: só o que falha vira `ruim`.
+            O que ainda não foi resolvido continua `suspeito` no mapa, então pausar, cair e retomar só repete leituras
+            de trecho que falhou, nunca de trecho `ok`."""
+            while True:
+                prox = primeira(faixas, 'suspeito')
+                if prox is None:
+                    return None
+                pilha = [prox]
+                while pilha:
+                    p = parar()
+                    if p:
+                        return p
+                    a, b = pilha.pop()
+                    if b - a <= setor:
+                        # todo trecho da pilha já falhou inteiro: com um setor só, é um setor ruim (sem reler)
+                        _escrever(fd_d, a, bytes(b - a))
+                        marcar(faixas, a, b, 'ruim')
+                    else:
+                        meio = a + max(setor, (b - a) // 2 // setor * setor)
+                        falhou = []
+                        for x, y in ((a, meio), (meio, b)):
+                            dados = tentar(x, y)
+                            if dados is None:
+                                falhou.append((x, y))
+                            else:
+                                gravar(x, y, dados)
+                        pilha.extend(reversed(falhou))            # a metade da frente sai primeiro
+                    passo(b - a)
+
+        def passada_de_repasse():
+            """Segunda passada: os setores ruins, do fim para o começo, com `tentativas` leituras cada um."""
+            recuperados = 0
+            for a, b, e in [f for f in reversed(faixas) if f[2] == 'ruim']:
+                x = a + (b - 1 - a) // setor * setor
+                while x >= a:
+                    p = parar()
+                    if p:
+                        return p
+                    y = min(x + setor, b)
+                    dados = tentar(x, y, tentativas)
+                    if dados is not None:
+                        gravar(x, y, dados)
+                        recuperados += y - x
+                    passo(y - x)
+                    x -= setor
+            if recuperados:
+                ctrl.evento('Ao reler, recuperei %d bytes que tinham falhado.' % recuperados)
+            return None
+
+        def relatar_faixas_ruins():
+            ruins = [(a, b) for a, b, e in faixas if e == 'ruim']
+            for a, b in ruins[:MAX_EVENTOS_DE_FAIXA]:
+                ctrl.evento('Setores ilegíveis: bytes %d a %d (%d setores).' % (a, b, -(-(b - a) // setor)))
+            if len(ruins) > MAX_EVENTOS_DE_FAIXA:
+                ctrl.evento('... e mais %d faixas ilegíveis (veja o mapa).' % (len(ruins) - MAX_EVENTOS_DE_FAIXA))
+
+        passadas = {'copia': ('Copiando', lambda: passada_de_copia(pular)), 'retorno': ('Voltando às áreas puladas', passada_de_retorno),
+                    'bissecao': ('Procurando os setores ruins', passada_de_bisseccao),
+                    'repasse': ('Relendo os setores ruins', passada_de_repasse)}
+        for fase in FASES[FASES.index(est['fase']):-1]:
+            texto, rodar = passadas[fase]
+            if fase == 'repasse' and (tentativas == 0 or not somar(faixas, 'ruim')):
+                resultado = None
+            else:
+                est['fase'] = fase
+                andamento(texto)
+                resultado = rodar()
+            if resultado:
+                andamento()
+                ctrl.checkpoint(salvar, forcar=True)
+                return resultado
+            if fase == 'bissecao':
+                relatar_faixas_ruins()
+            est['fase'] = FASES[FASES.index(fase) + 1]
+            ctrl.checkpoint(salvar, forcar=True)
 
         andamento('Conferindo a cópia')
         ctrl.checkpoint(salvar, forcar=True)
         if somar(faixas, 'ruim'):
-            ctrl.evento('Terminou com %d setores ruins; a conferência por SHA-256 não se aplica.' % setores_ruins(faixas))
+            ctrl.evento('Terminou com %d setores ilegíveis; a conferência por SHA-256 não se aplica.' % setores_ruins(faixas, setor))
             return 'concluido'
         h_origem = _sha256(fd_o, ctrl)
         if h_origem in ('pausado', 'cancelado'):

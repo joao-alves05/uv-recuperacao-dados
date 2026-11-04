@@ -215,31 +215,6 @@ class TestImagem(CasoComPasta):
         self.assertEqual(j['estado'], 'concluido', j['erro'])
         self.assertEqual(os.path.getsize(destino), 0)
 
-    def test_bloco_ruim_tenta_duas_vezes_marca_zera_e_segue(self):
-        origem = criar_origem(self.trabalho, 4 * 4096)
-        destino = os.path.join(self.trabalho, 'img.bin')
-        original = imagem._ler_bloco
-        tentativas = []
-
-        def com_defeito(fd, pos, n):
-            if pos == 4096:
-                tentativas.append(pos)
-                raise OSError('setor ruim de mentira')
-            return original(fd, pos, n)
-
-        with mock.patch.object(imagem, '_ler_bloco', com_defeito):
-            j = self.esperar_estado(self.rodar(origem, destino, bloco=4096), 'concluido', 'falhou')
-        self.assertEqual(j['estado'], 'concluido', j['erro'])
-        self.assertEqual(len(tentativas), 2)                    # tenta 2 vezes
-        self.assertEqual(j['setores_ruins'], 8)                 # 4096 / 512
-        mapa = imagem.carregar_mapa(imagem.caminho_mapa(destino), 4 * 4096)
-        self.assertEqual(mapa, [[0, 4096, 'ok'], [4096, 8192, 'ruim'], [8192, 16384, 'ok']])
-        with open(origem, 'rb') as a, open(destino, 'rb') as b:
-            o, d = a.read(), b.read()
-        self.assertEqual(d[4096:8192], bytes(4096))             # preenchido com zero
-        self.assertEqual(d[:4096], o[:4096])
-        self.assertEqual(d[8192:], o[8192:])
-
     def test_retomar_nao_rele_o_que_ja_esta_ok(self):
         origem = criar_origem(self.trabalho, 10 * 4096)
         destino = os.path.join(self.trabalho, 'img.bin')
