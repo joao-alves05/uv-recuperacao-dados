@@ -13,7 +13,7 @@ import re
 import secrets
 import time
 
-from .. import config, leitor
+from .. import config, leitor, unidade
 from ..executor import ErroJob
 from ..leitor import ErroLeitor
 
@@ -110,6 +110,9 @@ def _validar_destino_de_disco(origem, destino, retomada):
     pasta = os.path.dirname(os.path.abspath(destino))
     if not os.path.isdir(pasta):
         return 'A pasta do destino não existe.'
+    erro = unidade.conferir(origem, destino)          # nunca gravar no disco que está sendo lido
+    if erro:
+        return erro
     if not retomada:
         if os.path.exists(destino):
             return 'Já existe um arquivo no destino. Escolha outro nome para não sobrescrever nada.'

@@ -7,7 +7,7 @@ from unittest import mock
 
 from auxiliar import CasoComPasta, criar_origem, sha256_de
 
-from recuperacao import leitor
+from recuperacao import leitor, unidade
 from recuperacao.executor import ErroJob
 from recuperacao.tipos import imagem
 
@@ -197,6 +197,13 @@ class FalsoCtrl:
 
 
 class TestImagemDeDisco(CasoComPasta):
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(unidade, 'MAPA', type('M', (), {'discos_da_origem': lambda s, o: {'7'},
+                                                              'discos_do_destino': lambda s, d: {'0'}})())
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_validar_aceita_disco_sem_tocar_no_caminho_e_recusa_optico_e_destino_de_disco(self):
         d = os.path.join(self.trabalho, 'img.bin')
         tocados = []

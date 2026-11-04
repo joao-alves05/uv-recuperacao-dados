@@ -20,6 +20,7 @@ ERRO_ARQUIVO_NAO_ENCONTRADO = 2
 ERRO_CAMINHO_NAO_ENCONTRADO = 3
 ERRO_ACESSO_NEGADO = 5
 IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
+IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000
 IOCTL_DISK_GET_DRIVE_GEOMETRY = 0x00070000
 IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0
 BLKSSZGET = 0x1268
@@ -207,6 +208,15 @@ class ApiWindows:
             g = Geometria()
             self._ioctl(h, IOCTL_DISK_GET_DRIVE_GEOMETRY, g)
             return g.BytesPerSector
+
+    def extensoes(self, h):
+        """Números dos discos físicos onde o volume aberto em `h` tem dados (IOCTL só de consulta)."""
+        import struct
+        buf = (self.ct.c_ubyte * (8 + 24 * 32))()
+        self._ioctl(h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, buf)
+        dados = bytes(buf)
+        n = struct.unpack_from('<I', dados, 0)[0]
+        return [struct.unpack_from('<I', dados, 8 + 24 * i)[0] for i in range(min(n, 32))]
 
     def ler(self, h, offset, n):
         if not self.k.SetFilePointerEx(h, offset, None, 0):

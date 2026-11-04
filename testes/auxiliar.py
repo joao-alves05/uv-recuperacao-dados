@@ -20,6 +20,19 @@ if RAIZ not in sys.path:
     sys.path.insert(0, RAIZ)
 
 
+def _proibir_mapa_real():
+    from recuperacao import unidade
+
+    class Proibido:
+        def _nao(self, *a):
+            raise AssertionError('teste consultou o mapeamento de discos de verdade: troque unidade.MAPA por um falso')
+        discos_da_origem = discos_do_destino = _nao
+    unidade.MAPA = Proibido()
+
+
+_proibir_mapa_real()
+
+
 def porta_livre():
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
