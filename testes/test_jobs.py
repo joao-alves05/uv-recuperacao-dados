@@ -10,6 +10,7 @@ import auxiliar
 from auxiliar import CasoComPasta, criar_origem, esperar, sha256_de
 
 from recuperacao import jobs as jobs_mod
+from recuperacao import leitor
 from recuperacao.executor import Executor
 from recuperacao.jobs import DestinoEmUso, JobStore
 from recuperacao.tipos import imagem
@@ -340,8 +341,9 @@ class TestImagem(CasoComPasta):
                      '//./PhysicalDrive0', 'NUL', 'nul.txt', 'CON', 'C:' + barra + 'pasta' + barra + 'aux.img', 'COM1',
                      'lpt9.bin', 'PRN ']
         for p in proibidos:
-            self.assertIsNotNone(imagem.validar(p, d, {}), p)
-            self.assertIsNotNone(imagem.validar(o, p, {}), p)
+            if not leitor.eh_dispositivo(p):          # \.\PhysicalDriveN como ORIGEM passou a valer (parte 2.2)
+                self.assertIsNotNone(imagem.validar(p, d, {}), p)
+            self.assertIsNotNone(imagem.validar(o, p, {}), p)         # como DESTINO, nunca
         self.assertIn('rede', imagem.validar(proibidos[0], d, {}))
         self.assertIn('Disco bruto', imagem.validar(o, proibidos[2], {}))
         self.assertIsNone(imagem.validar(o, os.path.join(self.trabalho, 'console.bin'), {}))     # parecido, mas não é

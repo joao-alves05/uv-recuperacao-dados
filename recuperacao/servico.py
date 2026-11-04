@@ -24,7 +24,7 @@ from urllib.parse import urlencode
 from flask import Flask, Response, abort, jsonify, make_response, redirect, request, send_from_directory
 from werkzeug.serving import ThreadedWSGIServer
 
-from . import config, fontes
+from . import config, fontes, leitor
 from .executor import ErroAcao, Executor
 from .jobs import DestinoEmUso, JobStore
 from .tipos import imagem
@@ -206,7 +206,7 @@ def criar_app(ctx=None):
     # --- API -------------------------------------------------------------
     @app.get('/api/saude')
     def saude():
-        dados = {'ok': True, 'versao': config.VERSAO, 'pid': os.getpid()}
+        dados = {'ok': True, 'versao': config.VERSAO, 'pid': os.getpid(), 'admin': leitor.eh_administrador()}
         desafio = request.args.get('desafio')
         if desafio is not None and 0 < len(desafio) <= 100:
             # prova de identidade: só quem tem o token do arquivo calcula isto; o iniciar confere antes de entregar o token

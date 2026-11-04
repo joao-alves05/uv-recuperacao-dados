@@ -154,8 +154,9 @@ class TestSomenteLeitura(CasoComPasta):
         """A única abertura da origem no código do tipo é com O_RDONLY."""
         import inspect
         fonte = inspect.getsource(imagem.executar)
-        self.assertIn('os.open(origem, os.O_RDONLY | O_BINARY)', fonte)
-        self.assertEqual(fonte.count('os.open(origem'), 1)
+        self.assertIn('leitor.abrir(origem)', fonte)
+        self.assertEqual(fonte.count('os.open(origem'), 0)
+        self.assertEqual(fonte.count('leitor.abrir(origem)'), 1)
 
 
 if __name__ == '__main__':

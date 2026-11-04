@@ -64,6 +64,31 @@ def pedir_ticket(porta, timeout=5.0):
         return json.loads(r.read(4096))['ticket']
 
 
+def servico_admin(porta, timeout=2.0):
+    """O serviço que está no ar roda como administrador? (/api/saude informa; não mostra nada do usuário.)"""
+    try:
+        with urllib.request.urlopen('http://%s:%d/api/saude' % (config.HOST, porta), timeout=timeout) as r:
+            return json.loads(r.read(4096)).get('admin') is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def desligar_servico(porta, espera=20.0):
+    """Pede o encerramento limpo (jobs ficam pausados) e espera a porta liberar."""
+    req = urllib.request.Request('http://%s:%d/api/desligar' % (config.HOST, porta), data=b'{}', method='POST',
+                                 headers={'X-RecDados-Token': config.obter_token(), 'Content-Type': 'application/json'})
+    try:
+        urllib.request.urlopen(req, timeout=5).read()
+    except OSError:
+        return False
+    fim = time.monotonic() + espera
+    while time.monotonic() < fim:
+        if not servico_no_ar(porta, 0.5):
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def pegar_trava(caminho, agora=time.time):
     """Cria o arquivo com O_EXCL. Trava com mais de 10 s é de uma subida que morreu e é refeita."""
     for _ in range(2):
@@ -109,8 +134,15 @@ def esperar_servico(porta, prazo=PRAZO_SUBIDA_S):
 
 
 def principal(no_ar=servico_no_ar, subir=subir_servico, esperar=esperar_servico, abrir=webbrowser.open,
-              trava=None, identidade=identidade_confere, ticket=pedir_ticket):
+              trava=None, identidade=identidade_confere, ticket=pedir_ticket, exigir_admin=False,
+              admin_no_ar=servico_admin, desligar=desligar_servico):
     porta = config.porta()
+    if exigir_admin and no_ar(porta) and identidade(porta) and not admin_no_ar(porta):
+        # o serviço velho roda sem privilégio e não consegue ler o disco inteiro: troca por um elevado (jobs ficam pausados)
+        if not desligar(porta):
+            print('Não consegui trocar o serviço em andamento por um com administrador. Feche-o e tente de novo.',
+                  file=sys.stderr)
+            return 1
     if not no_ar(porta):
         config.garantir_pastas()
         trava = trava or (lambda: pegar_trava(config.caminho_lock()))
@@ -134,4 +166,4 @@ def principal(no_ar=servico_no_ar, subir=subir_servico, esperar=esperar_servico,
 
 
 if __name__ == '__main__':
-    sys.exit(principal())
+    sys.exit(principal(exigir_admin='--admin' in sys.argv[1:]))

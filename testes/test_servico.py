@@ -60,7 +60,8 @@ class TestRotas(Base):
         r = self.req('GET', '/api/saude', headers={})
         self.assertEqual(r.status_code, 200)
         d = r.get_json()
-        self.assertEqual(set(d), {'ok', 'versao', 'pid'})
+        self.assertEqual(set(d), {'ok', 'versao', 'pid', 'admin'})
+        self.assertIsInstance(d['admin'], bool)
         self.assertIs(d['ok'], True)
         self.assertEqual(d['pid'], os.getpid())
 
@@ -136,7 +137,10 @@ class TestRotas(Base):
         origem = criar_origem(self.trabalho, 100)
         barra = chr(92)
         for ruim in (barra * 2 + 'servidor' + barra + 'x' + barra + 'a.bin', barra * 2 + '.' + barra + 'PhysicalDrive0', 'NUL'):
-            for corpo in ({'origem': origem, 'destino': ruim}, {'origem': ruim, 'destino': os.path.join(self.trabalho, 'z')}):
+            corpos = [{'origem': origem, 'destino': ruim}]
+            if 'PhysicalDrive' not in ruim:                  # disco como origem vale desde a 2.2 e abriria o disco de verdade
+                corpos.append({'origem': ruim, 'destino': os.path.join(self.trabalho, 'z')})
+            for corpo in corpos:
                 r = self.req('POST', '/api/jobs', dict(corpo, tipo='imagem'))
                 self.assertEqual(r.status_code, 400, corpo)
 
@@ -439,6 +443,33 @@ class TestIniciar(CasoComPasta):
         codigo, _, abertas, tickets = self._principal(lambda p: True, identidade=lambda p: False)
         self.assertNotEqual(codigo, 0)
         self.assertEqual((abertas, tickets), ([], []))
+
+    def _admin(self, admin_no_ar, desliga_ok=True):
+        estado, chamadas, subidas, abertas = {'no_ar': True}, [], [], []
+
+        def desligar(p):
+            chamadas.append(p)
+            estado['no_ar'] = not desliga_ok
+            return desliga_ok
+
+        with mock.patch.dict(os.environ, {'RECDADOS_DADOS': self.dados, 'RECDADOS_PORTA': '45678'}):
+            codigo = iniciar.principal(no_ar=lambda p: estado['no_ar'], subir=lambda: subidas.append(1) or estado.update(no_ar=True),
+                                       esperar=lambda p: True, abrir=abertas.append, identidade=lambda p: True,
+                                       ticket=lambda p: 'tk', exigir_admin=True, admin_no_ar=lambda p: admin_no_ar,
+                                       desligar=desligar)
+        return codigo, chamadas, subidas, abertas
+
+    def test_admin_troca_o_servico_sem_privilegio_por_um_novo(self):
+        codigo, desligou, subiu, abertas = self._admin(False)
+        self.assertEqual((codigo, len(desligou), len(subiu), len(abertas)), (0, 1, 1, 1))
+
+    def test_admin_mantem_o_servico_que_ja_e_elevado(self):
+        codigo, desligou, subiu, abertas = self._admin(True)
+        self.assertEqual((codigo, desligou, subiu, len(abertas)), (0, [], [], 1))
+
+    def test_admin_que_nao_consegue_trocar_avisa_e_nao_abre(self):
+        codigo, _, _, abertas = self._admin(False, desliga_ok=False)
+        self.assertEqual((codigo, abertas), (1, []))
 
     def test_dois_cliques_seguidos_sobem_uma_copia_so(self):
         with mock.patch.dict(os.environ, {'RECDADOS_DADOS': self.dados, 'RECDADOS_PORTA': '45678'}):

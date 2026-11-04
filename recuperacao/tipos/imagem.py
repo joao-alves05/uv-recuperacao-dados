@@ -13,8 +13,9 @@ import re
 import secrets
 import time
 
-from .. import config
+from .. import config, leitor
 from ..executor import ErroJob
+from ..leitor import ErroLeitor
 
 O_BINARY = getattr(os, 'O_BINARY', 0)
 BLOCO_PADRAO = 1024 * 1024
@@ -34,6 +35,8 @@ def caminho_mapa(destino):
 
 
 def _normal(caminho):
+    if leitor.eh_dispositivo(caminho):
+        return caminho.upper().replace('/', '\\') if caminho.startswith('\\\\') else caminho    # disco: sem realpath (abriria o dispositivo)
     return os.path.normcase(os.path.realpath(caminho))
 
 
@@ -65,12 +68,16 @@ def validar(origem, destino, opcoes, retomada=False):
     bloco = bloco_de(opcoes)
     if type(bloco) is not int or not BLOCO_MIN <= bloco <= BLOCO_MAX:
         return 'O tamanho do bloco precisa ser um número entre %d e %d bytes.' % (BLOCO_MIN, BLOCO_MAX)
-    for c in (origem, destino):
-        erro = caminho_proibido(c)
-        if erro:
-            return erro
+    erro = caminho_proibido(destino)
+    if erro:
+        return erro
+    if leitor.eh_dispositivo(origem):
+        return _validar_destino_de_disco(origem, destino, retomada)
+    erro = caminho_proibido(origem)
+    if erro:
+        return erro
     if not os.path.isfile(origem):
-        return 'A origem não existe ou não é um arquivo. Nesta versão só dá para copiar arquivos.'
+        return 'A origem não existe ou não é um arquivo nem um disco.'
     if _normal(origem) == _normal(destino):
         return 'O destino não pode ser a própria origem.'
     if os.path.exists(destino):
@@ -85,6 +92,21 @@ def validar(origem, destino, opcoes, retomada=False):
             return 'O destino não pode ficar dentro da origem.'
     except ValueError:
         pass                                   # unidades diferentes
+    pasta = os.path.dirname(os.path.abspath(destino))
+    if not os.path.isdir(pasta):
+        return 'A pasta do destino não existe.'
+    if not retomada:
+        if os.path.exists(destino):
+            return 'Já existe um arquivo no destino. Escolha outro nome para não sobrescrever nada.'
+        if os.path.exists(caminho_mapa(destino)):
+            return 'Já existe um mapa de recuperação para esse destino. Escolha outro nome.'
+    return None
+
+
+def _validar_destino_de_disco(origem, destino, retomada):
+    """Origem é disco ou volume: não toca no caminho do disco (nem stat), só confere o destino."""
+    if leitor.eh_optico(origem):
+        return 'A leitura completa de CD/DVD chega numa versão futura. Por enquanto só discos, volumes e arquivos.'
     pasta = os.path.dirname(os.path.abspath(destino))
     if not os.path.isdir(pasta):
         return 'A pasta do destino não existe.'
@@ -188,17 +210,9 @@ def carregar_mapa(caminho, tamanho, origem=None):
 
 
 # --- leitura e escrita ----------------------------------------------------
-def _ler_bloco(fd, pos, n):
-    """Lê n bytes a partir de pos (menos só no fim do arquivo). Ponto único de leitura da origem."""
-    os.lseek(fd, pos, os.SEEK_SET)
-    partes, falta = [], n
-    while falta:
-        b = os.read(fd, falta)
-        if not b:
-            break
-        partes.append(b)
-        falta -= len(b)
-    return b''.join(partes)
+def _ler_bloco(origem_aberta, pos, n):
+    """Lê n bytes a partir de pos (menos só no fim). Ponto único de leitura da origem (arquivo, disco ou volume)."""
+    return origem_aberta.ler(pos, n)
 
 
 def _escrever(fd, pos, dados):
@@ -208,8 +222,8 @@ def _escrever(fd, pos, dados):
         visto = visto[os.write(fd, visto):]
 
 
-def _sha256(fd, ctrl):
-    """SHA-256 do arquivo aberto em fd, ou 'pausado'/'cancelado' se pediram para parar."""
+def _sha256(aberto, ctrl):
+    """SHA-256 do que o leitor lê (do começo ao fim), ou 'pausado'/'cancelado' se pediram para parar."""
     h = hashlib.sha256()
     pos = 0
     while True:
@@ -217,7 +231,7 @@ def _sha256(fd, ctrl):
             return 'cancelado'
         if ctrl.pausa_pedida():
             return 'pausado'
-        b = _ler_bloco(fd, pos, BLOCO_HASH)
+        b = _ler_bloco(aberto, pos, BLOCO_HASH)
         if not b:
             return h.hexdigest()
         h.update(b)
@@ -237,11 +251,14 @@ def executar(job, ctrl):
     if erro:
         raise ErroJob(erro)
 
-    fd_o = os.open(origem, os.O_RDONLY | O_BINARY)          # única abertura da origem para cópia: só leitura
+    try:
+        fd_o = leitor.abrir(origem)                         # única abertura da origem para cópia: só leitura
+    except ErroLeitor as e:
+        raise ErroJob(str(e)) from None
     fd_d = None
     registro = None
     try:
-        tamanho = os.fstat(fd_o).st_size
+        tamanho = fd_o.tamanho
         origem_real = _normal(origem)
         if retomada:
             faixas = carregar_mapa(mapa, tamanho, origem_real)
@@ -310,11 +327,8 @@ def executar(job, ctrl):
         if h_origem in ('pausado', 'cancelado'):
             return h_origem
         os.fsync(fd_d)
-        fd_conf = os.open(destino, os.O_RDONLY | O_BINARY)
-        try:
-            h_destino = _sha256(fd_conf, ctrl)
-        finally:
-            os.close(fd_conf)
+        with leitor.abrir(destino) as conferencia:
+            h_destino = _sha256(conferencia, ctrl)
         if h_destino in ('pausado', 'cancelado'):
             return h_destino
         if h_origem != h_destino:
@@ -324,6 +338,6 @@ def executar(job, ctrl):
     finally:
         if registro:
             registro.close()
-        os.close(fd_o)
+        fd_o.fechar()
         if fd_d is not None:
             os.close(fd_d)
