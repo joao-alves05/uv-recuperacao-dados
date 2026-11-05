@@ -6,19 +6,24 @@ imagem usa `carregar(imagem)` para saber quais faixas não foram lidas e `cortes
 pedaço copiado, quais bytes são zeros de verdade (não lidos). `anotar` grava essas lacunas em `lacunas.csv` no
 destino, para o relatório dizer quais trechos de cada arquivo faltam. Só lê o mapa; escreve só no destino.
 """
+import bisect
 import csv
 import json
 import os
 
 NAO_LIDO = ('ruim', 'suspeito', 'pulado', 'pendente')
 NOME_CSV = 'lacunas.csv'
+MAX_MAPA = 64 * 1024 * 1024          # teto do .mapa.json lido: arquivo maior que isso não é um mapa nosso
 
 
 def carregar(imagem):
     """[(inicio, fim)] das faixas não lidas do mapa ao lado de `imagem`, em ordem; [] se não há mapa legível."""
     try:
         with open(imagem + '.mapa.json', encoding='utf-8') as f:
-            faixas = json.load(f)['faixas']
+            texto = f.read(MAX_MAPA + 1)
+        if len(texto) > MAX_MAPA:
+            return []
+        faixas = json.loads(texto)['faixas']
         return [(int(a), int(b)) for a, b, e in faixas if e in NAO_LIDO]
     except (OSError, ValueError, KeyError, TypeError):
         return []
@@ -27,7 +32,9 @@ def carregar(imagem):
 def cortes(faixas, offset, n):
     """Partes de [offset, offset+n) que caem em faixas não lidas: [(inicio, fim)] absolutos, em ordem."""
     fim, out = offset + n, []
-    for a, b in faixas:
+    # faixas em ordem e sem sobreposição: o primeiro candidato é achado por bisseção, não varrendo a lista toda
+    i = bisect.bisect_right(faixas, (offset, float('inf'))) - 1
+    for a, b in faixas[max(i, 0):]:
         if b <= offset:
             continue
         if a >= fim:

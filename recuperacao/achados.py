@@ -140,6 +140,7 @@ def ler_achado(leitor, achado, maximo=None, bloco=1 << 20):
 # --- consulta (lista de resultados) -----------------------------------------------------------------------------
 ORDENS = {'nome': 'nome COLLATE NOCASE', 'tamanho': 'tamanho', 'data': 'data', 'tipo': 'tipo COLLATE NOCASE'}
 MAX_POR_PAGINA = 500
+MAX_PAGINA = 1_000_000            # teto: página gigante estourava o OFFSET do SQLite e virava erro 500
 POR_PAGINA_PADRAO = 50
 _DIA = re.compile(r'\d{4}-\d{2}-\d{2}')
 
@@ -231,8 +232,8 @@ def listar(store, job_id, f, ordem='nome', sentido='asc', pagina=1, por_pagina=P
         raise ErroFiltro('Ordem inválida: use %s.' % ', '.join(ORDENS))
     if sentido not in ('asc', 'desc'):
         raise ErroFiltro('Sentido inválido: use asc ou desc.')
-    if type(pagina) is not int or pagina < 1:
-        raise ErroFiltro('A página precisa ser um número a partir de 1.')
+    if type(pagina) is not int or not 1 <= pagina <= MAX_PAGINA:
+        raise ErroFiltro('A página precisa ser um número de 1 a %d.' % MAX_PAGINA)
     if type(por_pagina) is not int or not 1 <= por_pagina <= MAX_POR_PAGINA:
         raise ErroFiltro('Itens por página: de 1 a %d.' % MAX_POR_PAGINA)
     con = store._con()
