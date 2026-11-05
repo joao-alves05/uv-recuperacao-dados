@@ -5,7 +5,8 @@
     GET  /api/jobs/<id>/achados      lista filtrada, ordenada e paginada, com o resumo por grupo
     POST /api/jobs/<id>/recuperar    cria o job `recuperar` com os achados escolhidos
     POST /api/jobs/<id>/abrir        abre a pasta de destino de um job `recuperar` no Explorer (só Windows)
-    GET  /api/jobs/<id>/relatorio    o relatorio.html desse job
+    GET  /api/jobs/<id>/recuperados  o que cada arquivo do job `recuperar` virou (resultado, motivo, bytes), paginado
+    GET  /api/jobs/<id>/relatorio    o relatório html do job `recuperar` ou `imagem`
 """
 import os
 import re
@@ -20,6 +21,7 @@ from .tipos import recuperar as tipo_recuperar
 MAX_PREVIA = 2 * 1024 * 1024
 ID_JOB = re.compile(r'j-\d{8}-[0-9a-f]{4}')
 MAX_SELECIONADOS = 200000
+RESULTADOS_VALIDOS = ('ok', 'com_falhas', 'falhou', 'sumiu', 'copiando')
 COR_GRUPO = {'foto': '#2f7d6d', 'video': '#7a4fa3', 'audio': '#b0701f', 'documento': '#2f5f9e',
              'compactado': '#8a6d1f', 'banco': '#5b6770', 'outro': '#6b6b6b'}
 ROTULO_GRUPO = {'foto': 'FOTO', 'video': 'VIDEO', 'audio': 'AUDIO', 'documento': 'DOC', 'compactado': 'PACOTE',
@@ -172,15 +174,24 @@ def registrar(app, ctx):
             return _erro('Não consegui abrir a pasta: %s' % (e.strerror or e), 409)
         return jsonify({'ok': True})
 
+    def job_com_relatorio(job_id):
+        job = store.obter(job_id) if ID_JOB.fullmatch(job_id) else None
+        if job is None:
+            return None, _erro('Job não encontrado.', 404)
+        if job['tipo'] not in ('recuperar', 'imagem'):
+            return None, _erro('Este trabalho não gera relatório.', 409)
+        return job, None
+
     def arquivo_relatorio(job):
         cp = store.obter_checkpoint(job['id']) or {}
         nome = next((n for n in cp.get('relatorio') or [] if n.endswith('.html')), None)
-        caminho = os.path.join(job['destino'], nome) if nome and nome == os.path.basename(nome) else None
+        pasta = job['destino'] if job['tipo'] == 'recuperar' else os.path.dirname(os.path.abspath(job['destino']))   # imagem: ao lado dela
+        caminho = os.path.join(pasta, nome) if nome and nome == os.path.basename(nome) else None
         return caminho if caminho and os.path.isfile(caminho) else None
 
     @app.get('/api/jobs/<job_id>/relatorio')
     def relatorio(job_id):
-        job, erro = job_recuperar(job_id)
+        job, erro = job_com_relatorio(job_id)
         if erro:
             return erro
         caminho = arquivo_relatorio(job)
@@ -195,7 +206,36 @@ def registrar(app, ctx):
 
     @app.get('/api/jobs/<job_id>/relatorio.css')
     def relatorio_css(job_id):
-        job, erro = job_recuperar(job_id)
+        job, erro = job_com_relatorio(job_id)
         if erro:
             return erro
         return Response(tipo_recuperar.CSS_RELATORIO, mimetype='text/css')
+
+    @app.get('/api/jobs/<job_id>/recuperados')
+    def recuperados(job_id):
+        job, erro = job_recuperar(job_id)
+        if erro:
+            return erro
+        a = request.args
+        escolhidos = [x for x in (a.get('resultado') or '').split(',') if x]
+        if any(x not in RESULTADOS_VALIDOS for x in escolhidos):
+            return _erro('Filtro "resultado" inválido: use %s.' % ', '.join(RESULTADOS_VALIDOS), 400)
+        pagina, por_pagina = inteiro(a.get('pagina'), 1), inteiro(a.get('por_pagina'), achados.POR_PAGINA_PADRAO)
+        if pagina is None or not 1 <= pagina <= achados.MAX_PAGINA:
+            return _erro('A página precisa ser um número de 1 a %d.' % achados.MAX_PAGINA, 400)
+        if por_pagina is None or not 1 <= por_pagina <= achados.MAX_POR_PAGINA:
+            return _erro('Itens por página: de 1 a %d.' % achados.MAX_POR_PAGINA, 400)
+        con = store._con()
+        onde, p = 'job_id=?', [job_id]
+        if escolhidos:
+            onde += ' AND resultado IN (%s)' % ','.join('?' * len(escolhidos))
+            p += escolhidos
+        total = con.execute('SELECT COUNT(*) FROM recuperacoes WHERE ' + onde, p).fetchone()[0]
+        itens = [{'arquivo': l['arquivo'], 'achado_id': l['achado_id'], 'resultado': l['resultado'], 'motivo': l['motivo'],
+                  'bytes': l['bytes']} for l in con.execute(
+            'SELECT arquivo, achado_id, resultado, motivo, bytes FROM recuperacoes WHERE %s ORDER BY ordem LIMIT ? OFFSET ?' % onde,
+            p + [por_pagina, (pagina - 1) * por_pagina])]
+        por_resultado = {l['resultado']: l['n'] for l in con.execute(
+            'SELECT resultado, COUNT(*) AS n FROM recuperacoes WHERE job_id=? GROUP BY resultado', (job_id,))}
+        return jsonify({'total': total, 'pagina': pagina, 'por_pagina': por_pagina, 'itens': itens,
+                        'resumo': {'por_resultado': por_resultado}})

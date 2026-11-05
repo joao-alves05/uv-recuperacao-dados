@@ -193,6 +193,72 @@ class TestPastaETotal(BaseVarredura):
             self.assertEqual(self.req('POST', '/api/jobs/%s/abrir' % r['id'], headers={}).status_code, 401)
 
 
+class TestRecuperadosERelatorioDaImagem(BaseVarredura):
+    def test_lista_do_que_cada_arquivo_virou_com_filtro_e_pagina(self):
+        import errno
+        caminho, info, _ = montar_imagem(self.trabalho)
+        v = self.varrer(caminho, bloco=65536)
+        self.esperar_estado(v['id'], 'concluido')
+        original = recuperar._copiar
+        chamadas = []
+
+        def copiar(aberto, achado, tmp, ctrl):
+            chamadas.append(achado['id'])
+            if len(chamadas) in (2, 5):
+                raise OSError(errno.ENOSPC, 'No space left on device')
+            return original(aberto, achado, tmp, ctrl)
+        destino = os.path.join(self.pasta, 'saida')
+        with mock.patch.object(recuperar, '_copiar', copiar):
+            r = self.req('POST', '/api/jobs/%s/recuperar' % v['id'], {'ids': 'todos', 'destino': destino}).get_json()
+            self.esperar_estado(r['id'], 'concluido')
+        url = '/api/jobs/%s/recuperados' % r['id']
+        d = self.req('GET', url).get_json()
+        self.assertEqual((d['total'], d['pagina'], len(d['itens'])), (7, 1, 7))
+        self.assertEqual(d['resumo'], {'por_resultado': {'ok': 5, 'falhou': 2}})
+        item = d['itens'][0]
+        self.assertEqual(set(item), {'arquivo', 'achado_id', 'resultado', 'motivo', 'bytes'})
+        self.assertEqual(item['resultado'], 'ok')
+        self.assertTrue(item['bytes'] > 0 and item['arquivo'].split('/')[0] in ('Fotos', 'Documentos', 'Videos', 'Compactados'))
+        falhas = self.req('GET', url + '?resultado=falhou').get_json()
+        self.assertEqual(falhas['total'], 2)
+        self.assertTrue(all('No space left' in i['motivo'] and i['bytes'] == 0 for i in falhas['itens']))
+        self.assertEqual(self.req('GET', url + '?resultado=ok,com_falhas').get_json()['total'], 5)
+        p3 = self.req('GET', url + '?por_pagina=3&pagina=3').get_json()
+        self.assertEqual((p3['total'], len(p3['itens'])), (7, 1))
+        todos = []
+        for pg in (1, 2, 3):
+            todos += [i['achado_id'] for i in self.req('GET', url + '?por_pagina=3&pagina=%d' % pg).get_json()['itens']]
+        self.assertEqual(len(set(todos)), 7)
+        for q in ('?resultado=talvez', '?pagina=0', '?pagina=x', '?por_pagina=0', '?por_pagina=501'):
+            self.assertEqual(self.req('GET', url + q).status_code, 400, q)
+        self.assertEqual(self.req('GET', url, headers={}).status_code, 401)
+        self.assertEqual(self.req('GET', '/api/jobs/%s/recuperados' % v['id']).status_code, 409)
+        self.assertEqual(self.req('GET', '/api/jobs/j-20200101-abcd/recuperados').status_code, 404)
+
+    def test_relatorio_da_imagem_e_servido_pela_mesma_rota(self):
+        from auxiliar import criar_origem
+        origem = criar_origem(self.trabalho, 300000)
+        destino = os.path.join(self.trabalho, 'img.bin')
+        j = self.req('POST', '/api/jobs', {'tipo': 'imagem', 'origem': origem, 'destino': destino}).get_json()
+        self.esperar_estado(j['id'], 'concluido')
+        esperar(lambda: self.ctx.store.obter_checkpoint(j['id']), 10, 0.02)
+        rel = self.req('GET', '/api/jobs/%s/relatorio' % j['id'])
+        self.assertEqual((rel.status_code, rel.mimetype), (200, 'text/html'))
+        self.assertIn('rio da imagem', rel.data.decode('utf-8'))
+        self.assertNotIn(b'<style>', rel.data)
+        self.assertIn(('/api/jobs/%s/relatorio.css' % j['id']).encode(), rel.data)
+        self.assertEqual(self.req('GET', '/api/jobs/%s/relatorio.css' % j['id']).status_code, 200)
+        self.assertEqual(self.req('GET', '/api/jobs/%s/relatorio' % j['id'], headers={}).status_code, 401)
+        # imagem sem relatório gravado (por exemplo, cancelada): 404; varredura não gera relatório: 409
+        sem = self.ctx.store.criar('imagem', 'x', os.path.join(self.trabalho, 'outra.bin'))
+        self.assertEqual(self.req('GET', '/api/jobs/%s/relatorio' % sem['id']).status_code, 404)
+        v = self.ctx.store.criar('varredura', 'x', 'varredura#zz')
+        self.assertEqual(self.req('GET', '/api/jobs/%s/relatorio' % v['id']).status_code, 409)
+        # o nome vem do checkpoint e só vale como nome de arquivo ao lado da imagem
+        self.ctx.store.salvar_checkpoint(sem['id'], {'relatorio': ['../../segredo.html']})
+        self.assertEqual(self.req('GET', '/api/jobs/%s/relatorio' % sem['id']).status_code, 404)
+
+
 class TestRecuperar(BaseVarredura):
     def varrer_imagem(self, **kw):
         caminho, info, _ = montar_imagem(self.trabalho)
