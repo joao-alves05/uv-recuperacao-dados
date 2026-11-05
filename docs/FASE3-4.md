@@ -8,6 +8,31 @@ Regras de sempre (só leitura, destino em outro disco, testes com imagens sinté
 - `GET /api/fontes/<id>/particoes`: partições da tabela + estado (ok, tabela danificada, GPT reserva usada).
 - Busca de partição perdida (job `particoes`): varrer o disco atrás de assinaturas de início de sistema de arquivos — boot sector FAT/exFAT/NTFS (inclusive a cópia reserva do NTFS no fim e a do FAT no setor 6), superbloco ext (1024 bytes do início, magic 0xEF53, e cópias nos grupos), HFS+/APFS, ISO9660 — e propor partições (início, tamanho, tipo, confiança). Nunca grava a tabela no disco: oferece "listar os arquivos desta partição" (fase 4) e exportar a tabela reconstruída como arquivo (`.json` e um `.mbr`/`.gpt` para o técnico aplicar à mão, se quiser).
 
+### Como ficou a fase 3 (pronta)
+
+**Abrir uma partição como volume (para a fase 4).** `particoes.abrir_volume(base, inicio, tamanho=None)` devolve um `Leitor` (somente leitura) que enxerga só a faixa `[inicio, inicio+tamanho)` da base, com o offset 0 no começo da partição. `inicio` pode ser um dicionário de partição (`{"inicio", "tamanho", ...}`, como o de `analisar()['particoes']` e o dos candidatos da busca). Tamanho maior que o disco é cortado e `volume.truncado` fica `True`; fechar o volume não fecha a base. Exemplo:
+
+    with leitor.abrir(caminho) as base:
+        p = particoes.analisar(base)['particoes'][0]
+        with particoes.abrir_volume(base, p) as vol:
+            vol.ler(0, 512)          # setor de boot da partição
+            particoes.identificar(vol, 0)['sistema']      # 'fat32', 'ntfs', 'ext4'...
+
+`particoes.identificar(leitor, inicio)` diz qual sistema de arquivos começa ali (`fat12/16/32`, `exfat`, `ntfs`, `ext2/3/4`, `hfs+`, `hfsx`, `apfs`, `iso9660`) pelas assinaturas, ou `None`. Cada partição já traz o campo `sistema` com esse resultado.
+
+**Tabela (`particoes.analisar(leitor)`).** Devolve `{esquema, estado, setor, tamanho, particoes, avisos}`. `esquema`: `mbr`, `gpt`, `apm`, `bsd`, `volume` (disco inteiro é um volume, sem tabela) ou `nenhum`. `estado`: `ok`, `tabela_danificada`, `gpt_reserva_usada` ou `sem_tabela`. Cada partição: `origem_tabela` (`mbr`, `mbr-logica`, `gpt`, `apm`), `inicio`/`tamanho`/`fim` em bytes, `tipo`, `tipo_nome`, `sistema`, `avisos` e, conforme a tabela, `ativa`, `logica`, `estendida`, `nome`, `guid`. APM e as sub-partições BSD (`subparticoes` dentro da fatia MBR 0xA5/0xA6/0xA9) trazem `somente_listar: true`. O GPT é procurado em setores de 512 e de 4096 (uma imagem de arquivo não diz qual); a cópia reserva é lida onde o cabeçalho principal manda e, se faltar, no último setor.
+
+**Busca (job `particoes`).** `POST /api/jobs {"tipo":"particoes","origem":<disco|volume|imagem|arquivo>,"destino":"<pasta em outro disco>/nome.json","opcoes":{"bloco":4194304}}` (`bloco` opcional, múltiplo de 4096). Pausa, retoma e sobrevive a queda (`<destino>.busca.json` guarda o ponto e os sinais já achados). Em disco/volume, o destino em outro disco é conferido por `unidade.conferir`. Saída, nunca na origem:
+
+- `nome.json`: `tabela_atual`, `candidatos` (todos, com `na_tabela_atual`), `proposta` (os candidatos de confiança >= 0.5 que não se sobrepõem), `aplicacao` (qual arquivo gravar em qual byte).
+- `nome.mbr`: setor 0 de um MBR com a proposta (até 4 primárias, sem código de boot; só os sistemas com tipo de MBR conhecido).
+- `nome.gpt` (setores 0 a 33: MBR protetor, cabeçalho e entradas, a gravar no byte 0) e `nome.gpt-fim` (entradas e cabeçalho reservas, a gravar em `aplicacao.gpt_fim.gravar_em_byte`).
+- `GET /api/jobs/<id>/particoes` devolve o `nome.json` quando o job terminou (404 antes disso).
+
+Cada candidato: `inicio`, `tamanho`, `fim`, `sistema`, `confianca` (0 a 1), `nivel` (`alta` >= 0.8, `media` >= 0.5, `baixa`), `evidencias` (frases) e `avisos`. A confiança soma: setor de boot ou superbloco principal (0,45), cópia reserva no lugar esperado (0,35: NTFS no fim, FAT32 no setor 6, exFAT no setor 12, ext no grupo 1, HFS+ no fim), posição gravada na própria estrutura conferindo (0,15: setores ocultos do FAT, deslocamento do exFAT), estrutura interna coerente (0,15: tabela FAT, MFT, descritores de grupo, Fletcher-64 do APFS, descritor final do ISO) e perde 0,25 se a partição passaria do fim do disco. Se só a cópia reserva sobrou, o início é calculado a partir dela e a confiança fica menor.
+
+**Limites conhecidos.** FAT12/16 não têm cópia reserva e só são achados se o rótulo "FAT12/16" estiver no setor de boot; HFS+ sem o cabeçalho do fim, APFS e ISO ficam em confiança média/baixa (sem cópia fixa); partição antiga sobrescrita parcialmente pode aparecer como candidato de confiança baixa, sobreposto à atual; MBR exportado não leva código de boot, estendidas nem lógicas; o `.gpt` usa setor de 512 ou de 4096 conforme a origem; o Fletcher-64 do APFS e os offsets de BSD/APM foram escritos pela especificação pública e só testados com imagens montadas aqui, nunca com disco real.
+
 ## Fase 4: sistemas de arquivos (`recuperacao/sa/`)
 
 Implementação própria em Python puro (sem dependência nova), leitura apenas:
