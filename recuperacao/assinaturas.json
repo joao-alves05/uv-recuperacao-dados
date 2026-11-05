@@ -1,0 +1,23 @@
+{
+  "versao": 1,
+  "comentario": "Uma linha por tipo. cabecalho e rodape em hexadecimal; cabecalho_offset (opcional) e a posicao do cabecalho dentro do arquivo; tamanho_max em bytes; validar e o nome de um validador de recuperacao/validar.py (sem validar, o tipo precisa de rodape e vale ate o primeiro rodape). Os validadores podem trocar tipo, extensao e grupo pelo que acharem no conteudo (ex.: o TIFF vira CR2, NEF, ARW ou DNG; o ZIP vira DOCX, XLSX, ODT...).",
+  "assinaturas": [
+    {"tipo": "JPG", "grupo": "foto", "extensao": "jpg", "cabecalho": "FFD8FF", "rodape": "FFD9", "tamanho_max": 134217728, "validar": "jpg"},
+    {"tipo": "PNG", "grupo": "foto", "extensao": "png", "cabecalho": "89504E470D0A1A0A", "rodape": "49454E44AE426082", "tamanho_max": 134217728, "validar": "png"},
+    {"tipo": "GIF", "grupo": "foto", "extensao": "gif", "cabecalho": "47494638", "rodape": "003B", "tamanho_max": 67108864, "validar": "gif"},
+    {"tipo": "BMP", "grupo": "foto", "extensao": "bmp", "cabecalho": "424D", "tamanho_max": 268435456, "validar": "bmp"},
+    {"tipo": "TIFF", "grupo": "foto", "extensao": "tif", "cabecalho": "49492A00", "tamanho_max": 268435456, "validar": "tiff"},
+    {"tipo": "TIFF", "grupo": "foto", "extensao": "tif", "cabecalho": "4D4D002A", "tamanho_max": 268435456, "validar": "tiff"},
+    {"tipo": "MP4", "grupo": "video", "extensao": "mp4", "cabecalho": "66747970", "cabecalho_offset": 4, "tamanho_max": 8589934592, "validar": "iso"},
+    {"tipo": "AVI", "grupo": "video", "extensao": "avi", "cabecalho": "52494646", "forma": "AVI ", "tamanho_max": 4294967296, "validar": "riff"},
+    {"tipo": "WAV", "grupo": "audio", "extensao": "wav", "cabecalho": "52494646", "forma": "WAVE", "tamanho_max": 4294967296, "validar": "riff"},
+    {"tipo": "MP3", "grupo": "audio", "extensao": "mp3", "cabecalho": "494433", "tamanho_max": 268435456, "validar": "mp3"},
+    {"tipo": "PDF", "grupo": "documento", "extensao": "pdf", "cabecalho": "25504446", "rodape": "2525454F46", "tamanho_max": 1073741824, "validar": "pdf"},
+    {"tipo": "ZIP", "grupo": "compactado", "extensao": "zip", "cabecalho": "504B0304", "rodape": "504B0506", "tamanho_max": 4294967296, "validar": "zip"},
+    {"tipo": "RAR", "grupo": "compactado", "extensao": "rar", "cabecalho": "526172211A07", "tamanho_max": 4294967296, "validar": "rar"},
+    {"tipo": "7Z", "grupo": "compactado", "extensao": "7z", "cabecalho": "377ABCAF271C", "tamanho_max": 4294967296, "validar": "7z"},
+    {"tipo": "SQLITE", "grupo": "banco", "extensao": "sqlite", "cabecalho": "53514C69746520666F726D6174203300", "tamanho_max": 4294967296, "validar": "sqlite"},
+    {"tipo": "DOC", "grupo": "documento", "extensao": "doc", "cabecalho": "D0CF11E0A1B11AE1", "tamanho_max": 268435456, "validar": "ole2"},
+    {"tipo": "RTF", "grupo": "documento", "extensao": "rtf", "cabecalho": "7B5C72746631", "tamanho_max": 67108864, "validar": "rtf"}
+  ]
+}

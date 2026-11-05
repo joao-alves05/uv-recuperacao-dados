@@ -29,3 +29,55 @@ Extensível sem mexer no código. Cada tipo: `{"tipo", "grupo" (foto, video, aud
 ## 5.5 Testes
 
 Imagem sintética montada no teste: FAT32 de 8 MB criada em Python (sem ferramenta externa), com JPG, PNG, PDF, DOCX, ZIP, MP4 pequenos gravados e depois "apagados" (entrada de diretório com 0xE5), mais um JPG cortado (parcial) e lixo. A varredura acha todos com o tamanho certo, os bytes recuperados batem com o SHA-256 dos originais, o parcial sai "parcial", a origem não muda, a lista filtra/ordena/pagina, e a recuperação recusa destino no mesmo disco.
+
+---
+
+# Contrato implementado (back-end)
+
+## Tabela `achados` (para a fase 5 e para a fase 4)
+
+Quem grava achado usa **`JobStore.adicionar_achados(job_id, lista, checkpoint=None)`** (`recuperacao/jobs.py`). Devolve os ids novos. Tudo numa transação: se um achado for inválido (`ValueError`), nada do lote é gravado. Se vier `checkpoint` (um dict), ele é gravado na mesma transação (tabela `checkpoints`, lida com `obter_checkpoint(job_id)`), então o que foi achado e o ponto de retomada nunca divergem. Bancos antigos da fase 1 ganham as colunas novas ao abrir (`ALTER TABLE`, sem perder linhas).
+
+Cada achado é um dict. Campos (os de `*` são obrigatórios):
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| `tamanho`* | int ≥ 0 | bytes do arquivo |
+| `offset` ou `extents`* | int / lista | onde estão os bytes **na origem do job** (offset absoluto na origem, não relativo à partição). Contíguo: `offset`. Fragmentado: `extents: [[offset, comprimento], ...]` (a soma tem de dar `tamanho`; `offset` passa a ser o do primeiro extent) |
+| `nome` | texto | nome mostrado. Se faltar: nome do `caminho`, senão `f<setor de 512 bytes, 7 dígitos>.<ext>` (ex.: `f0001234.jpg`) |
+| `caminho` | texto ou nulo | caminho original (fase 4). O carving deixa nulo |
+| `apagado` | bool ou nulo | `true` apagado, `false` existente, **nulo = não se sabe** (carving) |
+| `grupo` | `foto` `video` `audio` `documento` `compactado` `banco` `outro` | padrão `outro` |
+| `tipo` | texto até 40 | `JPG`, `DOCX`... (padrão: a extensão em maiúsculas) |
+| `extensao` | letras/números até 10, sem ponto | usada no nome e na prévia |
+| `estado` | `bom` `parcial` `ruim` | padrão `bom` |
+| `pontuacao` | 0 a 100 ou nulo | confiança |
+| `data` | `AAAA-MM-DD` ou `AAAA-MM-DD HH:MM:SS` ou nulo | metadados/sistema de arquivos; ordena como texto |
+| `largura`, `altura` | int ou nulo | só fotos |
+| `recuperado_em` | segundos desde 1970 ou nulo | preenchido pelo job `recuperar`; **quem grava achado não preenche** |
+
+`achados.obter(store, id)` devolve o dict com `extents` já como lista e `apagado` como bool/nulo; `achados.extents_de(achado)` dá `[(offset, comprimento)]`; `achados.ler_achado(leitor, achado, maximo=None)` gera os bytes lendo da origem (só leitura). Esses dois últimos são o jeito de ler um achado: o job `recuperar` e a prévia usam as mesmas funções, então achados da fase 4 (com `caminho`, `apagado` e `extents`) funcionam sem código novo.
+
+## Tabela de assinaturas (`recuperacao/assinaturas.json`)
+
+`{"assinaturas": [ {tipo, grupo, extensao, cabecalho (hex), cabecalho_offset?, rodape? (hex), tamanho_max (bytes), validar?, forma?} ]}`. Tipo novo = linha nova. Sem `validar`, vale o `rodape` (o arquivo vai do cabeçalho até o primeiro rodapé; pontuação 60). Tabela inválida é recusada com frase clara (`ErroAssinaturas`). Os validadores (`recuperacao/validar.py`) podem trocar `tipo`, `extensao` e `grupo` pelo que acharem dentro (TIFF vira CR2/NEF/ARW/DNG; ZIP vira DOCX/XLSX/PPTX/ODT/ODS/ODP/EPUB/JAR/APK; OLE2 vira DOC/XLS/PPT; MP4 vira MOV/M4A/HEIC). Tipos prontos: JPG, PNG, GIF, BMP, TIFF e RAW, MP4/MOV/M4A/HEIC, AVI, WAV, MP3 (começando em ID3), PDF, ZIP e derivados, RAR 4 e 5, 7z, SQLite, OLE2, RTF.
+
+Estado e pontuação: `bom` = estrutura inteira e coerente (100, ou 90 nos tipos de conferência mais fraca, como MP3 e RTF); `parcial` = começo válido e fim ausente (o `tamanho` é o trecho válido, pontuação 30 a 60); `ruim` = inteiro mas com conferência falha (CRC errado, JPG sem imagem; pontuação 10 a 20). O que não passa nem na conferência mínima não vira achado.
+
+## Job `varredura`
+
+`POST /api/jobs` `{"tipo": "varredura", "origem": "<arquivo, imagem, disco ou volume>", "opcoes": {"modo": "rapida" | "profunda", "bloco": 4096..67108864}}` (o `destino` é ignorado; o job usa `varredura#<hash da origem>`, então duas varreduras da mesma origem ao mesmo tempo dão 409). `rapida` só considera cabeçalhos no começo de um setor; `profunda` considera todo byte. Blocos de 4 MiB (opção `bloco`, que existe para os testes).
+
+- Cada bloco entrega seus achados, gravados na hora (o painel os vê enquanto a varredura anda) junto com o checkpoint `{pos, tamanho, modo, ruins}`. Pausar, cair o serviço e retomar continua do último checkpoint, sem perder nem repetir achado.
+- Depois de um achado `bom` ou `parcial` a varredura pula para o fim dele (não acha o que está embutido, como um JPG dentro de um ZIP guardado). Um `parcial` termina onde começa outro arquivo que valida inteiro (ele não engole o vizinho).
+- Setor ilegível vira zeros e é contado em `setores_ruins`. Nada é escrito na origem.
+- Limitações: arquivo fragmentado sai `parcial` ou `ruim` (a heurística do PhotoRec para JPG não foi feita); ZIP cortado cujo resto foi sobrescrito por zeros não é detectado (os tamanhos do cabeçalho local parecem coerentes); ZIP64 só é achado se tiver diretório central comum ou descritor de dados; cabeçalhos de OLE2 com mais de 109 setores de FAT usam a cadeia DIFAT, mas não foi testado com arquivo grande; MP4 com `moov` perdido sai `parcial`.
+- Fase 4: o modo "pelo sistema de arquivos" entra como novo valor de `modo` neste mesmo job, gravando em `adicionar_achados`.
+
+## Prévia
+
+`GET /api/achados/<id>/previa`: foto `JPG/PNG/GIF/BMP` de até 2 MB sai como está (o `Content-Type` vem dos primeiros bytes, não do nome); qualquer outra coisa (outro grupo, foto maior, bytes que não são imagem) sai um ícone SVG do grupo com a extensão (`image/svg+xml`). 404 para id inexistente.
+
+## Testes desta parte
+
+`testes/test_carving.py` (motor e validadores, imagens na memória), `testes/test_varredura.py` (job, FAT sintética de 8 MiB em `testes/fat_sintetica.py`, tabela de achados, prévia, queda do serviço). Os arquivos de exemplo vêm de `testes/amostras.py`. A "FAT32" da imagem sintética não é válida para o Windows (poucos clusters); o carving não a lê.

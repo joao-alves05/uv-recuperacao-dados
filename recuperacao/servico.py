@@ -28,12 +28,14 @@ from werkzeug.serving import ThreadedWSGIServer
 from . import config, fontes, leitor
 from .executor import ErroAcao, Executor
 from .jobs import DestinoEmUso, JobStore
-from . import rotas_particoes
 from .tipos import imagem
+from . import rotas_achados, rotas_particoes
+from .tipos import varredura as tipo_varredura
 from .tipos import particoes as tipo_particoes
 
 TIPOS = {'imagem': imagem}
 TIPOS['particoes'] = tipo_particoes
+TIPOS['varredura'] = tipo_varredura
 PAINEL = Path(__file__).resolve().parent / 'painel'
 COOKIE = 'recdados'
 ID_JOB = re.compile(r'j-\d{8}-[0-9a-f]{4}')
@@ -269,6 +271,8 @@ def criar_app(ctx=None):
         if modulo is None:
             return _erro('Tipo de trabalho desconhecido. Tipos disponíveis: %s.' % ', '.join(TIPOS), 400)
         origem, destino, opcoes = dados.get('origem'), dados.get('destino'), dados.get('opcoes') or {}
+        if hasattr(modulo, 'destino_de'):               # tipo sem arquivo de saída (ex.: varredura) tem destino próprio
+            destino = modulo.destino_de(origem, destino)
         em_uso = 'Já existe um trabalho em andamento para esse destino.'
         if isinstance(destino, str) and destino.strip() and chr(0) not in destino and store.job_com_destino(destino):
             return _erro(em_uso, 409)
@@ -386,6 +390,7 @@ def criar_app(ctx=None):
         return send_from_directory(PAINEL, arquivo)
 
     rotas_particoes.registrar(app, ctx)
+    rotas_achados.registrar(app, ctx)
     return app
 
 

@@ -44,7 +44,7 @@ Só usam arquivos temporários, porta livre e pasta de dados temporária; nunca 
 - Tentativa de leitura: 2 por bloco; bloco ruim vira zero na imagem e fica `ruim` no mapa (não é relido na retomada).
 - Se o serviço for morto, perde-se até 2 s de cópia (o que passou do último checkpoint é relido na retomada).
 - A conferência final por SHA-256 relê origem e imagem inteiras e só vale quando não há setor ruim.
-- A tabela `achados` existe, mas nada grava nela ainda.
+- A tabela `achados` é gravada pelo job `varredura` (carving) e, na fase 4, pelos achados do sistema de arquivos; contrato em `docs/FASE5.md`.
 - O mapfile fica ao lado da imagem (`<destino>.mapa.json`), não na pasta de dados.
 - Não há autenticação além do token local: quem lê a pasta de dados do usuário lê o token.
 - Só arquivos locais: caminhos de rede, `\.\`, `\?\` e nomes de dispositivo do Windows (NUL, CON, COM1...) são recusados; disco bruto entra na fase 2.

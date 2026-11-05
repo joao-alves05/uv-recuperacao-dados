@@ -38,6 +38,7 @@ class ErroAcao(Exception):
 class Controle:
     def __init__(self, store, job_id):
         self._store = store
+        self.store = store            # os tipos gravam achados e checkpoint por aqui
         self.job_id = job_id
         self._pausa = threading.Event()
         self._cancelamento = threading.Event()

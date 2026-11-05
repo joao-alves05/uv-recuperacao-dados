@@ -11,6 +11,8 @@ import sqlite3
 import threading
 import time
 
+from . import achados as _achados
+
 ESTADOS = ('na_fila', 'rodando', 'pausado', 'interrompido', 'concluido', 'falhou', 'cancelado')
 TERMINAIS = ('concluido', 'falhou', 'cancelado')
 INTERVALO_PROGRESSO = 0.5      # no máximo 2 gravações de progresso por segundo, por job
@@ -34,6 +36,8 @@ CREATE INDEX IF NOT EXISTS ix_eventos_job ON eventos (job_id, id);
 CREATE TABLE IF NOT EXISTS achados (
     id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, caminho TEXT, tipo TEXT, tamanho INTEGER,
     data TEXT, estado TEXT, offset INTEGER);
+CREATE INDEX IF NOT EXISTS ix_achados_job ON achados (job_id, id);
+CREATE TABLE IF NOT EXISTS checkpoints (job_id TEXT PRIMARY KEY, dados TEXT NOT NULL);
 '''
 
 
@@ -75,6 +79,7 @@ class JobStore:
         self._ultimo_progresso = {}
         self._trava_criar = threading.Lock()
         self._con().executescript(ESQUEMA)
+        self._migrar_achados()
 
     # --- conexão ---------------------------------------------------------
     def _con(self):
@@ -228,6 +233,49 @@ class JobStore:
         for l in self._con().execute("SELECT id FROM jobs WHERE estado='na_fila'").fetchall():
             if self.transicao(l['id'], ('na_fila',), 'pausado'):
                 self.evento(l['id'], 'Pausado: o serviço foi desligado antes de começar.')
+
+    # --- achados e checkpoints (fase 5) ---------------------------------------
+    def _migrar_achados(self):
+        """Bancos da fase 1 têm a tabela `achados` antiga: acrescenta as colunas novas sem perder nada."""
+        con = self._con()
+        existentes = {l['name'] for l in con.execute('PRAGMA table_info(achados)')}
+        for coluna, tipo in _achados.COLUNAS_NOVAS:
+            if coluna not in existentes:
+                try:
+                    con.execute('ALTER TABLE achados ADD COLUMN %s %s' % (coluna, tipo))
+                except sqlite3.OperationalError:
+                    if coluna not in {l['name'] for l in con.execute('PRAGMA table_info(achados)')}:
+                        raise                 # outra cópia pode ter criado a coluna no mesmo instante
+
+    def adicionar_achados(self, job_id, lista, checkpoint=None):
+        """Grava achados (dicts, ver achados.normalizar) numa transação só e devolve os ids novos. Se vier `checkpoint`
+        (dict), ele é gravado na MESMA transação: o que foi achado e o ponto de retomada nunca divergem.
+        ValueError se algum achado for inválido (nada é gravado)."""
+        linhas = [_achados.normalizar(job_id, a) for a in lista]
+        con = self._con()
+        con.execute('BEGIN IMMEDIATE')
+        try:
+            ids = [con.execute('INSERT INTO achados (%s) VALUES (%s)' % (
+                ','.join('"%s"' % c for c in _achados.COLUNAS_GRAVAVEIS), ','.join('?' * len(l))), l).lastrowid
+                for l in linhas]
+            if checkpoint is not None:
+                con.execute('INSERT OR REPLACE INTO checkpoints (job_id, dados) VALUES (?,?)',
+                            (job_id, json.dumps(checkpoint)))
+            con.execute('COMMIT')
+        except BaseException:
+            con.execute('ROLLBACK')
+            raise
+        return ids
+
+    def salvar_checkpoint(self, job_id, dados):
+        self._con().execute('INSERT OR REPLACE INTO checkpoints (job_id, dados) VALUES (?,?)', (job_id, json.dumps(dados)))
+
+    def obter_checkpoint(self, job_id):
+        l = self._con().execute('SELECT dados FROM checkpoints WHERE job_id=?', (job_id,)).fetchone()
+        try:
+            return json.loads(l['dados']) if l else None
+        except ValueError:
+            return None
 
     # --- eventos ---------------------------------------------------------
     def evento(self, job_id, texto):
