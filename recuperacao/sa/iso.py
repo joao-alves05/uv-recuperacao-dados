@@ -3,7 +3,8 @@
 
 Se existir descritor suplementar Joliet, ele manda (nomes longos e acentos); senão vale o descritor primário, com
 os nomes 8.3 sem o ";1" final. Arquivos em várias extensões (flag "multi-extent") são juntados. Não há arquivo
-apagado em ISO. Limites: Rock Ridge e El Torito não são lidos; só um volume por imagem; UDF puro é só reconhecido.
+apagado em ISO. Rock Ridge básico: o nome longo (entrada NM) vale quando não há Joliet. Limites: Rock Ridge sem CE,
+links e permissões; El Torito não é lido; só um volume por imagem; UDF fica em udf.py.
 """
 import struct
 
@@ -33,6 +34,33 @@ def reconhecer(leitor, inicio=0, tamanho=None):
         return Iso(leitor, inicio, tamanho)
     except (ErroSA, OSError, struct.error):
         return None
+
+
+def _su(r):
+    """Área de uso do sistema de um registro de pasta (onde ficam as entradas Rock Ridge)."""
+    off = 33 + r[32]
+    return r[off + (1 if r[32] % 2 == 0 else 0):]
+
+
+def _entradas_su(su):
+    off = 0
+    while off + 4 <= len(su):
+        ln = su[off + 2]
+        if ln < 4 or off + ln > len(su):
+            return
+        yield su[off:off + 2], su[off + 3:off + ln], su[off + 4:off + ln]
+        off += ln
+
+
+def rock_ridge_nome(r):
+    """Nome longo da entrada NM (em partes, se preciso) de um registro, ou None."""
+    partes = []
+    for sig, _, dados in _entradas_su(_su(r)):
+        if sig == b'NM' and dados:
+            partes.append(dados[1:])
+            if not dados[0] & 1:
+                break
+    return b''.join(partes).decode('utf-8', 'replace') if partes else None
 
 
 def _data7(b):
@@ -66,6 +94,17 @@ class Iso(Volume):
         self.rotulo = (usado[40:72].decode('utf-16-be', 'replace') if self.joliet
                        else usado[40:72].decode('latin-1')).strip().rstrip('\0').strip()
         self._raiz = usado[156:190]
+        self.rock_ridge = False
+        if not self.joliet:
+            try:
+                lba, tam = struct.unpack_from('<I', self._raiz, 2)[0], struct.unpack_from('<I', self._raiz, 10)[0]
+                ini = self._ler(lba * self.bloco, min(tam, SETOR))
+                self.rock_ridge = any(sig in (b'SP', b'RR', b'PX', b'NM')
+                                      for sig, _, _ in _entradas_su(_su(ini[:ini[0]]))) if ini and ini[0] >= 34 else False
+            except (OSError, ErroSA, struct.error):
+                pass
+            if self.rock_ridge:
+                self.tipo = 'ISO9660/Rock Ridge'
 
     def _nome(self, b):
         if self.joliet:
@@ -107,6 +146,10 @@ class Iso(Volume):
             if nl == 1 and nb in (b'\0', b'\1'):
                 continue
             nome = self._nome(nb)
+            if self.rock_ridge:
+                rr = rock_ridge_nome(r)
+                if rr:
+                    nome = limpar_nome(rr)
             eh_dir = bool(flags & 2)
             data = _data7(r[18:25])
             if pendente is not None and not eh_dir and pendente.nome == nome:

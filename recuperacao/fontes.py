@@ -24,8 +24,9 @@ TAMANHOS_DISQUETE = frozenset([1474560, 737280, 1228800, 368640, 327680, 184320,
 _DISQUETE = re.compile(r'floppy|disquete', re.I)
 AVISO_TRIM = ('Este tipo de dispositivo (SSD ou pen drive) pode ter apagado de vez o que você excluiu: o próprio '
               'dispositivo zera o espaço livre (TRIM). A chance de recuperar arquivos apagados é menor.')
-AVISO_OPTICO = ('A leitura completa de CD/DVD (com recuperação de trilhas) chega numa versão futura do programa '
-                '(fase 6 do projeto). Por enquanto a unidade só aparece na lista.')
+AVISO_OPTICO = ('CD/DVD/Blu-ray: a leitura de mídia riscada pode demorar bastante, porque a unidade tenta de novo sozinha '
+                'nos trechos ruins. O programa lê o disco todo para uma imagem, pula o que não lê e volta depois; '
+                'o que continuar ilegível sai como zeros e é listado no relatório.')
 AVISO_DISQUETE = ('Disquete: é um disco pequeno e muito antigo. A leitura é lenta e é comum haver setores ruins; '
                   'deixe o programa tentar de novo nos pontos que falharem.')
 _CARTAO = re.compile(r'\b(sd|sdhc|sdxc|mmc|micro\s?sd|card|cart[aã]o)\b', re.I)

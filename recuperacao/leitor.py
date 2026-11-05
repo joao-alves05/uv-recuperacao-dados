@@ -29,6 +29,7 @@ BLKGETSIZE64 = 0x80081272
 
 MSG_ADMIN = 'Para ler o disco inteiro, abra o programa como administrador'
 SETOR_ARQUIVO = 512
+SETOR_OPTICO = 2048
 _DISCO_WINDOWS = re.compile(r'\\\\\.\\(?:PhysicalDrive\d+|[A-Za-z]:)', re.I)
 _OPTICO_WINDOWS = re.compile(r'\\\\\.\\CdRom\d+', re.I)
 _DISPOSITIVO_LINUX = re.compile(r'/dev/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*')
@@ -194,6 +195,24 @@ class ApiWindows:
         self._ioctl(h, IOCTL_DISK_GET_LENGTH_INFO, saida)
         return saida.value
 
+    def tamanho_por_geometria(self, h):
+        """Tamanho pelo DiskSize da geometria: unidades ópticas nem sempre respondem ao IOCTL de tamanho."""
+        return self._geometria_ex(h).DiskSize
+
+    def _geometria_ex(self, h):
+        ex = self._classes_geometria()[1]()
+        self._ioctl(h, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, ex)
+        return ex
+
+    def _classes_geometria(self):
+        class Geometria(self.ct.Structure):
+            _fields_ = [('Cylinders', self.ct.c_longlong), ('MediaType', self.wt.DWORD), ('TracksPerCylinder', self.wt.DWORD),
+                        ('SectorsPerTrack', self.wt.DWORD), ('BytesPerSector', self.wt.DWORD)]
+
+        class GeometriaEx(self.ct.Structure):
+            _fields_ = [('Geometry', Geometria), ('DiskSize', self.ct.c_longlong), ('Dados', self.ct.c_ubyte * 256)]
+        return Geometria, GeometriaEx
+
     def setor(self, h):
         class Geometria(self.ct.Structure):
             _fields_ = [('Cylinders', self.ct.c_longlong), ('MediaType', self.wt.DWORD), ('TracksPerCylinder', self.wt.DWORD),
@@ -259,11 +278,17 @@ class LeitorWindows(Leitor):
                 raise ErroLeitor('Não encontrei o disco %s. Ele foi removido?' % caminho) from None
             raise ErroLeitor('Não consegui abrir o disco para leitura (erro %s).' % codigo) from None
         try:
-            tamanho = self.api.tamanho(self.h)
+            optico = eh_optico(caminho)
             try:
-                setor = self.api.setor(self.h) or SETOR_ARQUIVO
+                tamanho = self.api.tamanho(self.h)
             except OSError:
-                setor = SETOR_ARQUIVO
+                if not optico:
+                    raise
+                tamanho = self.api.tamanho_por_geometria(self.h)       # CD/DVD: o IOCTL de tamanho costuma falhar
+            try:
+                setor = self.api.setor(self.h) or (SETOR_OPTICO if optico else SETOR_ARQUIVO)
+            except OSError:
+                setor = SETOR_OPTICO if optico else SETOR_ARQUIVO
             super().__init__(tamanho, setor)
         except BaseException as e:
             self.api.fechar(self.h)

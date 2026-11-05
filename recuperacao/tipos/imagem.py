@@ -21,6 +21,7 @@ O_BINARY = getattr(os, 'O_BINARY', 0)
 BLOCO_PADRAO = 1024 * 1024
 BLOCO_MIN = 4096
 BLOCO_MAX = 64 * 1024 * 1024
+TENTATIVAS_OPTICO = 3          # padrão de `tentativas` quando a origem é CD/DVD/Blu-ray
 TENTATIVAS_PADRAO = 1          # opção `tentativas`: leituras de cada setor ruim na segunda passada
 MAX_TENTATIVAS = 20
 SEGUIDOS_PARA_PULAR = 3        # blocos com erro em sequência até começar a pular áreas
@@ -125,14 +126,13 @@ def validar(origem, destino, opcoes, retomada=False):
 
 def _validar_destino_de_disco(origem, destino, retomada):
     """Origem é disco ou volume: não toca no caminho do disco (nem stat), só confere o destino."""
-    if leitor.eh_optico(origem):
-        return 'A leitura completa de CD/DVD chega numa versão futura. Por enquanto só discos, volumes e arquivos.'
     pasta = os.path.dirname(os.path.abspath(destino))
     if not os.path.isdir(pasta):
         return 'A pasta do destino não existe.'
-    erro = unidade.conferir(origem, destino)          # nunca gravar no disco que está sendo lido
-    if erro:
-        return erro
+    if not leitor.eh_optico(origem):                  # CD/DVD é só leitura: o destino nunca cai nele
+        erro = unidade.conferir(origem, destino)      # nunca gravar no disco que está sendo lido
+        if erro:
+            return erro
     if not retomada:
         if os.path.exists(destino):
             return 'Já existe um arquivo no destino. Escolha outro nome para não sobrescrever nada.'
@@ -409,6 +409,12 @@ def executar(job, ctrl):
 
         op = opcoes_de(job.get('opcoes'))
         tentativas, limite, pular = op['tentativas'], float(op['limite_velocidade']), op['pular']
+        if leitor.eh_optico(origem):
+            if 'tentativas' not in (job.get('opcoes') or {}):
+                tentativas = TENTATIVAS_OPTICO              # mídia riscada: vale insistir mais nos setores ruins
+            if not retomada:
+                ctrl.evento('CD/DVD/Blu-ray: a unidade tenta de novo sozinha nos trechos riscados, então a leitura '
+                            'pode demorar bastante (horas, em disco muito danificado). Pode pausar e retomar.')
         setor = max(1, getattr(fd_o, 'setor', SETOR))
         est = {'fase': fase_do_mapa(mapa) if retomada else 'copia', 'lidos': 0}
         t0 = time.monotonic()

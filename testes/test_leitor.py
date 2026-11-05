@@ -204,7 +204,7 @@ class TestImagemDeDisco(CasoComPasta):
         p.start()
         self.addCleanup(p.stop)
 
-    def test_validar_aceita_disco_sem_tocar_no_caminho_e_recusa_optico_e_destino_de_disco(self):
+    def test_validar_aceita_disco_sem_tocar_no_caminho_e_aceita_optico_e_recusa_destino_de_disco(self):
         d = os.path.join(self.trabalho, 'img.bin')
         tocados = []
 
@@ -219,7 +219,7 @@ class TestImagemDeDisco(CasoComPasta):
                 mock.patch.object(os.path, 'realpath', vigia(os.path.realpath)), mock.patch.object(os, 'stat', vigia(os.stat)):
             self.assertIsNone(imagem.validar(DISCO, d, {}))
             self.assertIsNone(imagem.validar('\\\\.\\C:', d, {}))
-            self.assertIn('CD/DVD', imagem.validar('\\\\.\\CdRom0', d, {}))
+            self.assertIsNone(imagem.validar('\\\\.\\CdRom0', d, {}))        # CD/DVD é aceito desde a fase 6
             self.assertIn('Disco bruto', imagem.validar(os.path.join(self.trabalho, 'x'), DISCO, {}))     # destino nunca é disco
             self.assertIn('pasta do destino', imagem.validar(DISCO, os.path.join(self.trabalho, 'nao', 'x.bin'), {}))
         self.assertEqual(tocados, [])
