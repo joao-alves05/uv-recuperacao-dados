@@ -103,7 +103,8 @@ class Ext(Volume):
 
     # ---- mapa de blocos --------------------------------------------------------------------------------------
     def _extents(self, dados, prof=0):
-        """Folhas da árvore de extents em `dados` (cabeçalho + entradas): [(bloco lógico, físico, quantidade)]."""
+        """Folhas da árvore de extents em `dados` (cabeçalho + entradas): [(bloco lógico, físico ou None, quantidade)].
+        Físico None = extent não inicializado: o conteúdo é zero."""
         if len(dados) < 12 or struct.unpack_from('<H', dados, 0)[0] != 0xF30A or prof > 5:
             raise ErroSA('árvore de extents inválida')
         n, _, profundidade = struct.unpack_from('<HHH', dados, 2)
@@ -112,9 +113,10 @@ class Ext(Volume):
             e = dados[12 + 12 * k: 24 + 12 * k]
             if profundidade == 0:
                 bl, ln, hi, lo = struct.unpack('<IHHI', e)
-                if ln > 32768:
-                    ln -= 32768                              # extent não inicializado: bytes valem zero, mas existe
-                out.append((bl, (hi << 32) | lo, ln))
+                if ln > 32768:                               # extent não inicializado (fallocate): lê como zeros, e o
+                    out.append((bl, None, ln - 32768))       # bloco físico pode ter lixo ou sobra de outro arquivo
+                else:
+                    out.append((bl, (hi << 32) | lo, ln))
             else:
                 bl, lo, hi = struct.unpack_from('<IIH', e, 0)
                 out += self._extents(self._bloco((hi << 32) | lo), prof + 1)
@@ -141,7 +143,7 @@ class Ext(Volume):
         iblock = ino_dados[40:100]
         nb = -(-tam // self.bs)
         if flags & F_EXTENTS:
-            ext = sorted(self._extents(iblock))
+            ext = sorted(self._extents(iblock), key=lambda x: x[0])
             fis, atual = [], 0
             for bl, ph, ln in ext:
                 if bl >= nb:

@@ -145,6 +145,18 @@ class TestExt3e4(Base):
         e, b = r['/extents preservados.dat']
         self.assertEqual((e.apagado, e.estado, sha(b)), (True, 'bom', sha(d['pres'])))
 
+    def test_ext4_extent_nao_inicializado_le_como_zeros_e_nao_como_lixo_do_disco(self):
+        f = ie.ExtImg('ext4')
+        dados = conteudo(2 * 1024, 7)
+        f.add_file_fallocate(2, 'fallocate.bin', dados, 3)           # 2 blocos de dados + 3 do fallocate (lixo 0xAA no disco)
+        caminho = f.gravar(os.path.join(self.pasta, 'fa.img'))
+        r = self.varrer(caminho)
+        e, b = r['/fallocate.bin']
+        self.assertEqual(e.tamanho, 5 * 1024)
+        self.assertEqual(b, dados + bytes(3 * 1024), 'o extent não inicializado precisa valer zero')
+        self.assertNotIn(0xAA, b[2 * 1024:])
+        self.assertEqual([o is None for o, _ in e.runs], [False, True])
+
     def test_ext4_corrompido_nao_derruba(self):
         f = ie.ExtImg('ext4')
         f.mkdir(2, 'p')

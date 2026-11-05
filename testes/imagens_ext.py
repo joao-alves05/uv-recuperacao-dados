@@ -109,6 +109,25 @@ class ExtImg:
         self.pastas[pai]['ents'].append([ino, nome, 1, False])
         return ino
 
+    def add_file_fallocate(self, pai, nome, dados, extra_blocos, lixo=bytes([0xAA])):
+        """ext4: `dados` num extent normal e mais `extra_blocos` num extent NÃO inicializado (fallocate) cujos blocos
+        físicos guardam `lixo` (resto de outro arquivo). O tamanho do arquivo cobre os dois."""
+        assert self.eh_ext4
+        ino = self.prox_ino
+        self.prox_ino += 1
+        n = -(-len(dados) // BS)
+        bl = self._blocos(n)
+        for k, b in enumerate(bl):
+            self._escreve_bloco(b, dados[k * BS:(k + 1) * BS])
+        extra = self._blocos(extra_blocos)
+        for b in extra:
+            self._escreve_bloco(b, lixo * BS)
+        pedacos = [(0, bl[0], n), (n, extra[0], extra_blocos + 32768)]
+        self.blocos_de[ino] = list(bl) + list(extra)
+        self.inodes[ino] = self._inode(0x8000 | 0o644, (n + extra_blocos) * BS, 1, 0x80000, self._iblock_extents(pedacos))
+        self.pastas[pai]['ents'].append([ino, nome, 1, False])
+        return ino
+
     def mkdir(self, pai, nome):
         ino = self.prox_ino
         self.prox_ino += 1
