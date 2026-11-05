@@ -1,0 +1,327 @@
+# -*- coding: utf-8 -*-
+"""NTFS: lê a MFT inteira (registros em uso e livres), monta o caminho pelo registro pai e recupera pelos data runs.
+
+Cada registro da MFT é lido com os fixups aplicados. Vale o $FILE_NAME de melhor namespace (o nome 8.3 só se for o
+único) e o $DATA sem nome (os fluxos alternativos são ignorados). $DATA residente vira `inline`; o não residente vira
+`runs` pelos data runs. Registro apagado (flag "em uso" desligada) cujos clusters aparecem ocupados no $Bitmap sai
+`parcial`: o espaço foi reaproveitado. Limites: arquivos comprimidos (LZNT1) ou criptografados saem `ruim`; registros
+de extensão ($ATTRIBUTE_LIST) não são seguidos, então arquivo muito fragmentado pode sair `parcial`; sem leitura do
+espelho da MFT: se o registro 0 estiver ilegível o volume não abre. Os registros do sistema ($MFT, $Bitmap...) e o
+que mora em $Extend não são listados.
+"""
+import struct
+
+from .base import ErroSA, Entrada, Volume, MAX_PROFUNDIDADE, limpar_nome
+
+FILETIME_UNIX = 116444736000000000
+RAIZ = 5
+PRIMEIRO_USUARIO = 24
+PERDIDOS = '/[perdidos]'
+MAX_RUNS = 100000
+
+
+def _tempo(ft):
+    if not ft:
+        return None
+    t = (ft - FILETIME_UNIX) / 1e7
+    return t if -62135596800 < t < 253402300799 else None
+
+
+def _parametros(b):
+    if len(b) < 512 or b[3:11] != b'NTFS    ' or b[510:512] != b'\x55\xaa':
+        raise ErroSA('Setor de boot NTFS inválido.')
+    bps, spc = struct.unpack_from('<HB', b, 11)
+    total, mft, espelho = struct.unpack_from('<QQQ', b, 40)
+    cpr = struct.unpack_from('<b', b, 64)[0]
+    if bps not in (512, 1024, 2048, 4096) or spc not in (1, 2, 4, 8, 16, 32, 64, 128):
+        raise ErroSA('Parâmetros de NTFS inválidos.')
+    reg = (1 << -cpr) if cpr < 0 else cpr * bps * spc
+    if reg < 256 or reg > 65536 or reg & (reg - 1) or total == 0 or mft == 0:
+        raise ErroSA('Parâmetros de NTFS inválidos.')
+    return dict(bps=bps, spc=spc, total=total, mft=mft, tam_reg=reg)
+
+
+def reconhecer(leitor, inicio=0, tamanho=None):
+    try:
+        _parametros(leitor.ler(inicio, 512))
+        return Ntfs(leitor, inicio, tamanho)
+    except (ErroSA, OSError, struct.error):
+        return None
+
+
+def decodificar_runs(dados, ini=0):
+    """[(lcn ou None se esparso, clusters)]. Para na primeira inconsistência."""
+    runs, lcn, i = [], 0, ini
+    while i < len(dados) and dados[i] and len(runs) < MAX_RUNS:
+        nl, no = dados[i] & 15, dados[i] >> 4
+        i += 1
+        if nl == 0 or nl > 8 or no > 8 or i + nl + no > len(dados):
+            break
+        n = int.from_bytes(dados[i:i + nl], 'little')
+        i += nl
+        if no:
+            lcn += int.from_bytes(dados[i:i + no], 'little', signed=True)
+            runs.append((lcn, n))
+        else:
+            runs.append((None, n))
+        i += no
+    return runs
+
+
+def aplicar_fixups(rec):
+    """Devolve o registro com os fixups desfeitos, ou None se for inválido (rasgado ou fora do formato)."""
+    if rec[:4] != b'FILE' or len(rec) < 48:
+        return None
+    uo, uc = struct.unpack_from('<HH', rec, 4)
+    if uc < 2 or uo < 42 or uo + uc * 2 > len(rec) or (uc - 1) * 512 > len(rec):
+        return None
+    b = bytearray(rec)
+    chk = bytes(b[uo:uo + 2])
+    for i in range(1, uc):
+        fim = i * 512
+        if bytes(b[fim - 2:fim]) != chk:
+            return None
+        b[fim - 2:fim] = b[uo + 2 * i: uo + 2 * i + 2]
+    return bytes(b)
+
+
+def atributos(rec):
+    """Gera (tipo, nome, nao_residente, flags, conteudo/atributo bruto, dados_runs, tamanho_real, tamanho_alocado)."""
+    i = struct.unpack_from('<H', rec, 20)[0]
+    while i + 16 <= len(rec):
+        tipo, tam = struct.unpack_from('<II', rec, i)
+        if tipo == 0xFFFFFFFF or tam < 16 or tam % 8 or i + tam > len(rec):
+            return
+        nr, nlen = rec[i + 8], rec[i + 9]
+        noff, flags = struct.unpack_from('<HH', rec, i + 10)
+        nome = rec[i + noff: i + noff + nlen * 2].decode('utf-16-le', 'replace') if nlen else ''
+        if not nr:
+            clen, coff = struct.unpack_from('<IH', rec, i + 16)
+            if coff + clen > tam:
+                return
+            yield tipo, nome, False, flags, rec[i + coff: i + coff + clen], None, clen
+        else:
+            if tam < 64:
+                return
+            roff = struct.unpack_from('<H', rec, i + 32)[0]
+            real = struct.unpack_from('<Q', rec, i + 48)[0]
+            yield tipo, nome, True, flags, None, decodificar_runs(rec[i: i + tam], roff), real
+        i += tam
+
+
+class Ntfs(Volume):
+    tipo = 'NTFS'
+
+    def __init__(self, leitor, inicio=0, tamanho=None):
+        super().__init__(leitor, inicio, tamanho)
+        try:
+            self.__dict__.update(_parametros(self._ler(0, 512)))
+        except OSError as e:
+            raise ErroSA('Não consegui ler o setor de boot: %s' % e) from None
+        self.csize = self.bps * self.spc
+        self.rotulo = ''
+        self.nclusters = min(self.total // self.spc, self.tamanho // self.csize)
+        self._mft_runs = None
+        self._bitmap = None
+        self._pg = {}
+
+    # ---- MFT -------------------------------------------------------------------------------------------------
+    def _registro_bruto(self, off):
+        return self._ler(off, self.tam_reg)
+
+    def _carregar_mft(self):
+        rec = aplicar_fixups(self._registro_bruto(self.mft * self.csize))
+        if rec is None:
+            raise ErroSA('O registro 0 da MFT está ilegível.')
+        for tipo, nome, nr, _f, _c, runs, real in atributos(rec):
+            if tipo == 0x80 and not nome and nr:
+                self._mft_runs, self._mft_tam = runs, real
+                return
+        raise ErroSA('A MFT não tem $DATA não residente.')
+
+    def _blocos_mft(self):
+        """Gera (número do primeiro registro, bytes) percorrendo os data runs da MFT em pedaços de até 4 MiB."""
+        falta, n = self._mft_tam, 0
+        por_pedaco = max(1, (4 << 20) // self.tam_reg) * self.tam_reg
+        for lcn, cl in self._mft_runs:
+            tam = cl * self.csize
+            off = 0
+            while off < tam and falta > 0:
+                q = min(por_pedaco, tam - off, falta)
+                q -= q % self.tam_reg
+                if q <= 0 or lcn is None or (lcn * self.csize + off + q) > self.tamanho:
+                    return
+                yield n, self._ler(lcn * self.csize + off, q)
+                n += q // self.tam_reg
+                off += q
+                falta -= q
+
+    def _bit_ocupado(self, c):
+        """True se o $Bitmap marca o cluster como ocupado; None se não deu para ler o $Bitmap."""
+        if self._bitmap is None:
+            return None
+        pos = c // 8
+        for ini, fim, runs_off in self._bitmap:
+            if ini <= pos < fim:
+                pg = (runs_off + pos - ini) // 4096
+                d = self._pg.get(pg)
+                if d is None:
+                    if len(self._pg) > 256:
+                        self._pg.clear()
+                    d = self._pg[pg] = self._ler(pg * 4096, min(4096, self.tamanho - pg * 4096))
+                return bool(d[runs_off + pos - ini - pg * 4096] >> (c % 8) & 1)
+        return None
+
+    # ---- varredura ------------------------------------------------------------------------------------------
+    def _ler_registro(self, n, dados):
+        return aplicar_fixups(dados[n * self.tam_reg:(n + 1) * self.tam_reg]) if dados else None
+
+    def _extrair(self, n, rec):
+        flags = struct.unpack_from('<H', rec, 22)[0]
+        base = struct.unpack_from('<Q', rec, 32)[0] & 0xFFFFFFFFFFFF
+        info = dict(n=n, em_uso=bool(flags & 1), dir=bool(flags & 2), base=base, nome=None, ns=9, pai=None,
+                    criado=None, modif=None, acess=None, tam=0, runs=None, inline=None, achou_dados=False,
+                    comprimido=False, cifrado=False, lista=False, rotulo=None)
+        for tipo, nome, nr, af, cont, runs, real in atributos(rec):
+            if tipo == 0x10 and not nr and len(cont) >= 32:
+                info['criado'], info['modif'], _, info['acess'] = (_tempo(x) for x in struct.unpack_from('<QQQQ', cont, 0))
+            elif tipo == 0x30 and not nr and len(cont) >= 66:
+                nl, ns = cont[64], cont[65]
+                if 66 + nl * 2 > len(cont):
+                    continue
+                if info['nome'] is None or (info['ns'] == 2 and ns != 2):
+                    info['nome'] = cont[66:66 + nl * 2].decode('utf-16-le', 'replace')
+                    info['ns'] = ns
+                    info['pai'] = struct.unpack_from('<Q', cont, 0)[0] & 0xFFFFFFFFFFFF
+                    if struct.unpack_from('<I', cont, 56)[0] & 0x10000000:
+                        info['dir'] = True
+            elif tipo == 0x20:
+                info['lista'] = True
+            elif tipo == 0x60 and not nr:
+                info['rotulo'] = cont.decode('utf-16-le', 'replace')
+            elif tipo == 0x80 and not nome and not info['achou_dados']:
+                info['achou_dados'] = True
+                info['tam'] = real
+                info['comprimido'] = bool(af & 0x0001)
+                info['cifrado'] = bool(af & 0x4000)
+                if nr:
+                    info['runs'] = runs
+                else:
+                    info['inline'] = cont
+        return info
+
+    def _caminho(self, n, infos, memo):
+        """Caminho do pai de `n` (sem o próprio nome) ou None se passa por registro de sistema. PERDIDOS se órfão."""
+        cadeia, atual = [], n
+        for _ in range(MAX_PROFUNDIDADE):
+            if atual in memo:
+                base = memo[atual]
+                break
+            i = infos.get(atual)
+            if atual == RAIZ:
+                base = '/'
+                break
+            if i is None or i['nome'] is None:
+                base = PERDIDOS
+                break
+            if atual < PRIMEIRO_USUARIO:
+                base = None                                  # registro de sistema ($Extend...)
+                break
+            cadeia.append(atual)
+            atual = i['pai']
+        else:
+            base = PERDIDOS                                  # laço ou profundidade absurda
+        for k in reversed(cadeia):
+            if base is not None:
+                base = (base.rstrip('/') + '/' + limpar_nome(infos[k]['nome']))
+            memo[k] = base
+        return base
+
+    def varrer(self):
+        try:
+            self._carregar_mft()
+        except OSError as e:
+            raise ErroSA('Não consegui ler a MFT: %s' % e) from None
+        infos = {}
+        for ini, bloco in self._blocos_mft():
+            for k in range(len(bloco) // self.tam_reg):
+                rec = aplicar_fixups(bloco[k * self.tam_reg:(k + 1) * self.tam_reg])
+                if rec is None:
+                    continue
+                n = ini + k
+                try:
+                    info = self._extrair(n, rec)
+                except (struct.error, IndexError):
+                    continue
+                if n == 3 and info['rotulo'] is not None:
+                    self.rotulo = info['rotulo']
+                if n == 6:
+                    self._guardar_bitmap(info)
+                if info['base'] == 0 and (info['nome'] is not None or n == RAIZ):
+                    infos[n] = info
+        memo = {}
+        for n in sorted(infos):
+            i = infos[n]
+            if n < PRIMEIRO_USUARIO or i['nome'] is None:
+                continue
+            pai = self._caminho(i['pai'], infos, memo)
+            if pai is None:
+                continue
+            nome = limpar_nome(i['nome'])
+            caminho = (pai.rstrip('/') + '/' + nome)
+            ancestral_apagado = False
+            if pai != '/' and pai != PERDIDOS:
+                p = infos.get(i['pai'])
+                ancestral_apagado = bool(p) and not p['em_uso']
+            e = Entrada(nome=nome, caminho=caminho, eh_dir=i['dir'], tamanho=0 if i['dir'] else i['tam'],
+                        apagado=not i['em_uso'] or ancestral_apagado, criado=i['criado'], modificado=i['modif'],
+                        acessado=i['acess'], ident=n)
+            if not i['dir']:
+                self._dados(e, i)
+            yield e
+
+    def _guardar_bitmap(self, info):
+        if info['runs']:
+            faixas, pos = [], 0
+            for lcn, cl in info['runs']:
+                if lcn is not None:
+                    faixas.append((pos, pos + cl * self.csize, lcn * self.csize))
+                pos += cl * self.csize
+            self._bitmap = faixas
+
+    def _dados(self, e, i):
+        if i['comprimido'] or i['cifrado']:
+            e.estado, e.nota = 'ruim', ('comprimido (LZNT1)' if i['comprimido'] else 'criptografado (EFS)') + ': não suportado'
+            return
+        if i['inline'] is not None:
+            e.inline = i['inline']
+            e.tamanho = len(i['inline'])
+            return
+        if not i['achou_dados']:
+            if i['lista']:
+                e.estado, e.nota = 'parcial', 'dados em registro de extensão ($ATTRIBUTE_LIST), não seguido'
+            return
+        runs, falta = [], i['tam']
+        for lcn, cl in i['runs'] or []:
+            if falta <= 0:
+                break
+            n = min(cl * self.csize, falta)
+            if lcn is not None and (lcn + cl) > self.nclusters:
+                e.estado, e.nota = 'ruim', 'data run fora do volume'
+                return
+            runs.append((None if lcn is None else self.inicio + lcn * self.csize, n))
+            falta -= n
+        e.runs = runs
+        if falta > 0:
+            e.estado, e.nota = 'parcial', 'data runs não cobrem o tamanho'
+            return
+        if e.apagado and e.tamanho:
+            try:
+                usados = any(self._bit_ocupado(c) for lcn, cl in i['runs'] if lcn is not None
+                             for c in range(lcn, lcn + cl))
+            except OSError:
+                usados = False
+            if usados:
+                e.estado, e.nota = 'parcial', 'clusters já reutilizados (conforme o $Bitmap)'
+            elif self._bitmap is None:
+                e.nota = 'sem $Bitmap para conferir reuso'
