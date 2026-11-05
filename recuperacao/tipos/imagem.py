@@ -709,8 +709,9 @@ def executar(job, ctrl):
                 h_destino = _sha256(conferencia, ctrl)
         except OSError as e:
             # a imagem já está pronta: falha só na releitura de conferência não pode virar "erro inesperado"
-            ctrl.evento('A imagem foi copiada, mas a conferência por SHA-256 não pôde terminar (%s). '
-                        'Confira a imagem por outro meio antes de confiar nela.' % (getattr(e, 'strerror', None) or e))
+            ctrl.aviso_final = ('a conferência por SHA-256 não pôde terminar (%s). A imagem foi copiada; '
+                                'confira por outro meio antes de confiar nela.' % (getattr(e, 'strerror', None) or e))
+            ctrl.evento('ATENÇÃO: ' + ctrl.aviso_final)
             _relatorio_final(ctrl, job, faixas, tamanho, setor, origem, destino, None)
             return 'concluido'
         if h_destino in ('pausado', 'cancelado'):

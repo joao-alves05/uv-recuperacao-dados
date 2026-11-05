@@ -39,6 +39,7 @@ class TestConferenciaFinal(Base):
         self.assertEqual(job['estado'], 'concluido', job['erro'])
         textos = ' '.join(e['texto'] for e in self.store.eventos(job['id']))
         self.assertIn('conferência por SHA-256 não pôde terminar', textos)
+        self.assertTrue(job['mensagem'].startswith('Concluído, mas a conferência por SHA-256 não pôde terminar'), job['mensagem'])
         with open(origem, 'rb') as a, open(destino, 'rb') as b:
             self.assertEqual(a.read(), b.read())
 
