@@ -68,6 +68,12 @@ MOTIVOS = {'sem_conteudo': 'arquivos apagados só com o nome (o sistema de arqui
            'esparso': 'arquivos esparsos (com buracos), que a lista ainda não representa'}
 
 
+def _offsets_com_nome(store, job_id):
+    """Onde começam (na origem) os arquivos que a lista pelo sistema de arquivos já achou; o carving ignora esses."""
+    return {l[0] for l in store._con().execute(
+        'SELECT offset FROM achados WHERE job_id=? AND caminho IS NOT NULL AND tamanho > 0', (job_id,))}
+
+
 def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho):
     """Lista os arquivos pelos sistemas de arquivos da origem (rápido, com nome e caminho, apagados incluídos) e grava
     em `achados`. Devolve 'pausado'/'cancelado' se parou no meio, ou None se terminou. O ponto de retomada é quantas
@@ -169,6 +175,8 @@ def executar(job, ctrl):
                         % ('rápida' if op['modo'] == 'rapida' else 'profunda', tamanho, len(catalogo.assinaturas)))
         varredor = carving.Varredor(aberto, catalogo, op['modo'], op['bloco'])
         total = achados.contar(store, job_id)
+        com_nome = _offsets_com_nome(store, job_id) if op['sistema_antes'] else set()
+        repetidos = 0                                       # achados do carving que já estavam na lista com nome
         pendentes = []
         est = {'pos': inicio, 'ruins': ruins}
         atraso = config.atraso_bloco()
@@ -184,6 +192,10 @@ def executar(job, ctrl):
 
         ctrl.progresso(inicio, tamanho, texto(), ruins)
         for pos, novos, ruins_bloco in varredor.blocos(inicio):
+            if com_nome and novos:
+                restam = [a for a in novos if a.get('offset') not in com_nome]
+                repetidos += len(novos) - len(restam)
+                novos = restam
             pendentes.extend(novos)
             total += len(novos)
             est['pos'], est['ruins'] = pos, est['ruins'] + ruins_bloco
@@ -203,6 +215,9 @@ def executar(job, ctrl):
     por_grupo = achados.contar_por_grupo(store, job_id)
     resumo = ', '.join('%d %s' % (n, NOMES_GRUPO.get(g, g)) for g, n in sorted(por_grupo.items(), key=lambda x: -x[1]))
     ctrl.evento('Varredura concluída: %d arquivos achados%s.' % (total, ' (%s)' % resumo if resumo else ''))
+    if repetidos:
+        ctrl.evento('%d achados da busca por assinatura eram arquivos que a lista pelo sistema de arquivos já tinha '
+                    '(mesmo ponto de início) e ficaram só com o nome.' % repetidos)
     if varredor.erros_validador:
         ctrl.evento('%d candidatos foram descartados por dados fora do padrão.' % varredor.erros_validador)
     if est['ruins']:

@@ -152,22 +152,41 @@ class TestSistemaFat(Base):
             r = self.req('POST', '/api/jobs', {'tipo': 'varredura', 'origem': caminho, 'opcoes': opcoes})
             self.assertEqual(r.status_code, 400, opcoes)
 
-    def test_sistema_antes_do_carving_no_mesmo_job(self):
+    def test_sistema_antes_do_carving_no_mesmo_job_sem_duplicar(self):
         f = im.FatImg('FAT16')
         jpg = A.jpeg(scan=3000, data='2021:05:17 10:20:30')
+        escondido = A.jpeg(scan=2000, semente=9)
         e, cs = f.add('/', 'foto antiga apagada.jpg', jpg)
         f.apagar(e, cs)
         f.add('/', 'leia-me.txt', conteudo(300, 5))
         caminho = f.gravar(os.path.join(self.trabalho, 'fat16.img'))
+        fora = f.dados_ini * 512 + 3000 * f.csize               # área livre que nenhuma pasta aponta
+        with open(caminho, 'r+b') as g:
+            g.seek(fora)
+            g.write(escondido)
         job = self.varrer(caminho, 'rapida', sistema_antes=True, bloco=65536)
         self.esperar_estado(job['id'], 'concluido')
         lista = self.lista(job['id'])
         com_nome = [a for a in lista if a['caminho']]
         sem_nome = [a for a in lista if not a['caminho']]
         self.assertEqual({a['caminho'] for a in com_nome}, {'/foto antiga apagada.jpg', '/leia-me.txt'})
-        self.assertTrue(any(a['tipo'] == 'JPG' and a['tamanho'] == len(jpg) for a in sem_nome), 'o carving também rodou')
+        foto = next(a for a in com_nome if a['caminho'].endswith('.jpg'))
+        self.assertFalse([a for a in sem_nome if a['offset'] == foto['offset']], 'o carving repetiu o arquivo com nome')
+        self.assertEqual([(a['offset'], a['tamanho']) for a in sem_nome if a['tipo'] == 'JPG'], [(fora, len(escondido))],
+                         'o que só o carving acha continua aparecendo')
         self.assertEqual(self.ctx.store.obter_checkpoint(job['id'])['fase'], 'carving')
-        self.assertEqual(com_nome[0]['id'] < sem_nome[0]['id'], True, 'o sistema de arquivos vem antes')
+        self.assertLess(com_nome[0]['id'], sem_nome[0]['id'], 'o sistema de arquivos vem antes')
+        self.assertTrue(any('ficaram só com o nome' in t for t in self.eventos(job['id'])))
+
+    def test_sem_sistema_antes_o_carving_mantem_o_arquivo_repetido(self):
+        f = im.FatImg('FAT16')
+        jpg = A.jpeg(scan=3000)
+        e, cs = f.add('/', 'foto.jpg', jpg)
+        f.apagar(e, cs)
+        caminho = f.gravar(os.path.join(self.trabalho, 'f16.img'))
+        job = self.varrer(caminho, 'rapida', bloco=65536)
+        self.esperar_estado(job['id'], 'concluido')
+        self.assertTrue(any(a['tipo'] == 'JPG' and a['tamanho'] == len(jpg) for a in self.lista(job['id'])))
 
 
 class TestDiscoComDuasParticoes(Base):
