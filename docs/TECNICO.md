@@ -1,6 +1,20 @@
-# Recuperação de Dados — fase 1
+# Recuperação de Dados — notas técnicas
 
-Serviço local com jobs gravados em disco e um painel que se reconecta. O contrato com o painel está em `docs/FASE1.md`.
+Serviço local com jobs gravados em disco e um painel que se reconecta. O contrato com o painel está em `docs/FASE1.md`; as fases seguintes têm contrato próprio (`FASE2.md`, `FASE3-4.md`, `FASE5.md`, `FASE6.md`). O guia de uso está no `README.md`.
+
+## Mapa dos módulos (fases 2 a 6)
+
+| Módulo | Papel |
+|---|---|
+| `recuperacao/leitor.py` | Único ponto de leitura da origem (arquivo, disco, volume, CD/DVD), só leitura, alinhado ao setor |
+| `recuperacao/fontes.py`, `unidade.py` | Lista de discos e recusa de destino no mesmo disco da origem |
+| `recuperacao/tipos/imagem.py` | Cópia bit a bit com mapa de setores ruins (estilo ddrescue), inclusive CD/DVD |
+| `recuperacao/particoes.py`, `tipos/particoes.py` | Tabelas MBR/GPT/BSD/APM, busca de partição perdida e tabela proposta (`.json`, `.mbr`, `.gpt`) |
+| `recuperacao/sa/` | Sistemas de arquivos em Python puro, só leitura: FAT, exFAT, NTFS, ext, ISO 9660/Joliet/Rock Ridge, UDF |
+| `recuperacao/carving.py`, `validar.py`, `assinaturas.json` | Busca por assinatura e validação de cada arquivo |
+| `recuperacao/tipos/varredura.py`, `recuperar.py` | Jobs de varredura (sistema de arquivos, rápida, profunda) e de recuperação para o destino, com relatório |
+| `recuperacao/setores_ruins.py` | Cruza o mapa da imagem com os arquivos: trechos não lidos viram `lacunas.csv` |
+| `recuperacao/achados.py`, `rotas_*.py` | Tabela `achados` e as rotas de resultados, partições e árvore de pastas |
 
 ## Arquitetura
 
@@ -61,3 +75,26 @@ Só usam arquivos temporários, porta livre e pasta de dados temporária; nunca 
 ## Dados pessoais e como apagar
 
 Caminhos de origem e destino (que podem ter nomes de pessoas ou clientes) ficam no banco `jobs.db` (tabelas `jobs` e `eventos`), em `logs/` e no mapa ao lado de cada imagem. Para apagar: cancele ou deixe terminar os jobs, feche o serviço (`POST /api/desligar` ou Ctrl+C) e apague `jobs.db`, `jobs.db-wal`, `jobs.db-shm` e a pasta `logs/` da pasta de dados; apague também cada imagem e seu `.mapa.json`. Apagar a pasta de dados inteira remove também o token e a marca (um novo token é criado na próxima subida).
+
+## Desempenho da varredura (fase 7)
+
+Medido num arquivo sintético de 1 GiB (dados aleatórios com 205 arquivos de 8 tipos espalhados), no PC de desenvolvimento (Windows, i5 de 4 núcleos, arquivo no cache do sistema, então os números mostram o limite do programa, não o do disco). Leitura pura em blocos de 4 MiB: 1070 a 1430 MB/s.
+
+| | antes | depois |
+|---|---|---|
+| Rápida, só o motor | 85 MB/s | 1585 MB/s |
+| Profunda, só o motor | 83 MB/s | 220 MB/s |
+| Rápida, job completo (serviço, banco, 205 achados) | não medido | 413 MiB/s (2,5 s) |
+| Profunda, job completo | não medido | 161 MiB/s (6,4 s) |
+
+O que mudou (`recuperacao/carving.py`):
+- **Rápida:** em vez de 17 buscas por bloco, pega o primeiro byte de cada setor de uma vez com fatia de passo `setor` (em C) e só confere o cabeçalho completo onde esse byte bate. Mais leitura antecipada: 2 threads (cada uma com a sua própria abertura só leitura da origem) mantêm 4 blocos prontos à frente.
+- **Profunda:** continua a olhar todo byte (um `bytes.find` por cabeçalho, que no CPython gira em torno de 1,8 GB/s por cabeçalho), mas a busca de candidatos roda em até 3 processos (`min(3, núcleos - 1)`), cada um lendo o seu bloco; a validação continua em ordem na thread do job. Tentei a busca de todos os cabeçalhos por uma regex só e por filtro de bytes com `translate` + inteiros grandes: ficaram em ~90 MB/s, sem ganho.
+- Só entra em segundo plano em origem com caminho real e 64 MiB ou mais; abaixo disso, ou com leitor falso, tudo roda na thread do job. Se um trabalhador não consegue abrir a origem ou morre, a varredura segue sozinha no mesmo ponto. Pausar fecha o gerador, que encerra os trabalhadores.
+- **Memória:** no máximo `2 x trabalhadores` blocos em andamento (cada um 4 MiB + a sobra do cabeçalho). Pico medido no processo principal: 35 MiB na rápida e 27 MiB na profunda, com a origem de 1 GiB; cada processo da profunda usa mais uns 30 MiB.
+
+### Imagens grandes (acima de 4 GiB e de 1 TB)
+
+- Todo offset, tamanho e posição é `int` do Python; no banco são `INTEGER` de 64 bits; no JSON do mapa e do painel valem até 2^53 (9 PB). Os campos de 32 bits que existem são os do formato dos arquivos (tamanhos dentro de JPG, ZIP, etc.), lidos com o cuidado de sempre.
+- Achado: o único ponto de 32 bits na leitura era o `ReadFile` do Windows (`DWORD`); agora cada chamada pede no máximo 1 GiB e o `Leitor` repete até completar. Teste com arquivo esparso de 4 GiB + 16 MiB (acha um JPG em 4 GiB + 1 MiB e um PNG mais adiante, nos dois modos, com e sem segundo plano) e teste do teto do `ReadFile`.
+- A varredura não guarda mapa nenhum: a memória não depende do tamanho da origem. O job de imagem guarda o mapa como lista de faixas `[inicio, fim, estado]`: uma faixa só no começo, e cresce com o número de trechos ruins, não com o tamanho do disco. Um disco de 1 TB sem erros é uma faixa; com milhões de setores ruins espalhados a lista (que é regravada a cada checkpoint) fica grande e lenta. Não foi medido com um disco desses.
