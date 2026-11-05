@@ -133,6 +133,13 @@ def registrar(app, ctx):
             return _erro(str(e), 400)
         if not ids:
             return _erro('Nenhum arquivo escolhido para recuperar.', 400)
+        total, livre, aviso = achados.tamanho_dos_ids(store, ids), tipo_recuperar.espaco_livre(destino), None
+        if livre is not None and livre < total:
+            if livre < total // 2:
+                return _erro('Não cabe: os arquivos somam %s e o destino tem só %s livres. Escolha outro disco ou menos arquivos.'
+                             % (tipo_recuperar._tam(total), tipo_recuperar._tam(livre)), 400)
+            aviso = ('Os arquivos somam %s e o destino tem %s livres: pode faltar espaço para alguns.'
+                     % (tipo_recuperar._tam(total), tipo_recuperar._tam(livre)))
         try:
             novo = store.criar('recuperar', job['origem'], destino, {'varredura': job_id, 'total': len(ids)})
         except DestinoEmUso:
@@ -140,7 +147,7 @@ def registrar(app, ctx):
         store.salvar_checkpoint(novo['id'], {'ids': ids})          # antes de entrar na fila
         store.evento(novo['id'], 'Pedido recebido: recuperar %d arquivos para %s.' % (len(ids), destino))
         ctx.executor.submeter(novo['id'])
-        return jsonify(store.obter(novo['id'])), 201
+        return jsonify(dict(store.obter(novo['id']), **({'aviso': aviso} if aviso else {}))), 201
 
     def job_recuperar(job_id):
         job = store.obter(job_id) if ID_JOB.fullmatch(job_id) else None

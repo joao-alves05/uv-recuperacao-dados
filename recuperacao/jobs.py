@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS ix_achados_job ON achados (job_id, id);
 CREATE TABLE IF NOT EXISTS checkpoints (job_id TEXT PRIMARY KEY, dados TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recuperacoes (
     job_id TEXT NOT NULL, achado_id INTEGER NOT NULL, ordem INTEGER NOT NULL, arquivo TEXT, resultado TEXT NOT NULL,
-    bytes INTEGER NOT NULL DEFAULT 0, sha256 TEXT, quando REAL, PRIMARY KEY (job_id, achado_id));
+    bytes INTEGER NOT NULL DEFAULT 0, sha256 TEXT, quando REAL, motivo TEXT, PRIMARY KEY (job_id, achado_id));
 '''
 
 
@@ -249,6 +249,12 @@ class JobStore:
                 except sqlite3.OperationalError:
                     if coluna not in {l['name'] for l in con.execute('PRAGMA table_info(achados)')}:
                         raise                 # outra cópia pode ter criado a coluna no mesmo instante
+        if 'motivo' not in {l['name'] for l in con.execute('PRAGMA table_info(recuperacoes)')}:
+            try:
+                con.execute('ALTER TABLE recuperacoes ADD COLUMN motivo TEXT')       # bancos da 5.3
+            except sqlite3.OperationalError:
+                if 'motivo' not in {l['name'] for l in con.execute('PRAGMA table_info(recuperacoes)')}:
+                    raise
 
     def adicionar_achados(self, job_id, lista, checkpoint=None):
         """Grava achados (dicts, ver achados.normalizar) numa transação só e devolve os ids novos. Se vier `checkpoint`

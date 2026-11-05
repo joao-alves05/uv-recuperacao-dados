@@ -13,9 +13,10 @@ import html
 import io
 import os
 import re
+import shutil
 import time
 
-from .. import achados, config, leitor, unidade
+from .. import achados, config, leitor, setores_ruins, unidade
 from ..executor import ErroJob
 from ..leitor import ErroLeitor
 from . import imagem
@@ -25,11 +26,28 @@ PASTAS = {'foto': 'Fotos', 'video': 'Videos', 'audio': 'Audios', 'documento': 'D
 BLOCO = 1024 * 1024
 MAX_NOME = 120
 _PROIBIDOS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-RESULTADOS = {'ok': 'ok', 'com_falhas': 'com trechos ilegíveis (zerados)', 'sumiu': 'achado não encontrado'}
+RESULTADOS = {'ok': 'ok', 'com_falhas': 'com trechos ilegíveis (zerados)', 'sumiu': 'achado não encontrado',
+              'falhou': 'falhou ao gravar'}
 CSS_RELATORIO = ('body{font-family:sans-serif;margin:2rem}table{border-collapse:collapse;width:100%}'
                  'th,td{border:1px solid #ccc;padding:4px 8px;text-align:left;font-size:14px}th{background:#f0f0f0}'
                  '.num{text-align:right}.ruim{color:#a00}.parcial{color:#a60}')
 ROTULO_ESTADO = {'bom': 'bom', 'parcial': 'parcial', 'ruim': 'ruim'}
+
+
+def espaco_livre(destino):
+    """Bytes livres no disco onde o destino ficará (olha a pasta existente mais próxima); None se não der para saber."""
+    pasta = os.path.abspath(destino)
+    for _ in range(64):
+        if os.path.isdir(pasta):
+            break
+        pai = os.path.dirname(pasta)
+        if pai == pasta:
+            break
+        pasta = pai
+    try:
+        return shutil.disk_usage(pasta).free
+    except OSError:
+        return None
 
 
 def validar(origem, destino, opcoes=None, retomada=False):
@@ -78,6 +96,8 @@ def _copiar(aberto, achado, tmp, ctrl):
     h = hashlib.sha256()
     lacunas = 0
     feitos = 0
+    ruins = getattr(aberto, 'ruins', None) or []         # faixas não lidas do mapa da imagem (fase 6)
+    aberto.lacunas_do_arquivo = perdidos = []            # [(deslocamento no arquivo, bytes)] que são zeros por falta de leitura
     with open(tmp, 'wb') as saida:
         falta = achado['tamanho']
         for off, n in achados.extents_de(achado):
@@ -93,6 +113,11 @@ def _copiar(aberto, achado, tmp, ctrl):
                         raise OSError('leitura curta')
                 except OSError:
                     dados, lacunas = bytes(pedaco), lacunas + 1
+                    perdidos.append((feitos, pedaco))
+                else:
+                    for a, b in setores_ruins.cortes(ruins, off, pedaco):
+                        lacunas += 1
+                        perdidos.append((feitos + a - off, b - a))
                 saida.write(dados)
                 h.update(dados)
                 off, n, falta, feitos = off + pedaco, n - pedaco, falta - pedaco, feitos + pedaco
@@ -136,9 +161,15 @@ def executar(job, ctrl):
         aberto = leitor.abrir(origem)                            # única abertura da origem: só leitura
     except ErroLeitor as e:
         raise ErroJob(str(e)) from None
-    pronto = lambda l: l is not None and l['resultado'] in RESULTADOS
+    pronto = lambda l: l is not None and l['resultado'] in RESULTADOS and l['resultado'] != 'falhou'     # falhou: tenta de novo ao retomar
     with aberto:
+        aberto.ruins = setores_ruins.carregar(origem)           # origem que é imagem com mapa: setores ruins viram lacunas
         ctrl.evento('Recuperando %d arquivos para %s.' % (len(ids), destino))
+        livre = espaco_livre(destino)
+        if livre is not None and livre < total - feitos:
+            ctrl.evento('Atenção: o destino tem %s livres e faltam gravar %s; alguns arquivos podem falhar por falta de espaço.'
+                        % (_tam(livre), _tam(total - feitos)))
+        falhas = 0
         ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (sum(pronto(l) for l in linhas.values()), len(ids)))
         for ordem, achado_id in enumerate(ids):
             if ctrl.cancelamento_pedido():
@@ -184,18 +215,32 @@ def executar(job, ctrl):
                 else:
                     os.replace(tmp, final)
             except OSError as e:
+                # um arquivo que não grava (disco cheio, nome inválido, permissão) não derruba o trabalho
                 _remover(tmp)
-                raise ErroJob('Não consegui gravar %s no destino: %s' % (rel, e.strerror or e)) from None
+                motivo = str(e.strerror or e)[:200]
+                con.execute("UPDATE recuperacoes SET resultado='falhou', motivo=?, bytes=0, quando=? "
+                            "WHERE job_id=? AND achado_id=?", (motivo, time.time(), job_id, achado_id))
+                ctrl.evento('Não consegui gravar %s: %s' % (rel, motivo))
+                falhas += 1
+                ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (ordem + 1, len(ids)))
+                continue
             agora = time.time()
             con.execute('BEGIN IMMEDIATE')
             try:
                 con.execute('UPDATE recuperacoes SET arquivo=?, resultado=?, bytes=?, sha256=?, quando=? '
                             'WHERE job_id=? AND achado_id=?', (rel, resultado, n, sha, agora, job_id, achado_id))
                 con.execute('UPDATE achados SET recuperado_em=? WHERE id=?', (agora, achado_id))
+                if resultado == 'com_falhas':
+                    con.execute("UPDATE achados SET estado='parcial' WHERE id=? AND estado='bom'", (achado_id,))
                 con.execute('COMMIT')
             except BaseException:
                 con.execute('ROLLBACK')
                 raise
+            if aberto.lacunas_do_arquivo:
+                try:
+                    setores_ruins.anotar(destino, rel, aberto.lacunas_do_arquivo)
+                except OSError:
+                    ctrl.evento('Não consegui gravar lacunas.csv no destino.')
             feitos += n
             ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (ordem + 1, len(ids)))
             ctrl.checkpoint(None)
@@ -203,6 +248,8 @@ def executar(job, ctrl):
                 time.sleep(config.atraso_bloco())          # só para os testes
     nomes = escrever_relatorio(store, job)
     store.salvar_checkpoint(job_id, dict(store.obter_checkpoint(job_id) or {}, relatorio=nomes))
+    if falhas:
+        ctrl.evento('%d arquivos não puderam ser gravados (veja o motivo no relatório). Peça de novo para tentar só esses.' % falhas)
     ctrl.evento('Recuperação concluída. Relatório: %s.' % ', '.join(nomes))
     return 'concluido'
 
@@ -222,7 +269,7 @@ def _celula(v):
 
 
 def linhas_do_relatorio(store, job):
-    sql = ('SELECT r.ordem, r.arquivo, r.resultado, r.bytes, r.sha256, a.nome, a.caminho, a.grupo, a.tipo, a.estado, '
+    sql = ('SELECT r.ordem, r.arquivo, r.resultado, r.bytes, r.sha256, r.motivo, a.nome, a.caminho, a.grupo, a.tipo, a.estado, '
            'a.pontuacao, a.tamanho, a.data FROM recuperacoes r LEFT JOIN achados a ON a.id=r.achado_id '
            'WHERE r.job_id=? ORDER BY r.ordem')
     return [dict(l) for l in store._con().execute(sql, (job['id'],))]
@@ -248,11 +295,11 @@ def escrever_relatorio(store, job):
         f.write('﻿')
         w = csv.writer(f)
         w.writerow(['arquivo_recuperado', 'nome', 'caminho_original', 'grupo', 'tipo', 'estado', 'pontuacao', 'tamanho',
-                    'bytes_gravados', 'resultado', 'sha256', 'data'])
+                    'bytes_gravados', 'resultado', 'motivo', 'sha256', 'data'])
         for l in linhas:
             w.writerow([_celula(x) for x in (l['arquivo'], l['nome'], l['caminho'], l['grupo'], l['tipo'], l['estado'],
                                              l['pontuacao'], l['tamanho'], l['bytes'], RESULTADOS.get(l['resultado'], l['resultado']),
-                                             l['sha256'], l['data'])])
+                                             l['motivo'], l['sha256'], l['data'])])
     nomes.append(os.path.basename(caminho))
     caminho, f = _criar_exclusivo(destino, 'relatorio', '.html', job['id'])
     with f:
@@ -286,7 +333,8 @@ def _html(linhas, job):
         out.write('<tr><td>%s</td><td>%s</td><td class="%s">%s</td><td>%s</td><td class="num">%s</td><td>%s</td><td>%s</td></tr>'
                   % (e(l['arquivo'] or ''), e(l['tipo'] or ''), e(l['estado'] or ''), e(ROTULO_ESTADO.get(l['estado'], l['estado'] or '')),
                      e('' if l['pontuacao'] is None else str(l['pontuacao'])), _tam(l['bytes'] or l['tamanho']),
-                     e(RESULTADOS.get(l['resultado'], l['resultado'])), e(l['sha256'] or '')))
+                     e(RESULTADOS.get(l['resultado'], l['resultado']) + (': ' + l['motivo'] if l['motivo'] else '')),
+                     e(l['sha256'] or '')))
     out.write('</table><p>Estado: <b>bom</b> = o arquivo está inteiro e coerente; <b>parcial</b> = só o começo é confiável; '
               '<b>ruim</b> = inteiro, mas o conteúdo falhou numa conferência. Confira sempre abrindo os arquivos.</p>')
     return out.getvalue()

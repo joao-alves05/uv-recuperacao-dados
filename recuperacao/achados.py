@@ -270,3 +270,12 @@ def contar_do_job(store, job_id, ids):
         n += store._con().execute('SELECT COUNT(*) FROM achados WHERE job_id=? AND id IN (%s)' % ','.join('?' * len(parte)),
                                   [job_id] + parte).fetchone()[0]
     return n
+
+
+def tamanho_dos_ids(store, ids):
+    total = 0
+    for i in range(0, len(ids), 500):
+        parte = ids[i:i + 500]
+        total += store._con().execute('SELECT COALESCE(SUM(tamanho),0) FROM achados WHERE id IN (%s)' % ','.join('?' * len(parte)),
+                                      parte).fetchone()[0]
+    return total

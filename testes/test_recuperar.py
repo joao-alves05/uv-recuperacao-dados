@@ -423,6 +423,104 @@ class TestRecuperar(BaseVarredura):
         self.assertTrue([x for x in self.arquivos() if x.startswith('Fotos/')])
         self.assertFalse([x for x in self.arquivos() if x.endswith('.parte')])
 
+    def test_erro_de_escrita_num_arquivo_nao_derruba_o_trabalho(self):
+        import errno
+        _, info, job = self.varrer_imagem()
+        original = recuperar._copiar
+        chamadas = []
+
+        def copiar(aberto, achado, tmp, ctrl):
+            chamadas.append(achado['id'])
+            if len(chamadas) == 2:
+                with open(tmp, 'wb') as f:
+                    f.write(b'meio')                              # deixa um .parte para provar a limpeza
+                raise OSError(errno.ENOSPC, 'No space left on device')
+            return original(aberto, achado, tmp, ctrl)
+        with mock.patch.object(recuperar, '_copiar', copiar):
+            r = self.recuperar(job)
+            fim = self.esperar_estado(r['id'], 'concluido')
+        self.assertEqual(fim['erro'], None)
+        linhas = {l['achado_id']: dict(l) for l in self.ctx.store._con().execute(
+            'SELECT * FROM recuperacoes WHERE job_id=?', (r['id'],))}
+        falhou = [l for l in linhas.values() if l['resultado'] == 'falhou']
+        self.assertEqual(len(falhou), 1)
+        self.assertIn('No space left', falhou[0]['motivo'])
+        self.assertEqual(sorted(l['resultado'] for l in linhas.values()), ['falhou'] + ['ok'] * 6)
+        self.assertEqual(len([x for x in self.arquivos() if not x.startswith('relatorio')]), 6)
+        self.assertFalse([x for x in self.arquivos() if x.endswith('.parte')])
+        eventos = ' '.join(e['texto'] for e in self.req('GET', '/api/jobs/' + r['id']).get_json()['eventos'])
+        self.assertIn('1 arquivos não puderam ser gravados', eventos)
+        with open(os.path.join(self.destino, 'relatorio.csv'), encoding='utf-8-sig', newline='') as f:
+            csv_ = list(csv.DictReader(f))
+        self.assertEqual(len(csv_), 7)
+        self.assertEqual([l['resultado'] for l in csv_].count('falhou ao gravar'), 1)
+        self.assertIn('No space left', [l['motivo'] for l in csv_ if l['resultado'] == 'falhou ao gravar'][0])
+        with open(os.path.join(self.destino, 'relatorio.html'), encoding='utf-8') as f:
+            self.assertIn('falhou ao gravar: No space left', f.read())
+        # espaço liberado: rodar de novo tenta só o que falhou
+        ctrl = mock.Mock(store=self.ctx.store)
+        ctrl.pausa_pedida.return_value = ctrl.cancelamento_pedido.return_value = False
+        self.assertEqual(recuperar.executar(self.ctx.store.obter(r['id']), ctrl), 'concluido')
+        self.assertEqual(self.ctx.store._con().execute(
+            "SELECT COUNT(*) FROM recuperacoes WHERE job_id=? AND resultado='ok'", (r['id'],)).fetchone()[0], 7)
+        self.assertEqual(len([x for x in self.arquivos() if not x.startswith('relatorio') and '/' in x]), 7)
+
+    def test_permissao_negada_e_nome_invalido_tambem_so_marcam_o_arquivo(self):
+        _, _, job = self.varrer_imagem()
+        original = os.replace
+        vezes = []
+
+        def replace(a, b):
+            vezes.append(a)
+            if len(vezes) == 3:
+                raise PermissionError(13, 'Permission denied')
+            return original(a, b)
+        with mock.patch('os.replace', replace):
+            r = self.recuperar(job)
+            self.esperar_estado(r['id'], 'concluido')
+        res = [l[0] for l in self.ctx.store._con().execute('SELECT resultado FROM recuperacoes WHERE job_id=?', (r['id'],))]
+        self.assertEqual(sorted(res), ['falhou'] + ['ok'] * 6)
+
+    def test_espaco_livre_antes_de_comecar(self):
+        _, _, job = self.varrer_imagem()
+        total = self.ctx.store._con().execute('SELECT SUM(tamanho) FROM achados WHERE job_id=?', (job['id'],)).fetchone()[0]
+        with mock.patch.object(recuperar, 'espaco_livre', lambda d: total // 2 - 1):
+            r = self.req('POST', '/api/jobs/%s/recuperar' % job['id'], {'ids': 'todos', 'destino': self.destino})
+            self.assertEqual(r.status_code, 400)
+            self.assertIn('Não cabe', r.get_json()['erro'])
+            self.assertFalse(os.path.exists(self.destino))
+        with mock.patch.object(recuperar, 'espaco_livre', lambda d: total - 1):
+            r = self.recuperar(job)
+            self.assertIn('pode faltar espaço', r['aviso'])
+            self.esperar_estado(r['id'], 'concluido')
+            eventos = ' '.join(e['texto'] for e in self.req('GET', '/api/jobs/' + r['id']).get_json()['eventos'])
+            self.assertIn('Atenção: o destino tem', eventos)
+        with mock.patch.object(recuperar, 'espaco_livre', lambda d: total * 10):
+            r = self.recuperar(job, {'ids': 'todos', 'destino': os.path.join(self.pasta, 'outra')})
+            self.assertNotIn('aviso', r)
+        with mock.patch.object(recuperar, 'espaco_livre', lambda d: None):             # não sabe: deixa tentar
+            self.recuperar(job, {'ids': 'todos', 'destino': os.path.join(self.pasta, 'outra2')})
+
+    def test_espaco_livre_de_verdade_olha_a_pasta_existente_mais_proxima(self):
+        n = recuperar.espaco_livre(os.path.join(self.pasta, 'nao', 'existe', 'ainda'))
+        self.assertIsInstance(n, int)
+        self.assertGreater(n, 0)
+
+    def test_banco_da_5_3_ganha_a_coluna_motivo(self):
+        import sqlite3
+        from recuperacao.jobs import JobStore
+        antigo = os.path.join(self.pasta, 'antigo.db')
+        con = sqlite3.connect(antigo)
+        con.executescript('''CREATE TABLE recuperacoes (job_id TEXT NOT NULL, achado_id INTEGER NOT NULL, ordem INTEGER NOT NULL,
+            arquivo TEXT, resultado TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, sha256 TEXT, quando REAL,
+            PRIMARY KEY (job_id, achado_id));
+            INSERT INTO recuperacoes (job_id, achado_id, ordem, resultado) VALUES ('j', 1, 0, 'ok');''')
+        con.commit()
+        con.close()
+        store = JobStore(antigo)
+        self.addCleanup(store.fechar)
+        self.assertIsNone(store._con().execute('SELECT motivo FROM recuperacoes').fetchone()[0])
+
     def test_o_tipo_recuperar_nao_nasce_pelo_post_de_jobs(self):
         r = self.req('POST', '/api/jobs', {'tipo': 'recuperar', 'origem': 'x', 'destino': 'y'})
         self.assertEqual(r.status_code, 400)
