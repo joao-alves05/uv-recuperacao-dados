@@ -21,6 +21,7 @@ ERRO_CAMINHO_NAO_ENCONTRADO = 3
 ERRO_ACESSO_NEGADO = 5
 IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
 IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000
+IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400
 IOCTL_DISK_GET_DRIVE_GEOMETRY = 0x00070000
 IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0
 BLKSSZGET = 0x1268
@@ -218,6 +219,18 @@ class ApiWindows:
         n = struct.unpack_from('<I', dados, 0)[0]
         return [struct.unpack_from('<I', dados, 8 + 24 * i)[0] for i in range(min(n, 32))]
 
+    def seek_penalty(self, h):
+        """True se o dispositivo tem penalidade de busca (HD), False se não (SSD): IOCTL_STORAGE_QUERY_PROPERTY, só consulta."""
+        class Consulta(self.ct.Structure):
+            _fields_ = [('PropertyId', self.wt.DWORD), ('QueryType', self.wt.DWORD), ('Extra', self.ct.c_ubyte * 1)]
+        entrada = Consulta(7, 0)                            # StorageDeviceSeekPenaltyProperty, PropertyStandardQuery
+        saida = (self.ct.c_ubyte * 16)()
+        devolvidos = self.wt.DWORD(0)
+        if not self.k.DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, self.ct.byref(entrada), self.ct.sizeof(entrada),
+                                      self.ct.byref(saida), self.ct.sizeof(saida), self.ct.byref(devolvidos), None):
+            raise self._erro()
+        return bool(saida[8])                               # DEVICE_SEEK_PENALTY_DESCRIPTOR.IncursSeekPenalty
+
     def ler(self, h, offset, n):
         if not self.k.SetFilePointerEx(h, offset, None, 0):
             raise self._erro()
@@ -265,6 +278,16 @@ class LeitorWindows(Leitor):
         if self.h is not None:
             self.api.fechar(self.h)
             self.h = None
+
+
+def seek_penalty_do_disco(indice, api=None):
+    """True se o disco físico N tem penalidade de busca (HD), False se não (SSD). Abre com acesso ZERO, só para perguntar."""
+    api = api or ApiWindows()
+    h = api.CreateFileW('\\\\.\\PhysicalDrive%d' % indice, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, 0)
+    try:
+        return api.seek_penalty(h)
+    finally:
+        api.fechar(h)
 
 
 def abrir(caminho, api=None):

@@ -4,7 +4,8 @@
 Só lê metadados do sistema (PowerShell/WMI no Windows, /sys no Linux). Nunca abre o disco em si, e muito
 menos para escrita. Falha de um disco, ou do provedor inteiro, não derruba a lista.
 
-Cada fonte: {"id", "caminho", "nome", "tamanho", "tipo", "removivel", "setor", "sistema", "volumes"}.
+Cada fonte: {"id", "caminho", "nome", "tamanho", "tipo", "removivel", "setor", "sistema", "volumes", "avisos", "sistema_letra"}.
+`avisos` são frases de mídia (TRIM em SSD/pen drive, disquete, CD/DVD) para o painel mostrar.
 `volumes` (extra) mostra o que está dentro: [{"letra", "rotulo", "sistema_arquivos", "tamanho", "livre"}].
 """
 import json
@@ -13,9 +14,20 @@ import os
 import re
 import subprocess
 
+from . import leitor
+
 TIPOS = ('hd', 'ssd', 'usb', 'cartao', 'optico', 'disquete', 'arquivo', 'desconhecido')
 LIMITE_SCRIPT_S = 20
 NO_WINDOW = 0x08000000
+# Tamanhos exatos de disquete (bytes): 1,44 MB, 720 KB, 1,2 MB, 360 KB, 320 KB, 180 KB, 160 KB
+TAMANHOS_DISQUETE = frozenset([1474560, 737280, 1228800, 368640, 327680, 184320, 163840])
+_DISQUETE = re.compile(r'floppy|disquete', re.I)
+AVISO_TRIM = ('Este tipo de dispositivo (SSD ou pen drive) pode ter apagado de vez o que você excluiu: o próprio '
+              'dispositivo zera o espaço livre (TRIM). A chance de recuperar arquivos apagados é menor.')
+AVISO_OPTICO = ('A leitura completa de CD/DVD (com recuperação de trilhas) chega numa versão futura do programa '
+                '(fase 6 do projeto). Por enquanto a unidade só aparece na lista.')
+AVISO_DISQUETE = ('Disquete: é um disco pequeno e muito antigo. A leitura é lenta e é comum haver setores ruins; '
+                  'deixe o programa tentar de novo nos pontos que falharem.')
 _CARTAO = re.compile(r'\b(sd|sdhc|sdxc|mmc|micro\s?sd|card|cart[aã]o)\b', re.I)
 
 # Um script só: só consulta metadados (CIM/Storage); nada de abrir o disco.
@@ -28,7 +40,7 @@ $opticos = @(Get-CimInstance Win32_CDROMDrive | Select-Object Id, Drive, Caption
 $sistema = $null
 try { $sistema = (Get-Partition -DriveLetter $env:SystemDrive.Substring(0,1) | Get-Disk).Number } catch {}
 $volumes = @(Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object { $v = Get-Volume -DriveLetter $_.DriveLetter; [pscustomobject]@{ Disco = $_.DiskNumber; Letra = ([string]$_.DriveLetter + ':'); Rotulo = $v.FileSystemLabel; Fs = $v.FileSystem; Tamanho = $v.Size; Livre = $v.SizeRemaining } })
-[pscustomobject]@{ Discos = $discos; Fisicos = $fisicos; Opticos = $opticos; Sistema = $sistema; Volumes = $volumes } | ConvertTo-Json -Depth 5 -Compress
+[pscustomobject]@{ SistemaLetra = $env:SystemDrive; Discos = $discos; Fisicos = $fisicos; Opticos = $opticos; Sistema = $sistema; Volumes = $volumes } | ConvertTo-Json -Depth 5 -Compress
 '''
 
 
@@ -77,12 +89,15 @@ def _tipo_windows(d, fisico):
     return 'desconhecido', False
 
 
-def montar_windows(bruto):
+def montar_windows(bruto, consultar_seek=None):
     """Transforma o JSON do script em fontes. Disco com dado quebrado é pulado; o resto segue."""
     fontes = []
     discos = _lista(bruto.get('Discos'))
     fisicos = {str(f.get('DeviceId')): f for f in _lista(bruto.get('Fisicos')) if isinstance(f, dict)}
     sistema = bruto.get('Sistema')
+    letra_sistema = _texto(bruto.get('SistemaLetra')).upper()
+    if not re.fullmatch(r'[A-Z]:', letra_sistema):
+        letra_sistema = ''
     volumes = [v for v in _lista(bruto.get('Volumes')) if isinstance(v, dict)]
     for d in sorted((d for d in discos if isinstance(d, dict)), key=lambda d: _inteiro(d.get('Index'), 9999)):
         try:
@@ -90,13 +105,22 @@ def montar_windows(bruto):
             if indice < 0:
                 continue
             tipo, removivel = _tipo_windows(d, fisicos.get(str(indice)))
+            if tipo == 'desconhecido' and consultar_seek:
+                # o Windows não disse se é SSD: pergunta ao dispositivo (DeviceSeekPenalty, só consulta)
+                try:
+                    penalidade = consultar_seek(indice)
+                except Exception:
+                    penalidade = None
+                if penalidade is not None:
+                    tipo = 'hd' if penalidade else 'ssd'
             dentro = [{'letra': _texto(v.get('Letra')), 'rotulo': _texto(v.get('Rotulo')),
                        'sistema_arquivos': _texto(v.get('Fs')), 'tamanho': _inteiro(v.get('Tamanho')),
                        'livre': _inteiro(v.get('Livre'))} for v in volumes if _inteiro(v.get('Disco'), -2) == indice]
             fontes.append({'id': 'disco-%d' % indice, 'caminho': '\\\\.\\PhysicalDrive%d' % indice,
                            'nome': _texto(d.get('Model'), 'Disco %d' % indice), 'tamanho': _inteiro(d.get('Size')),
                            'tipo': tipo, 'removivel': removivel, 'setor': _inteiro(d.get('BytesPerSector'), 512) or 512,
-                           'sistema': sistema is not None and _inteiro(sistema, -1) == indice, 'volumes': dentro})
+                           'sistema': sistema is not None and _inteiro(sistema, -1) == indice, 'volumes': dentro,
+                           'sistema_letra': letra_sistema if sistema is not None and _inteiro(sistema, -1) == indice else ''})
         except Exception:
             logging.getLogger('recdados').exception('disco ignorado na listagem')
     for n, o in enumerate(o for o in _lista(bruto.get('Opticos')) if isinstance(o, dict)):
@@ -111,9 +135,9 @@ def montar_windows(bruto):
     return fontes
 
 
-def provedor_windows(executar=_executar_powershell):
+def provedor_windows(executar=_executar_powershell, consultar_seek=leitor.seek_penalty_do_disco):
     saida = executar(SCRIPT_WINDOWS).strip()
-    return montar_windows(json.loads(saida)) if saida else []
+    return montar_windows(json.loads(saida), consultar_seek) if saida else []
 
 
 # --- Linux -----------------------------------------------------------------
@@ -184,17 +208,26 @@ def provedor_sistema():
 
 
 # --- saída padronizada ------------------------------------------------------
+def avisos_de(tipo):
+    """Avisos de mídia para o painel mostrar junto da fonte."""
+    return {'ssd': [AVISO_TRIM], 'usb': [AVISO_TRIM], 'optico': [AVISO_OPTICO], 'disquete': [AVISO_DISQUETE]}.get(tipo, [])
+
+
 def _limpar(f):
     """Garante o formato do contrato; devolve None se não dá para aproveitar."""
     if not isinstance(f, dict) or not f.get('caminho') or not f.get('id'):
         return None
     tipo = f.get('tipo') if f.get('tipo') in TIPOS else 'desconhecido'
+    tamanho = _inteiro(f.get('tamanho'))
+    if tipo in ('usb', 'cartao', 'desconhecido') and (tamanho in TAMANHOS_DISQUETE or _DISQUETE.search(_texto(f.get('nome')))):
+        tipo = 'disquete'                                  # reconhecido pelo tamanho exato ou pelo nome; tratado como disco pequeno
     volumes = [{'letra': _texto(v.get('letra')), 'rotulo': _texto(v.get('rotulo')),
                 'sistema_arquivos': _texto(v.get('sistema_arquivos')), 'tamanho': _inteiro(v.get('tamanho')),
                 'livre': _inteiro(v.get('livre'))} for v in _lista(f.get('volumes')) if isinstance(v, dict)]
     return {'id': str(f['id']), 'caminho': str(f['caminho']), 'nome': _texto(f.get('nome'), str(f['id'])),
-            'tamanho': _inteiro(f.get('tamanho')), 'tipo': tipo, 'removivel': bool(f.get('removivel')),
-            'setor': _inteiro(f.get('setor'), 512) or 512, 'sistema': bool(f.get('sistema')), 'volumes': volumes}
+            'tamanho': tamanho, 'tipo': tipo, 'removivel': bool(f.get('removivel')),
+            'setor': _inteiro(f.get('setor'), 512) or 512, 'sistema': bool(f.get('sistema')), 'volumes': volumes, 'avisos': avisos_de(tipo),
+            'sistema_letra': _texto(f.get('sistema_letra')) if f.get('sistema') else ''}
 
 
 def listar(provedor=None):

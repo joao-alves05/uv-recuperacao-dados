@@ -6,6 +6,7 @@
 Só escuta 127.0.0.1. Toda rota /api/* (menos /api/saude) exige o cookie `recdados` ou o cabeçalho
 X-RecDados-Token. O trabalho mora aqui, em jobs gravados em disco; a página é só painel.
 """
+import ctypes
 import hashlib
 import hmac
 import json
@@ -34,6 +35,8 @@ PAINEL = Path(__file__).resolve().parent / 'painel'
 COOKIE = 'recdados'
 ID_JOB = re.compile(r'j-\d{8}-[0-9a-f]{4}')
 PING_S = 15
+CAMINHO_INICIAR = Path(__file__).resolve().parent.parent / 'iniciar.py'
+SW_SHOWNORMAL = 1
 TICKET_S = 60                # o ?t= da URL vale 60 s e uma vez só
 SESSAO_S = 12 * 3600         # o cookie vale 12 h
 MAX_TICKETS = 100
@@ -66,6 +69,8 @@ class Contexto:
         self.token = config.obter_token()
         self.store = JobStore(config.caminho_db())
         self.executor = Executor(self.store, TIPOS)
+        self.elevador = pedir_elevacao                   # injetável nos testes (ShellExecute falso)
+        self.eh_windows = os.name == 'nt'
         self.provedor_fontes = provedor_fontes          # injetável nos testes; None = discos de verdade (só metadados)
         self.parar = threading.Event()
         self.servidor = None
@@ -130,6 +135,15 @@ class Contexto:
         self.parar.set()
         if self.servidor is not None:
             self.servidor.shutdown()
+
+
+def pedir_elevacao(arquivo, parametros, pasta):
+    """Pede ao Windows para abrir o programa como administrador (o próprio Windows mostra a confirmação do UAC).
+    Devolve o código do ShellExecute: maior que 32 = pedido aceito; 5 (ou menos) = recusado/cancelado."""
+    exe = sys.executable
+    janela = os.path.join(os.path.dirname(exe), 'pythonw.exe')
+    return int(ctypes.windll.shell32.ShellExecuteW(None, 'runas', janela if os.path.isfile(janela) else exe,
+                                                   '"%s" %s' % (arquivo, parametros), pasta, SW_SHOWNORMAL))
 
 
 def _erro(mensagem, codigo):
@@ -222,6 +236,17 @@ def criar_app(ctx=None):
     @app.get('/api/fontes')
     def listar_fontes():
         return jsonify(fontes.listar(ctx.provedor_fontes))
+
+    @app.post('/api/elevar')
+    def elevar():
+        if not ctx.eh_windows:
+            return _erro('Só o Windows tem o pedido de administrador. Neste sistema, abra o programa com sudo (root).', 409)
+        if leitor.eh_administrador():
+            return _erro('O programa já está rodando como administrador.', 409)
+        codigo = ctx.elevador(str(CAMINHO_INICIAR), '--admin', str(CAMINHO_INICIAR.parent))
+        if codigo <= 32:
+            return _erro('O Windows não abriu o programa como administrador (a confirmação foi recusada ou cancelada).', 409)
+        return jsonify({'ok': True, 'mensagem': 'Confirme a janela do Windows. O programa reabre como administrador.'}), 202
 
     @app.get('/api/marca')
     def marca():

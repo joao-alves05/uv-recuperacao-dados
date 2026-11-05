@@ -11,7 +11,7 @@ from auxiliar import CasoComPasta
 
 from recuperacao import fontes, servico
 
-CHAVES = {'id', 'caminho', 'nome', 'tamanho', 'tipo', 'removivel', 'setor', 'sistema', 'volumes'}
+CHAVES = {'id', 'caminho', 'nome', 'tamanho', 'tipo', 'removivel', 'setor', 'sistema', 'volumes', 'avisos', 'sistema_letra'}
 
 BRUTO_WINDOWS = {
     'Discos': [
@@ -29,6 +29,7 @@ BRUTO_WINDOWS = {
                 {'DeviceId': '2', 'MediaType': 'Unspecified', 'BusType': 'USB'}],
     'Opticos': {'Id': 'x', 'Drive': 'E:', 'Caption': 'Gravador DVD', 'MediaLoaded': False, 'Size': None},
     'Sistema': 1,
+    'SistemaLetra': 'c:',
     'Volumes': [{'Disco': 0, 'Letra': 'D:', 'Rotulo': 'Dados', 'Fs': 'NTFS', 'Tamanho': 400000000000, 'Livre': 1000},
                 {'Disco': 1, 'Letra': 'C:', 'Rotulo': '', 'Fs': 'NTFS', 'Tamanho': 900000000000, 'Livre': 5}],
 }
@@ -53,6 +54,7 @@ class TestWindows(unittest.TestCase):
 
     def test_sistema_removivel_e_volumes(self):
         self.assertEqual({k for k, v in self.f.items() if v['sistema']}, {'disco-1'})
+        self.assertEqual({k: v['sistema_letra'] for k, v in self.f.items() if v['sistema_letra']}, {'disco-1': 'C:'})
         self.assertEqual({k for k, v in self.f.items() if v['removivel']}, {'disco-2', 'disco-3', 'optico-0'})
         self.assertEqual([v['letra'] for v in self.f['disco-1']['volumes']], ['C:'])
         self.assertEqual(self.f['disco-0']['volumes'][0]['rotulo'], 'Dados')
@@ -139,7 +141,8 @@ class TestListar(unittest.TestCase):
 
     def test_listagem_real_so_le_metadados_e_nunca_levanta(self):
         """Roda o provedor do sistema deste computador (PowerShell/WMI ou /sys). Só confere o formato."""
-        r = fontes.listar()
+        sem_seek = (lambda: fontes.provedor_windows(consultar_seek=None)) if os.name == 'nt' else None
+        r = fontes.listar(sem_seek)
         self.assertIsInstance(r, list)
         for x in r:
             self.assertEqual(set(x), CHAVES)
