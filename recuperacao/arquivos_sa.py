@@ -63,9 +63,17 @@ def volumes(leitor):
     return [VolumeAchado(v, '/[Partição %d]' % (i + 1), i + 1) for i, v in enumerate(achados)]
 
 
-def entradas(leitor, lista_volumes=None):
-    """Gera (entrada, VolumeAchado) de todos os volumes, em ordem determinística (serve para retomar contando)."""
+class Parar(Exception):
+    """Levantada por quem chama (dentro de `ao_ler`) para interromper a leitura do sistema de arquivos no meio."""
+
+
+def entradas(leitor, lista_volumes=None, ao_ler=None):
+    """Gera (entrada, VolumeAchado) de todos os volumes, em ordem determinística (serve para retomar contando).
+    `ao_ler(VolumeAchado, fração 0..1)`: chamado enquanto o volume lê as estruturas dele (hoje o NTFS, a cada pedaço
+    da MFT), mesmo quando ainda não há entrada nova; pode levantar `Parar`."""
     for va in (lista_volumes if lista_volumes is not None else volumes(leitor)):
+        if ao_ler is not None and hasattr(va.volume, 'ao_ler'):
+            va.volume.ao_ler = lambda fracao, va=va: ao_ler(va, fracao)
         for e in va.volume.varrer():
             yield e, va
 

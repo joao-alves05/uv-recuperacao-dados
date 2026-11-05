@@ -9,6 +9,7 @@ from auxiliar import CasoComPasta, sha256_de
 import imagens_ntfs as nt
 from recuperacao import leitor as leitor_mod
 from recuperacao import sa
+from recuperacao.sa import ntfs as mod_ntfs
 from recuperacao.sa import ErroSA
 from recuperacao.sa.base import epoch
 from test_sa_fat import conteudo, sha
@@ -123,6 +124,63 @@ class TestNtfs(CasoComPasta):
                             pass
                 except ErroSA:
                     pass
+
+
+class TestMftEmLotes(CasoComPasta):
+    def montar(self):
+        f = nt.NtfsImg()
+        pasta = f.add_dir(5, 'Docs')
+        for i in range(10):
+            f.add_file(pasta, 'arquivo %02d.bin' % i, conteudo(2000 + i, i))
+        f.prox_reg = 38                                             # a pasta "Tardia" (41) tem número MAIOR que o do filho (38)
+        f.add_file(41, 'filho de pasta tardia.txt', conteudo(300, 99))
+        f.prox_reg = 41
+        f.add_dir(5, 'Tardia')
+        return f.gravar(os.path.join(self.pasta, 'ntfs.img'))
+
+    def varrer(self, caminho, pedaco=None):
+        import unittest.mock as m
+        with leitor_mod.abrir(caminho) as l, m.patch.object(mod_ntfs, 'PEDACO_MFT', pedaco or mod_ntfs.PEDACO_MFT):
+            vol = sa.detectar(l)
+            chamadas = []
+            vol.ao_ler = chamadas.append
+            saida, no_primeiro = [], None
+            for e in vol.varrer():
+                if no_primeiro is None:
+                    no_primeiro = len(chamadas)
+                saida.append((e.caminho, e.apagado, e.estado, b''.join(vol.ler(e))))
+            return saida, chamadas, no_primeiro
+
+    def test_entrega_antes_de_acabar_de_ler_a_mft(self):
+        caminho = self.montar()
+        saida, chamadas, no_primeiro = self.varrer(caminho, pedaco=8 * 1024)         # 8 registros por pedaço
+        self.assertEqual(len(chamadas), 8)
+        self.assertEqual(chamadas[-1], 1.0)
+        self.assertLess(no_primeiro, 8, 'o 1º arquivo só saiu depois de ler a MFT inteira')
+
+    def test_mesmo_resultado_em_qualquer_tamanho_de_pedaco(self):
+        caminho = self.montar()
+        grande, _, _ = self.varrer(caminho)
+        pequeno, _, _ = self.varrer(caminho, pedaco=8 * 1024)
+        minimo, _, _ = self.varrer(caminho, pedaco=1024)
+        self.assertEqual(sorted(grande), sorted(pequeno))
+        self.assertEqual(sorted(grande), sorted(minimo))
+        self.assertEqual(len(grande), 13)
+
+    def test_filho_lido_antes_da_pasta_espera_e_ganha_o_caminho_certo(self):
+        caminho = self.montar()
+        saida, _, _ = self.varrer(caminho, pedaco=8 * 1024)
+        caminhos = [c for c, _, _, _ in saida]
+        self.assertIn('/Tardia/filho de pasta tardia.txt', caminhos)
+        self.assertFalse([c for c in caminhos if c.startswith('/[perdidos]')])
+        self.assertLess(caminhos.index('/Docs/arquivo 00.bin'), caminhos.index('/Tardia/filho de pasta tardia.txt'))
+
+    def test_orfao_de_verdade_so_vira_perdido_no_fim(self):
+        f = nt.NtfsImg()
+        f.add_file(77, 'orfao.txt', conteudo(100, 1))
+        f.add_file(5, 'normal.txt', conteudo(100, 2))
+        saida, _, _ = self.varrer(f.gravar(os.path.join(self.pasta, 'o.img')), pedaco=8 * 1024)
+        self.assertEqual(sorted(c for c, _, _, _ in saida), ['/[perdidos]/orfao.txt', '/normal.txt'])
 
 
 if __name__ == '__main__':

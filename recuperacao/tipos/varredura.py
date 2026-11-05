@@ -109,9 +109,22 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho):
             'ruins': 0, 'sistema_antes': op['sistema_antes']})
         pendentes.clear()
 
+    antes, soma = {}, 0
+    for va in lista:
+        antes[id(va)] = soma
+        soma += va.volume.tamanho
+    est['agora'] = time.monotonic()
+
+    def lendo(va, fracao):
+        """Chamado pelo volume enquanto lê as estruturas dele (NTFS: a cada pedaço da MFT), mesmo sem entrada nova."""
+        ctrl.progresso(int(antes[id(va)] + fracao * va.volume.tamanho), total_bytes,
+                       'Lendo a lista de arquivos: %d achados' % total)
+        if ctrl.cancelamento_pedido() or ctrl.pausa_pedida():
+            raise arquivos_sa.Parar()
+
     ctrl.progresso(0, total_bytes, 'Lendo a lista de arquivos: %d achados' % total)
     try:
-        for ent, va in arquivos_sa.entradas(aberto, lista):
+        for ent, va in arquivos_sa.entradas(aberto, lista, ao_ler=lendo):
             est['n'] += 1
             if est['n'] <= ja:
                 continue
@@ -121,12 +134,18 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho):
                 total += 1
             elif motivo != 'pasta':
                 pulados[motivo] = pulados.get(motivo, 0) + 1
-            if len(pendentes) >= LOTE_SISTEMA or est['n'] % (4 * LOTE_SISTEMA) == 0:
+            if (len(pendentes) >= LOTE_SISTEMA or est['n'] % (4 * LOTE_SISTEMA) == 0
+                    or (pendentes and time.monotonic() - est['agora'] >= 1.0)):
+                est['agora'] = time.monotonic()
                 gravar()
                 ctrl.progresso(0, total_bytes, 'Lendo a lista de arquivos: %d achados' % total)
                 ctrl.checkpoint(None, forcar=True)
                 if ctrl.cancelamento_pedido() or ctrl.pausa_pedida():
                     return 'cancelado' if ctrl.cancelamento_pedido() else 'pausado'
+    except arquivos_sa.Parar:
+        gravar()
+        ctrl.checkpoint(None, forcar=True)
+        return 'cancelado' if ctrl.cancelamento_pedido() else 'pausado'
     except (arquivos_sa.sa.ErroSA, OSError) as e:
         gravar()
         ctrl.evento('A lista pelo sistema de arquivos parou: %s' % e)

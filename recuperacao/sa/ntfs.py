@@ -18,6 +18,8 @@ RAIZ = 5
 PRIMEIRO_USUARIO = 24
 PERDIDOS = '/[perdidos]'
 MAX_RUNS = 100000
+PEDACO_MFT = 4 << 20                    # bytes da MFT lidos de cada vez
+_ADIAR = object()
 
 
 def _tempo(ft):
@@ -122,6 +124,7 @@ class Ntfs(Volume):
         self.rotulo = ''
         self.nclusters = min(self.total // self.spc, self.tamanho // self.csize)
         self._mft_runs = None
+        self.ao_ler = None
         self._bitmap = None
         self._pg = {}
 
@@ -142,7 +145,7 @@ class Ntfs(Volume):
     def _blocos_mft(self):
         """Gera (número do primeiro registro, bytes, offset do pedaço no volume) pelos data runs da MFT, em pedaços de até 4 MiB."""
         falta, n = self._mft_tam, 0
-        por_pedaco = max(1, (4 << 20) // self.tam_reg) * self.tam_reg
+        por_pedaco = max(1, PEDACO_MFT // self.tam_reg) * self.tam_reg
         for lcn, cl in self._mft_runs:
             tam = cl * self.csize
             off = 0
@@ -211,41 +214,66 @@ class Ntfs(Volume):
                     info['inline_pos'] = pos
         return info
 
-    def _caminho(self, n, infos, memo):
-        """Caminho do pai de `n` (sem o próprio nome) ou None se passa por registro de sistema. PERDIDOS se órfão."""
-        cadeia, atual = [], n
+    def _resolver(self, pai, n_lidos, nomes, memo, final):
+        """Caminho da pasta `pai`: ('ok', caminho) ou ('pular', None) se passa por registro de sistema ($Extend...) ou
+        ('adiar', None) se algum ancestral ainda não foi lido (só antes do fim da MFT). Órfão cai em PERDIDOS."""
+        cadeia, atual, base = [], pai, None
         for _ in range(MAX_PROFUNDIDADE):
             if atual in memo:
                 base = memo[atual]
                 break
-            i = infos.get(atual)
             if atual == RAIZ:
                 base = '/'
                 break
-            if i is None or i['nome'] is None:
+            i = nomes.get(atual)
+            if i is None:
+                if atual >= n_lidos and not final:
+                    return 'adiar', None
                 base = PERDIDOS
                 break
             if atual < PRIMEIRO_USUARIO:
-                base = None                                  # registro de sistema ($Extend...)
-                break
+                return 'pular', None
             cadeia.append(atual)
             atual = i['pai']
         else:
             base = PERDIDOS                                  # laço ou profundidade absurda
         for k in reversed(cadeia):
-            if base is not None:
-                base = (base.rstrip('/') + '/' + limpar_nome(infos[k]['nome']))
+            base = base.rstrip('/') + '/' + limpar_nome(nomes[k]['nome'])
             memo[k] = base
-        return base
+        return 'ok', base
+
+    def _montar(self, i, n_lidos, nomes, memo, final):
+        """Entrada do registro `i`, ou ADIAR (falta ler um ancestral), ou None (não se lista)."""
+        estado, pai = self._resolver(i['pai'], n_lidos, nomes, memo, final)
+        if estado == 'adiar':
+            return _ADIAR
+        if estado == 'pular':
+            return None
+        nome = limpar_nome(i['nome'])
+        ancestral_apagado = False
+        if pai != '/' and pai != PERDIDOS:
+            p = nomes.get(i['pai'])
+            ancestral_apagado = bool(p) and not p['em_uso']
+        e = Entrada(nome=nome, caminho=pai.rstrip('/') + '/' + nome, eh_dir=i['dir'],
+                    tamanho=0 if i['dir'] else i['tam'], apagado=not i['em_uso'] or ancestral_apagado,
+                    criado=i['criado'], modificado=i['modif'], acessado=i['acess'], ident=i['n'])
+        if not i['dir']:
+            self._dados(e, i)
+        return e
 
     def varrer(self):
+        """Gera as entradas à medida que lê a MFT: a que já tem o caminho inteiro sai logo; a que depende de uma pasta
+        de número maior espera essa pasta ser lida (ou o fim da MFT, quando vira órfã). `ao_ler(fração)`, se existir,
+        é chamado depois de cada pedaço lido (serve para pausar, cancelar e mostrar progresso; pode levantar exceção)."""
         try:
             self._carregar_mft()
         except OSError as e:
             raise ErroSA('Não consegui ler a MFT: %s' % e) from None
-        infos = {}
+        nomes, pendentes, memo, lidos = {}, [], {}, 0
+        total = max(1, self._mft_tam // self.tam_reg)
         for ini, bloco, off_bloco in self._blocos_mft():
             for k in range(len(bloco) // self.tam_reg):
+                lidos = ini + k + 1
                 rec = aplicar_fixups(bloco[k * self.tam_reg:(k + 1) * self.tam_reg])
                 if rec is None:
                     continue
@@ -260,28 +288,32 @@ class Ntfs(Volume):
                     self.rotulo = info['rotulo']
                 if n == 6:
                     self._guardar_bitmap(info)
-                if info['base'] == 0 and (info['nome'] is not None or n == RAIZ):
-                    infos[n] = info
-        memo = {}
-        for n in sorted(infos):
-            i = infos[n]
-            if n < PRIMEIRO_USUARIO or i['nome'] is None:
-                continue
-            pai = self._caminho(i['pai'], infos, memo)
-            if pai is None:
-                continue
-            nome = limpar_nome(i['nome'])
-            caminho = (pai.rstrip('/') + '/' + nome)
-            ancestral_apagado = False
-            if pai != '/' and pai != PERDIDOS:
-                p = infos.get(i['pai'])
-                ancestral_apagado = bool(p) and not p['em_uso']
-            e = Entrada(nome=nome, caminho=caminho, eh_dir=i['dir'], tamanho=0 if i['dir'] else i['tam'],
-                        apagado=not i['em_uso'] or ancestral_apagado, criado=i['criado'], modificado=i['modif'],
-                        acessado=i['acess'], ident=n)
-            if not i['dir']:
-                self._dados(e, i)
-            yield e
+                if info['base'] != 0 or (info['nome'] is None and n != RAIZ):
+                    continue
+                nomes[n] = {'nome': info['nome'], 'pai': info['pai'], 'em_uso': info['em_uso']}
+                if n < PRIMEIRO_USUARIO or info['nome'] is None:
+                    continue
+                e = self._montar(info, lidos, nomes, memo, False)
+                if e is _ADIAR:
+                    pendentes.append(info)
+                elif e is not None:
+                    yield e
+            lidos = ini + len(bloco) // self.tam_reg
+            if pendentes:
+                restantes = []
+                for info in pendentes:
+                    e = self._montar(info, lidos, nomes, memo, False)
+                    if e is _ADIAR:
+                        restantes.append(info)
+                    elif e is not None:
+                        yield e
+                pendentes = restantes
+            if self.ao_ler:
+                self.ao_ler(min(1.0, lidos / total))
+        for info in pendentes:
+            e = self._montar(info, lidos, nomes, memo, True)
+            if e is not None and e is not _ADIAR:
+                yield e
 
     def _guardar_bitmap(self, info):
         if info['runs']:

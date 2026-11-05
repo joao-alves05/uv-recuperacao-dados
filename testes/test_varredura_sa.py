@@ -19,6 +19,7 @@ from test_varredura import BaseVarredura
 
 from recuperacao import achados as mod_achados
 from recuperacao import leitor as leitor_mod
+from recuperacao.sa import ntfs as mod_ntfs
 from recuperacao.tipos import varredura
 
 
@@ -272,6 +273,32 @@ class TestRetomada(Base):
             self.assertIsNone(varredura._fase_sistema(ctrl, store, parcial, l, op, cp, l.tamanho))
         depois = [a['caminho'] for a in self.lista(parcial)]
         self.assertEqual(depois, esperado)
+
+
+class TestPausaNoMeioDaMft(Base):
+    def test_pausa_e_cancelamento_sao_vistos_a_cada_pedaco_da_mft_mesmo_sem_arquivo_novo(self):
+        n = nt.NtfsImg()
+        for i in range(6):
+            n.add_file(5, 'f%d.txt' % i, conteudo(80 + i, i))
+        caminho = n.gravar(os.path.join(self.trabalho, 'ntfs.img'))
+        store = self.ctx.store
+        job = store.criar('varredura', caminho, 'varredura#mft', {'modo': 'sistema'})['id']
+        op = {'modo': 'sistema', 'bloco': 1, 'sistema_antes': False}
+        ctrl = mock.Mock(store=store)
+        ctrl.cancelamento_pedido.return_value = False
+        with mock.patch.object(mod_ntfs, 'PEDACO_MFT', 8 * 1024), leitor_mod.abrir(caminho) as l:
+            ctrl.pausa_pedida.side_effect = [True]              # logo no 1º pedaço (registros 0 a 7: só do sistema)
+            self.assertEqual(varredura._fase_sistema(ctrl, store, job, l, op, None, l.tamanho), 'pausado')
+            self.assertEqual(self.lista(job), [])
+            cp = store.obter_checkpoint(job)
+            self.assertEqual((cp['fase'], cp['feitos']), ('sistema', 0))
+            ctrl.pausa_pedida.side_effect = None
+            ctrl.pausa_pedida.return_value = False
+            self.assertIsNone(varredura._fase_sistema(ctrl, store, job, l, op, cp, l.tamanho))
+            self.assertEqual(sorted(a['caminho'] for a in self.lista(job)), ['/f%d.txt' % i for i in range(6)])
+            ctrl.cancelamento_pedido.return_value = True
+            job2 = store.criar('varredura', caminho, 'varredura#mft2', {'modo': 'sistema'})['id']
+            self.assertEqual(varredura._fase_sistema(ctrl, store, job2, l, op, None, l.tamanho), 'cancelado')
 
 
 if __name__ == '__main__':
