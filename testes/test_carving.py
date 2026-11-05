@@ -373,5 +373,142 @@ class TestSomenteLeitura(unittest.TestCase):
                 self.assertNotIn(proibido, texto, '%s usa %s' % (nome, proibido))
 
 
+def varrer_arquivo(caminho, modo, bloco=65536, trabalhadores=None, inicio=0):
+    from recuperacao import leitor
+    achados = []
+    with leitor.abrir(caminho) as l:
+        v = carving.Varredor(l, carving.carregar(), modo, bloco, trabalhadores)
+        for pos, novos, _ in v.blocos(inicio):
+            achados += novos
+        return achados, v
+
+
+class TestSegundoPlano(CasoComPasta):
+    def imagem(self):
+        img = bytearray(3 << 20)
+        pecas = [(512, A.jpeg(semente=3)), (8192, A.png()), (20480, A.jpeg(scan=400000, semente=4)), (700000, A.pdf()),
+                 (900000 // 512 * 512, A.docx()), (1500000 // 512 * 512, A.mp4(mdat=9000)), (2000000 // 512 * 512, A.mp3()),
+                 (2700000 // 512 * 512, A.zip_simples())]
+        for off, p in pecas:
+            img[off:off + len(p)] = p
+        img[1234567:1234567 + 70] = A.bmp()
+        caminho = os.path.join(self.pasta, 'img.bin')
+        with open(caminho, 'wb') as f:
+            f.write(img)
+        return caminho
+
+    def chaves(self, achados):
+        return [(a['offset'], a['tipo'], a['tamanho'], a['estado']) for a in achados]
+
+    def test_threads_e_processos_dao_o_mesmo_resultado_que_sozinho(self):
+        caminho = self.imagem()
+        for modo in ('rapida', 'profunda'):
+            base, v0 = varrer_arquivo(caminho, modo, trabalhadores=0)
+            self.assertEqual(v0.segundo_plano, 'nenhum')
+            self.assertGreaterEqual(len(base), 7)
+            for bloco in (65536, 100000, 1 << 20):
+                for n in (1, 2):
+                    achados, v = varrer_arquivo(caminho, modo, bloco=bloco, trabalhadores=n)
+                    self.assertEqual(v.segundo_plano, 'processos' if modo == 'profunda' else 'threads', (modo, bloco, n))
+                    self.assertEqual(self.chaves(achados), self.chaves(base), (modo, bloco, n))
+
+    def test_retomar_no_meio_com_segundo_plano(self):
+        caminho = self.imagem()
+        todos, _ = varrer_arquivo(caminho, 'profunda', trabalhadores=0)
+        depois = [a for a in todos if a['offset'] >= 1 << 20]
+        achados, _ = varrer_arquivo(caminho, 'profunda', trabalhadores=2, inicio=1 << 20)
+        self.assertEqual(self.chaves(achados), self.chaves(depois))
+
+    def test_trabalhador_que_nao_abre_a_origem_cai_para_o_modo_sozinho(self):
+        from recuperacao import leitor
+        caminho = self.imagem()
+        base, _ = varrer_arquivo(caminho, 'profunda', trabalhadores=0)
+        with leitor.abrir(caminho) as l:
+            l.caminho = os.path.join(self.pasta, 'nao-existe.bin')             # o trabalhador não consegue abrir
+            v = carving.Varredor(l, carving.carregar(), 'profunda', 65536, 2)
+            achados = [a for _, novos, _ in v.blocos(0) for a in novos]
+            self.assertEqual(v.segundo_plano, 'nenhum')
+        self.assertEqual(self.chaves(achados), self.chaves(base))
+
+    def test_escolha_automatica(self):
+        from recuperacao import leitor
+        caminho = self.imagem()
+        with leitor.abrir(caminho) as l:
+            self.assertEqual(carving.Varredor(l, carving.carregar(), 'rapida').trabalhadores, 0)          # pequena demais
+            l.tamanho = 10 * carving.MINIMO_SEGUNDO_PLANO
+            self.assertEqual(carving.Varredor(l, carving.carregar(), 'rapida').trabalhadores, 2)
+            self.assertTrue(1 <= carving.Varredor(l, carving.carregar(), 'profunda').trabalhadores <= carving.MAX_PROCESSOS)
+            l.caminho = None
+            self.assertEqual(carving.Varredor(l, carving.carregar(), 'profunda').trabalhadores, 0)
+        self.assertEqual(carving.Varredor(Memoria(bytes(10)), carving.carregar(), 'profunda', trabalhadores=3).trabalhadores, 0)
+
+    def test_gerador_fechado_no_meio_encerra_os_trabalhadores(self):
+        from recuperacao import leitor
+        caminho = self.imagem()
+        with leitor.abrir(caminho) as l:
+            v = carving.Varredor(l, carving.carregar(), 'rapida', 65536, 2)
+            g = v.blocos(0)
+            next(g)
+            g.close()                                                              # pausar o job faz isto
+        os.remove(caminho)                                                         # no Windows falharia se ficasse aberto
+
+    def test_rapida_so_olha_inicio_de_setor_com_setor_de_4k(self):
+        mp4 = A.mp4(mdat=5000)
+        img = bytearray(64 * 1024)
+        img[8192:8192 + len(mp4)] = mp4                                           # alinhado a 4096
+        img[40960 + 512:40960 + 512 + len(mp4)] = mp4                             # alinhado só a 512
+        achados, _, _ = varrer(bytes(img), 'rapida', setor=4096)
+        self.assertEqual([a['offset'] for a in achados], [8192])
+        achados, _, _ = varrer(bytes(img), 'rapida', setor=512)
+        self.assertEqual([a['offset'] for a in achados], [8192, 40960 + 512])
+
+
+class TestLeituraGrande(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'ReadFile do Windows')
+    def test_pedido_acima_de_4_gib_nao_estoura_o_dword_do_readfile(self):
+        from recuperacao import leitor
+
+        class Falso:
+            pedidos = []
+
+            def SetFilePointerEx(self, *a):
+                return 1
+
+            def ReadFile(self, h, buf, n, lido, _):
+                self.pedidos.append(n)
+                return 1
+        api = leitor.ApiWindows()
+        api.k = Falso()
+        api.ler(1, 0, 5 << 30)
+        self.assertEqual(Falso.pedidos, [leitor.MAX_LEITURA])
+
+
+class TestOrigemMaiorQue4GiB(CasoComPasta):
+    def test_offsets_acima_de_4_gib_sem_estouro_de_32_bits(self):
+        import subprocess
+        caminho = os.path.join(self.pasta, 'grande.bin')
+        open(caminho, 'wb').close()
+        if os.name == 'nt':
+            r = subprocess.run(['fsutil', 'sparse', 'setflag', caminho], capture_output=True)
+            if r.returncode != 0:
+                self.skipTest('sem arquivo esparso neste sistema')
+        base = (1 << 32) + (1 << 20)                                              # 4 GiB + 1 MiB
+        jpg, png = A.jpeg(semente=8), A.png()
+        try:
+            with open(caminho, 'r+b') as f:
+                f.truncate(base + (16 << 20))
+                f.seek(base)
+                f.write(jpg)
+                f.seek(base + (8 << 20) + 4096)
+                f.write(png)
+        except OSError:
+            self.skipTest('sem espaço para o arquivo esparso')
+        for modo in ('rapida', 'profunda'):
+            for n in (0, 2):
+                achados, _ = varrer_arquivo(caminho, modo, bloco=1 << 20, trabalhadores=n, inicio=(1 << 32) - 4096)
+                self.assertEqual([(a['offset'], a['tipo'], a['tamanho']) for a in achados],
+                                 [(base, 'JPG', len(jpg)), (base + (8 << 20) + 4096, 'PNG', len(png))], (modo, n))
+
+
 if __name__ == '__main__':
     unittest.main()

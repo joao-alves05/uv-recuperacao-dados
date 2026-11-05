@@ -27,6 +27,7 @@ IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0
 BLKSSZGET = 0x1268
 BLKGETSIZE64 = 0x80081272
 
+MAX_LEITURA = 1 << 30           # teto de bytes por chamada ao sistema (o Leitor repete até completar o pedido)
 MSG_ADMIN = 'Para ler o disco inteiro, abra o programa como administrador'
 SETOR_ARQUIVO = 512
 SETOR_OPTICO = 2048
@@ -253,6 +254,7 @@ class ApiWindows:
     def ler(self, h, offset, n):
         if not self.k.SetFilePointerEx(h, offset, None, 0):
             raise self._erro()
+        n = min(n, MAX_LEITURA)                      # ReadFile conta bytes em 32 bits: pedido maior vira leituras seguidas
         buf = self.ct.create_string_buffer(n)
         lido = self.wt.DWORD(0)
         if not self.k.ReadFile(h, buf, n, self.ct.byref(lido), None):
@@ -318,7 +320,10 @@ def seek_penalty_do_disco(indice, api=None):
 def abrir(caminho, api=None):
     """Abre a origem só para leitura. Caminho de disco do Windows usa a API do Windows; o resto, os.open."""
     if os.name == 'nt' and (api is not None or _DISCO_WINDOWS.fullmatch(caminho) or _OPTICO_WINDOWS.fullmatch(caminho)):
-        return LeitorWindows(caminho, api)
-    if api is not None:
-        return LeitorWindows(caminho, api)
-    return LeitorPosix(caminho)
+        aberto = LeitorWindows(caminho, api)
+    elif api is not None:
+        aberto = LeitorWindows(caminho, api)
+    else:
+        aberto = LeitorPosix(caminho)
+    aberto.caminho = caminho if api is None else None      # quem quiser reabrir a origem (outro descritor) usa este
+    return aberto
