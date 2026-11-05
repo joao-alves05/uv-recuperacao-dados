@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import time
 
 from .. import config, leitor, protecao, unidade
@@ -337,6 +338,48 @@ def _sha256(aberto, ctrl):
         pos += len(b)
 
 
+LIMITE_FAT32 = 4 * 1024 ** 3 - 1          # maior arquivo que o FAT32 guarda
+FS_COM_LIMITE_4G = ('fat', 'fat32', 'vfat', 'msdos')
+
+
+def _sistema_de_arquivos(pasta):
+    """Nome do sistema de arquivos da pasta ('NTFS', 'FAT32', 'vfat'...) ou '' se não deu para saber."""
+    try:
+        if os.name == 'nt':
+            import ctypes
+            raiz = os.path.splitdrive(os.path.abspath(pasta))[0] + os.sep
+            nome = ctypes.create_unicode_buffer(64)
+            if ctypes.windll.kernel32.GetVolumeInformationW(raiz, None, 0, None, None, None, nome, 64):
+                return nome.value
+            return ''
+        real, melhor, fs = os.path.realpath(pasta), -1, ''
+        with open('/proc/mounts', encoding='utf-8', errors='replace') as f:
+            for linha in f:
+                p = linha.split()
+                if len(p) > 2 and (real == p[1] or real.startswith(p[1].rstrip('/') + '/')) and len(p[1]) > melhor:
+                    melhor, fs = len(p[1]), p[2]
+        return fs
+    except (OSError, AttributeError):
+        return ''
+
+
+def conferir_espaco(destino, tamanho):
+    """Antes de criar a imagem: erro claro se falta espaço livre ou se o sistema de arquivos não guarda um arquivo
+    desse tamanho (FAT32 só até 4 GiB). Devolve a frase de erro ou None."""
+    pasta = os.path.dirname(os.path.abspath(destino))
+    try:
+        livre = shutil.disk_usage(pasta).free
+    except OSError:
+        livre = None
+    if livre is not None and livre < tamanho:
+        return ('Não há espaço livre no destino: a imagem precisa de %d bytes e só há %d. '
+                'Libere espaço ou escolha outro disco.' % (tamanho, livre))
+    if tamanho > LIMITE_FAT32 and _sistema_de_arquivos(pasta).lower() in FS_COM_LIMITE_4G:
+        return ('O destino usa FAT32, que não guarda arquivo de 4 GiB ou mais, e a imagem tem %d bytes. '
+                'Escolha um disco formatado em NTFS ou exFAT.' % tamanho)
+    return None
+
+
 def _criar_destino(destino, mapa, tamanho, remover_mapa):
     """Cria a imagem (O_EXCL: nunca toca em arquivo que já exista) e dá o tamanho. Se um arquivo alheio apareceu
     no lugar, apaga o mapa que acabamos de criar (senão ele faria o arquivo alheio parecer nosso)."""
@@ -464,6 +507,9 @@ def executar(job, ctrl):
             ctrl.evento('Retomando: %d bytes já prontos, %d ainda por ler.'
                         % (somar(faixas, 'ok') + somar(faixas, 'ruim'), somar(faixas, 'pendente')))
         else:
+            erro = conferir_espaco(destino, tamanho)
+            if erro:
+                raise ErroJob(erro)
             faixas = [[0, tamanho, 'pendente']] if tamanho else []
             salvar_mapa(mapa, faixas, origem_real, tamanho, etapa='criando')      # o mapa nasce ANTES da imagem
             fd_d = _criar_destino(destino, mapa, tamanho, remover_mapa=True)
@@ -654,12 +700,19 @@ def executar(job, ctrl):
             _log(ctrl, 'Lido da origem: %d bytes no total (contando as releituras).' % est['lidos'])
             _relatorio_final(ctrl, job, faixas, tamanho, setor, origem, destino, None)
             return 'concluido'
-        h_origem = _sha256(fd_o, ctrl)
-        if h_origem in ('pausado', 'cancelado'):
-            return h_origem
-        os.fsync(fd_d)
-        with leitor.abrir(destino) as conferencia:
-            h_destino = _sha256(conferencia, ctrl)
+        try:
+            h_origem = _sha256(fd_o, ctrl)
+            if h_origem in ('pausado', 'cancelado'):
+                return h_origem
+            os.fsync(fd_d)
+            with leitor.abrir(destino) as conferencia:
+                h_destino = _sha256(conferencia, ctrl)
+        except OSError as e:
+            # a imagem já está pronta: falha só na releitura de conferência não pode virar "erro inesperado"
+            ctrl.evento('A imagem foi copiada, mas a conferência por SHA-256 não pôde terminar (%s). '
+                        'Confira a imagem por outro meio antes de confiar nela.' % (getattr(e, 'strerror', None) or e))
+            _relatorio_final(ctrl, job, faixas, tamanho, setor, origem, destino, None)
+            return 'concluido'
         if h_destino in ('pausado', 'cancelado'):
             return h_destino
         if h_origem != h_destino:
