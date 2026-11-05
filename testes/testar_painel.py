@@ -30,7 +30,7 @@ if not EDGE:
     print('sem Edge neste PC: teste pulado')
     sys.exit(0)
 sys.path.insert(0, str(AQUI))
-from painel_falso import XSS_ROTULO  # noqa: E402
+from painel_falso import ACHADOS, XSS_ROTULO  # noqa: E402
 FOTOS = Path(os.environ['PAINEL_FOTOS']) if os.environ.get('PAINEL_FOTOS') else None
 
 
@@ -438,14 +438,14 @@ def main():
         p.foto('1366-volume-sem-admin-claro')
         http(porta, '/_teste/admin?on=1')
 
-        # Recuperar arquivos: tela honesta
+        # Recuperar arquivos: escolher como procurar
         p.clica('#b-recuperar')
-        conferir('"Recuperar arquivos" leva a tela honesta (busca na proxima atualizacao)',
-                 p.espera("location.hash==='#volume/F/recuperar' && !document.getElementById('v-buscar').hidden") and 'chega na próxima atualização' in p.ev("document.getElementById('buscar-corpo').textContent"))
-        conferir('tela honesta oferece a copia de seguranca e nao tem botao morto', p.ev("(()=>{const b=[...document.querySelectorAll('#v-buscar .btn')].filter(b=>b.getClientRects().length);return b.length===2&&b.every(x=>!x.disabled)&&b.map(x=>x.textContent).join('|')==='‹ Voltar|Fazer cópia de segurança'})()"))
+        conferir('"Recuperar arquivos" leva a escolha Rapida / Profunda',
+                 p.espera("location.hash==='#volume/F/recuperar' && !document.getElementById('v-buscar').hidden") and p.ev("document.querySelectorAll('#buscar-corpo .opcao').length")==2 and 'chega na próxima atualização' not in p.ev("document.getElementById('buscar-corpo').textContent"))
+        conferir('escolha da busca: sem botao morto (Comecar a busca e copia antes)', p.ev("(()=>{const b=[...document.querySelectorAll('#v-buscar .btn')].filter(b=>b.getClientRects().length);return b.length===3&&b.every(x=>!x.disabled)&&b.map(x=>x.textContent).join('|')==='‹ Voltar|Começar a busca|Fazer cópia de segurança antes'})()"))
         p.foto('1366-buscar-claro')
         p.clica('#b-buscar-imagem')
-        conferir('da tela honesta vai direto ao fluxo da copia', p.espera("location.hash==='#volume/F/imagem' && !document.getElementById('v-imagem').hidden"))
+        conferir('da escolha da busca da para ir direto a copia de seguranca', p.espera("location.hash==='#volume/F/imagem' && !document.getElementById('v-imagem').hidden"))
 
         # copia em 3 passos: pen drive E
         p.ir(base + '/?r=1#volume/E/imagem', 1)
@@ -691,6 +691,262 @@ def main():
         achados = [(f.name, t) for f in (AQUI.parent / 'recuperacao' / 'painel').glob('*') for t in proibidos if t in f.read_text(encoding='utf-8')]
         achados += [(f.name, t) for f in (AQUI / 'testar_painel.py', AQUI / 'painel_falso.py') for t in proibidos if t in f.read_text(encoding='utf-8')]
         conferir('nenhuma marca da empresa escrita no painel nem nos testes', not achados, achados)
+
+        # ---- resultados da busca (fase 5.4)
+        p.tema('light')
+        p.tamanho(1366, 768)
+        vid = http(porta, '/_teste/varredura?estado=concluido')['id']
+        p.ir(base + f'/jobs/{vid}', 1)
+        conferir('busca: pagina do job mostra o titulo "Busca em E:" e o rotulo "Varrido"',
+                 p.espera("document.getElementById('j-nome').textContent==='Busca em E:'") and p.ev("document.getElementById('j-l-copiado').textContent")=='Varrido' and p.ev("document.getElementById('j-n-ruins').hidden"))
+        conferir('resultados: 100 linhas na primeira pagina de 640', p.espera("document.querySelectorAll('.tabela tbody tr').length===100", 10) and p.ev("document.querySelector('.pg-txt').textContent")=='1 a 100 de 640')
+        esperado = {}
+        for a in ACHADOS:
+            esperado[a['grupo']] = esperado.get(a['grupo'], 0) + 1
+        abas = p.ev("Object.fromEntries([...document.querySelectorAll('.aba')].filter(b=>!b.hidden).map(b=>[b.dataset.grupo,b.querySelector('.aba-n').textContent]))")
+        conferir('abas por grupo com a contagem certa', abas == dict({'': '640'}, **{g: str(n) for g, n in esperado.items()}), abas)
+        conferir('abas: "Todos" marcada', p.ev("document.querySelector('.aba[data-grupo=\"\"]').getAttribute('aria-selected')")=='true')
+        p.foto('1366-resultados-lista-claro')
+
+        # ordenar clicando na coluna
+        def nomes(n=5):
+            return p.ev(f"[...document.querySelectorAll('.tabela tbody tr .col-nome')].slice(0,{n}).map(t=>t.textContent)")
+
+        def esperados(chave, desc=False, n=5, base=ACHADOS):
+            return [a['nome'] for a in sorted(base, key=lambda a: (chave(a), a['id']), reverse=desc)][:n]
+        conferir('ordem inicial: nome crescente', nomes() == esperados(lambda a: a['nome'].lower()), nomes())
+        p.clica('.tabela th.col-tamanho .ord')
+        p.espera("document.querySelector('th.col-tamanho').getAttribute('aria-sort')==='ascending'")
+        time.sleep(.3)
+        conferir('clicar em Tamanho: crescente', nomes() == esperados(lambda a: a['tamanho']), nomes())
+        p.clica('.tabela th.col-tamanho .ord')
+        p.espera("document.querySelector('th.col-tamanho').getAttribute('aria-sort')==='descending'")
+        time.sleep(.3)
+        conferir('clicar de novo: decrescente (com seta)', nomes() == esperados(lambda a: a['tamanho'], True) and p.ev("document.querySelector('th.col-tamanho .seta').textContent")=='▼', nomes())
+        p.clica('.tabela th.col-data .ord')
+        p.clica('.tabela th.col-data .ord')
+        p.espera("document.querySelector('th.col-data').getAttribute('aria-sort')==='descending'")
+        time.sleep(.3)
+        conferir('ordenar por Data decrescente', nomes() == esperados(lambda a: a['data'] or '', True), nomes())
+        p.clica('.tabela th.col-tipo .ord')
+        p.espera("document.querySelector('th.col-tipo').getAttribute('aria-sort')==='ascending'")
+        time.sleep(.3)
+        conferir('ordenar por Tipo crescente', nomes() == esperados(lambda a: a['tipo']), nomes())
+        p.clica('.tabela th.col-nome .ord')
+        p.espera("document.querySelector('th.col-nome').getAttribute('aria-sort')==='ascending'")
+        time.sleep(.3)
+        conferir('so uma coluna ordena por vez', p.ev("document.querySelectorAll('th[aria-sort=ascending],th[aria-sort=descending]').length")==1)
+
+        # paginar
+        p.clica('#r-prox')
+        conferir('proxima pagina: 101 a 200 de 640', p.espera("document.querySelector('.pg-txt').textContent==='101 a 200 de 640'") and p.ev("document.getElementById('r-ant').disabled")==False)
+        p.clica('#r-ant')
+        conferir('pagina anterior volta ao inicio e bloqueia o "Anterior"', p.espera("document.querySelector('.pg-txt').textContent==='1 a 100 de 640'") and p.ev("document.getElementById('r-ant').disabled"))
+
+        # miniaturas e estados
+        conferir('fotos: miniatura carregada (img da rota propria)', p.espera("(()=>{const v=[...document.querySelectorAll('.mini img')].filter(i=>{const r=i.getBoundingClientRect(),b=document.querySelector('.tabela-box').getBoundingClientRect();return r.top>=b.top&&r.bottom<=b.bottom});return v.length>0&&v.every(i=>i.complete&&i.naturalWidth===64)})()") and p.ev("document.querySelector('.mini img').getAttribute('src').startsWith('/api/achados/')"))
+        conferir('arquivos que nao sao foto mostram icone do grupo', p.ev("[...document.querySelectorAll('.tabela tbody tr')].filter(t=>!t.querySelector('img')).every(t=>t.querySelector('.mini svg'))"))
+        conferir('estado de cada arquivo: Bom, Parcial ou Ruim, com dica', p.ev("[...document.querySelectorAll('.tabela .tag.q')].every(t=>['Bom','Parcial','Ruim'].includes(t.textContent)&&t.title.length>10)"))
+
+        # filtros
+        def total():
+            return p.ev("document.querySelector('.pg-txt')?document.querySelector('.pg-txt').textContent:document.querySelector('.sel-txt').textContent")
+
+        def aba(g):
+            p.clica(f'.aba[data-grupo="{g}"]')
+            time.sleep(.5)
+        aba('foto')
+        fotos = [a for a in ACHADOS if a['grupo'] == 'foto']
+        conferir('aba Fotos: so fotos', p.espera(f"document.querySelector('.pg-txt').textContent==='1 a 100 de {len(fotos)}'") and p.ev("[...document.querySelectorAll('.tabela tbody tr .col-tipo')].every(t=>['JPG','PNG','GIF','HEIC','CR2'].includes(t.textContent))"))
+        p.ev("(()=>{const s=document.querySelector('select[aria-label=Tipo]');s.value='PNG';s.dispatchEvent(new Event('change'))})()")
+        pngs = [a for a in fotos if a['tipo'] == 'PNG']
+        time.sleep(.6)
+        conferir('filtro de tipo PNG', p.ev("document.querySelectorAll('.tabela tbody tr').length")==len(pngs) and p.ev("[...document.querySelectorAll('.tabela tbody tr .col-tipo')].every(t=>t.textContent==='PNG')"))
+        p.ev("(()=>{const s=document.querySelector('select[aria-label=Estado]');s.value='parcial';s.dispatchEvent(new Event('change'))})()")
+        time.sleep(.6)
+        pp = [a for a in pngs if a['estado'] == 'parcial']
+        conferir('filtros combinados: tipo + estado', p.ev("document.querySelectorAll('.tabela tbody tr').length")==len(pp) and p.ev("[...document.querySelectorAll('.tabela tbody tr .tag.q')].every(t=>t.textContent==='Parcial')"), len(pp))
+        p.clica('#r-limpar')
+        time.sleep(.6)
+        conferir('"Limpar filtros" tira tipo e estado mas mantem a aba', p.ev("document.querySelector('.aba.ativa').dataset.grupo")=='foto' and p.ev("document.querySelector('.pg-txt').textContent")==f'1 a 100 de {len(fotos)}' and p.ev("document.getElementById('r-limpar').disabled"))
+        p.ev("(()=>{const s=document.querySelector('select[aria-label=Tamanho]');s.value='xx';s.dispatchEvent(new Event('change'))})()")
+        aba('video')
+        time.sleep(.4)
+        grandes = [a for a in ACHADOS if a['grupo'] == 'video' and a['tamanho'] > 104857600]
+        conferir('filtro de tamanho (mais de 100 MB) nos videos', p.espera(f"document.querySelectorAll('.tabela tbody tr').length===({len(grandes)}||0)||document.querySelector('.vazio:not([hidden])')!==null") and (p.ev("document.querySelectorAll('.tabela tbody tr').length")==len(grandes)))
+        p.clica('#r-limpar')
+        aba('')
+        p.ev("(()=>{const i=document.querySelector('input[type=search]');i.value='extremamente';i.dispatchEvent(new Event('input'))})()")
+        conferir('busca por nome (com espera de digitacao)', p.espera("document.querySelectorAll('.tabela tbody tr').length===1", 5))
+        conferir('nome muito comprido: reticencias e dica com o nome inteiro', p.ev("(()=>{const t=document.querySelector('.tabela tbody tr .col-nome');return t.scrollWidth>t.clientWidth&&getComputedStyle(t).textOverflow==='ellipsis'&&t.title.includes('reticencias')})()"))
+        p.ev("(()=>{const i=document.querySelector('input[type=search]');i.value='zzzz-nao-existe';i.dispatchEvent(new Event('input'))})()")
+        conferir('nada combina: mensagem clara', p.espera("!document.querySelector('.res-area .vazio').hidden && document.querySelector('.res-area .vazio').textContent.includes('Nenhum arquivo combina')", 5))
+        p.ev("(()=>{const i=document.querySelector('input[type=search]');i.value='<img';i.dispatchEvent(new Event('input'))})()")
+        conferir('XSS no nome do arquivo: aparece como texto e nada executa', p.espera("document.querySelectorAll('.tabela tbody tr').length===1", 5) and '<img src=x onerror' in p.ev("document.querySelector('.tabela tbody tr .col-nome').textContent") and p.ev("document.querySelectorAll('.tabela img[onerror],.tabela tbody .col-nome *').length")==0 and p.ev('window.__xss')is None)
+        p.clica('#r-limpar')
+        p.ev("(()=>{const d=document.querySelectorAll('.filtros input[type=date]');d[0].value='2025-01-01';d[0].dispatchEvent(new Event('change'));d[1].value='2025-12-31';d[1].dispatchEvent(new Event('change'))})()")
+        no_ano = [a for a in ACHADOS if a['data'] and '2025-01-01' <= a['data'][:10] <= '2025-12-31']
+        time.sleep(.7)
+        conferir('filtro de data (de / ate)', p.ev("document.querySelector('.pg-txt').textContent")==f'1 a {min(100, len(no_ano))} de {len(no_ano)}', p.ev("document.querySelector('.pg-txt').textContent"))
+        p.clica('#r-limpar')
+        time.sleep(.5)
+
+        # selecao
+        p.espera("document.querySelectorAll('.tabela tbody tr').length===100")
+        p.clica('.tabela thead input[type=checkbox]')
+        conferir('caixa do cabecalho marca todos desta pagina', p.espera("document.querySelector('.sel-txt').textContent.startsWith('100 selecionados')") and p.ev("[...document.querySelectorAll('.tabela tbody input[type=checkbox]')].every(c=>c.checked)"))
+        conferir('oferece "Selecionar os 640 da lista"', p.ev("!document.getElementById('r-sel-filtro').hidden&&document.getElementById('r-sel-filtro').textContent")=='Selecionar os 640 da lista')
+        p.clica('#r-sel-filtro')
+        conferir('selecionar tudo (640) de todas as paginas', p.espera("document.querySelector('.sel-txt').textContent.startsWith('Todos os 640 arquivos da lista estão selecionados')") and p.ev("window.__painel.resultados().modo")=='filtro')
+        p.clica('.tabela tbody tr:nth-child(3) input[type=checkbox]')
+        conferir('desmarcar um tira so ele (639 selecionados)', p.espera("document.querySelector('.sel-txt').textContent.startsWith('639 selecionados')", 8) and p.ev("window.__painel.resultados().modo")=='ids')
+        p.clica('#r-prox')
+        p.espera("document.querySelector('.pg-txt').textContent==='101 a 200 de 640'")
+        conferir('a selecao continua na pagina 2', p.ev("[...document.querySelectorAll('.tabela tbody input[type=checkbox]')].every(c=>c.checked)"))
+        p.clica('#r-sel-limpar')
+        conferir('"Limpar selecao" zera', p.espera("document.querySelector('.sel-txt').textContent==='640 arquivos na lista'") and p.ev("document.getElementById('r-recuperar').disabled"))
+        p.clica('#r-ant')
+        p.espera("document.querySelector('.pg-txt').textContent==='1 a 100 de 640'")
+        aba('foto')
+        docs = [a for a in ACHADOS if a['grupo'] == 'foto']
+        p.espera(f"document.querySelector('.pg-txt').textContent==='1 a 100 de {len(docs)}'")
+        p.clica('.tabela thead input[type=checkbox]')
+        p.clica('#r-sel-filtro')
+        conferir('selecionar por grupo: so as fotos', p.espera(f"document.querySelector('.sel-txt').textContent.startsWith('Todos os {len(docs)} arquivos')") and p.ev("window.__painel.resultados().modo")=='filtro')
+        aba('documento')
+        conferir('mudar de aba desfaz a selecao "todos" (nao recupera o que nao esta a vista)', p.espera("window.__painel.resultados().modo==='ids'&&window.__painel.resultados().selecionados===0"))
+        aba('')
+
+        # grade
+        p.clica('#r-v-grade')
+        conferir('visao em grade: 100 cartoes com miniatura e estado', p.espera("document.querySelectorAll('.grade .item-grade').length===100&&document.querySelector('.tabela-box').hidden") and p.ev("document.querySelectorAll('.grade .mini img').length")>=1)
+        conferir('grade: escolha de ordem aparece', p.ev("!document.querySelector('.ordenar-grade').hidden"))
+        p.foto('1366-resultados-grade-claro')
+        p.clica('.grade .item-grade:nth-child(2)')
+        conferir('grade: clicar no cartao marca o arquivo', p.espera("document.querySelector('.sel-txt').textContent.startsWith('1 selecionado')") and p.ev("document.querySelector('.grade .item-grade:nth-child(2)').classList.contains('marcada')"))
+        recarregar(p)
+        conferir('a visao escolhida (grade) fica guardada', p.espera("document.querySelectorAll('.grade .item-grade').length>0"))
+        p.clica('#r-v-lista')
+        p.espera("!document.querySelector('.tabela-box').hidden")
+
+        # arvore de pastas
+        conferir('arvore de pastas aparece (achados com caminho)', p.espera("!document.querySelector('.arvore').hidden") and p.ev("document.querySelectorAll('.arvore .no-linha').length")>=1)
+        p.espera("document.querySelectorAll('.arvore .no-linha').length>=5")
+        nomes_pastas = p.ev("[...document.querySelectorAll('.arvore .no-nome .no-txt')].map(n=>n.textContent)")
+        conferir('arvore: raiz e as pastas do original', nomes_pastas[:5] == ['Todas as pastas', 'DCIM', 'Documentos', 'Musicas', 'Videos'], nomes_pastas)
+        p.ev("[...document.querySelectorAll('.arvore .no-nome')].find(b=>b.textContent.startsWith('DCIM')).click()")
+        dcim = [a for a in ACHADOS if a.get('caminho', '').startswith('DCIM')]
+        time.sleep(.7)
+        conferir('clicar numa pasta filtra os achados dela', p.ev("document.querySelector('.pg-txt').textContent")==f'1 a 100 de {len(dcim)}' and p.ev("document.querySelector('.no-linha.atual').dataset.caminho")=='DCIM')
+        p.ev("[...document.querySelectorAll('.arvore .no-linha')].find(l=>l.dataset.caminho==='DCIM').querySelector('.no-seta').click()")
+        conferir('abrir a pasta mostra as subpastas', p.espera("[...document.querySelectorAll('.arvore .no-linha')].some(l=>l.dataset.caminho==='DCIM/100CANON')"))
+        p.foto('1366-resultados-arvore-claro')
+        larg = lambda: p.ev("Math.round(document.querySelector('.arvore').getBoundingClientRect().width)")
+        p.ev("document.querySelector('.alca-arvore').scrollIntoView({block:'center'})")
+        c = p.centro('.alca-arvore')
+        l0 = larg()
+        p.mouse('mousePressed', *c, button='left', clickCount=1)
+        p.mouse('mouseMoved', c[0] + 60, c[1], button='left')
+        p.mouse('mouseReleased', c[0] + 60, c[1], button='left', clickCount=1)
+        time.sleep(.3)
+        conferir('arrastar a alca muda a largura da arvore e guarda', larg() > l0 + 40 and json.loads(p.ev("localStorage.getItem('painel.arvore')"))['l'] > l0 + 40, (l0, larg()))
+        p.clica('.arvore-cab .btn')
+        conferir('"Recolher" esconde a arvore e "Mostrar pastas" traz de volta', p.ev("document.querySelector('.arvore').getBoundingClientRect().width")==0 and p.ev("!document.querySelector('.resultados > .btn').hidden"))
+        p.clica('.resultados > .btn')
+        conferir('arvore volta', larg() > 100)
+        p.ev("[...document.querySelectorAll('.arvore .no-nome')].find(b=>b.textContent.startsWith('Todas')).click()")
+        time.sleep(.5)
+
+        # recuperar selecionados
+        p.clica('.tabela tbody tr:nth-child(1) input[type=checkbox]')
+        p.clica('.tabela tbody tr:nth-child(2) input[type=checkbox]')
+        p.clica('.tabela tbody tr:nth-child(3) input[type=checkbox]')
+        conferir('"Recuperar selecionados" so vale com algo marcado, e mostra a quantidade', p.espera("document.getElementById('r-recuperar').textContent==='Recuperar selecionados (3)'") and not p.ev("document.getElementById('r-recuperar').disabled"))
+        sug = p.ev("(()=>{const s=document.querySelector('select[aria-label=\"Disco de destino\"]');return s.options[s.selectedIndex].textContent})()")
+        conferir('destino sugerido: outro disco, o de mais espaco (G:), nunca o da origem (E:)', sug.endswith('(G:) (sugerido)') and p.ev("[...document.querySelector('select[aria-label=\"Disco de destino\"]').options].every(o=>!o.textContent.includes('(E:)'))"), sug)
+        conferir('caminho de destino mostrado', 'G:\\Recuperados' in p.ev("document.querySelector('.recuperar .dica').textContent"))
+        p.ev("(()=>{const i=document.querySelector('input[aria-label=\"Nome da pasta de destino\"]');i.value='a/b';i.dispatchEvent(new Event('input'))})()")
+        conferir('nome de pasta invalido bloqueia o botao', p.ev("document.getElementById('r-recuperar').disabled&&!document.querySelector('.recuperar .alerta').hidden"))
+        p.ev("(()=>{const i=document.querySelector('input[aria-label=\"Nome da pasta de destino\"]');i.value='Recuperados';i.dispatchEvent(new Event('input'))})()")
+        p.foto('1366-resultados-recuperar-claro')
+        p.clica('#r-recuperar', .8)
+        conferir('recuperar: abre o job de recuperacao e o servico recebeu os 3 arquivos e o destino',
+                 p.espera("/^\\/jobs\\/j-20261104-09\\d\\d$/.test(location.pathname) && document.getElementById('j-nome').textContent==='Arquivos recuperados'") and http(porta, '/_teste/ultimo_rec')['rec']['n'] == 3 and http(porta, '/_teste/ultimo_rec')['rec']['destino'] == 'G:\\Recuperados', http(porta, '/_teste/ultimo_rec'))
+        rid = p.ev('location.pathname').split('/')[-1]
+        conferir('job de recuperacao: "Salvando em" e rotulo "Recuperado"', p.ev("document.getElementById('j-dt-destino').textContent")=='Salvando em' and p.ev("document.getElementById('j-l-copiado').textContent")=='Recuperado' and p.ev("document.getElementById('j-pos').hidden"))
+        http(porta, f'/_teste/mexer?id={rid}&estado=concluido&progresso=1')
+        conferir('concluido: aparecem "Abrir pasta" e "Ver relatorio"', p.espera("!document.getElementById('j-pos').hidden") and p.ev("document.getElementById('j-relatorio').getAttribute('href')")==f'/api/jobs/{rid}/relatorio')
+        p.clica('#j-abrir-pasta', .5)
+        conferir('"Abrir pasta" pede ao servico para abrir o destino', http(porta, '/_teste/ultimo_rec')['abriu'] == 'G:\\Recuperados')
+        http(porta, '/_teste/abrir_falha?on=1')
+        p.clica('#j-abrir-pasta', .5)
+        conferir('se nao abrir, o erro vem escrito com o caminho da pasta', p.espera("!document.getElementById('j-pos-erro').hidden") and 'G:\\Recuperados' in p.ev("document.getElementById('j-pos-erro').textContent"))
+        http(porta, '/_teste/abrir_falha?on=0')
+        p.foto('1366-recuperacao-pronta-claro')
+        p.ir(base + f'/jobs/{vid}', 1)
+        p.espera("document.querySelectorAll('.tabela tbody tr').length===100")
+        conferir('na lista, o que ja foi recuperado vem marcado', p.ev("document.querySelectorAll('.tabela .recuperado').length")>=1)
+        http(porta, '/_teste/zerar_recuperados')
+
+        # busca em andamento: os achados aparecem enquanto varre
+        vid2 = http(porta, '/_teste/varredura?estado=rodando&progresso=0')['id']
+        p.ir(base + f'/jobs/{vid2}', 1)
+        conferir('busca sem achados ainda: "Procurando…"', p.espera("document.querySelector('.res-area .vazio') && document.querySelector('.res-area .vazio').textContent.includes('Procurando')"))
+        http(porta, f'/_teste/mexer?id={vid2}&progresso=0.25')
+        conferir('achados aparecem enquanto varre (25% = 160)', p.espera("window.__painel.resultados()&&window.__painel.resultados().total===160", 8), p.ev('JSON.stringify(window.__painel.resultados())'))
+        p.foto('1366-resultados-andando-claro')
+        http(porta, f'/_teste/mexer?id={vid2}&progresso=0.5')
+        conferir('e continuam chegando (50% = 320)', p.espera("window.__painel.resultados().total===320", 8))
+        http(porta, f'/_teste/mexer?id={vid2}&estado=concluido&progresso=1')
+        conferir('ao terminar: 640 e aviso de busca terminada', p.espera("window.__painel.resultados().total===640", 8) and p.espera("document.getElementById('j-alerta').textContent.includes('Busca terminada')"))
+
+        # servico com defeito na lista de achados
+        http(porta, '/_teste/quebrar?on=1')
+        p.ir(base + f'/jobs/{vid}', 1.5)
+        conferir('lista de achados com erro: mensagem clara e "Tentar de novo"', p.espera("!!document.querySelector('.res-area .vazio-erro .btn') && document.querySelector('.res-area .vazio-erro').textContent.includes('Não consegui ler os resultados')", 8))
+        http(porta, '/_teste/quebrar?on=0')
+
+        # escolher o modo e comecar a busca
+        p.ir(base + '/?r=20#volume/E/recuperar', 1)
+        p.espera("document.getElementById('b-iniciar-busca')")
+        conferir('"Recuperar arquivos": escolher Rapida ou Profunda, cada uma explicada',
+                 p.ev("[...document.querySelectorAll('#buscar-corpo .opcao')].map(o=>o.querySelector('.opcao-nome').textContent).join('|')")=='Rápida|Profunda' and p.ev("document.querySelector('#buscar-corpo .opcao input').checked")
+                 and p.ev("[...document.querySelectorAll('#buscar-corpo .opcao-explica')].every(e=>e.textContent.length>30)"))
+        conferir('modo: avisos do pen drive tambem aparecem aqui', 'TRIM' in p.ev("document.querySelector('#buscar-corpo .avisos').textContent"))
+        p.foto('1366-buscar-modo-claro')
+        p.ev("document.querySelectorAll('#buscar-corpo .opcao input')[1].click()")
+        p.espera("document.querySelectorAll('#buscar-corpo .opcao input')[1].checked")
+        p.clica('#b-iniciar-busca', .8)
+        conferir('"Comecar a busca": cria o job de varredura com o modo escolhido',
+                 p.espera("/^\\/jobs\\/j-20261104-01\\d\\d$/.test(location.pathname) && document.getElementById('j-nome').textContent==='Busca em E:'") and http(porta, '/_teste/ultimo_rec')['opcoes'] == {'modo': 'profunda'} and http(porta, '/_teste/ultimo')['ultimo'] == {'tipo': 'varredura', 'origem': '\\\\.\\E:', 'destino': ''}, http(porta, '/_teste/ultimo'))
+
+        # medidas das telas de resultados
+        def medidas_res(nome, w, h, tema, visao):
+            p.tema(tema)
+            p.tamanho(w, h)
+            p.ir(base + f'/jobs/{vid}', 1)
+            p.espera("document.querySelectorAll('.tabela tbody tr,.grade .item-grade').length>0")
+            p.ev(f"(()=>{{const b=document.getElementById('r-v-{visao}');b.click()}})()")
+            time.sleep(.6)
+            r = p.ev("""(()=>{const d=document.documentElement,m=document.querySelector('.principal').getBoundingClientRect();
+              const vis=[...document.querySelectorAll('.resultados .btn,.resultados .aba')].filter(b=>b.getClientRects().length);
+              const alt=vis.map(b=>Math.round(b.getBoundingClientRect().height));
+              const fora=[...document.querySelectorAll('.resultados > *,.res-area > *,.cartao')].filter(e=>e.getClientRects().length).filter(e=>{const r=e.getBoundingClientRect();return r.right>m.right+.5||r.left<m.left-.5}).map(e=>e.className);
+              return {lateral:d.scrollWidth<=innerWidth,fora,alturas:[...new Set(alt)],maior:Math.max(...[...document.querySelectorAll('.resultados *')].filter(e=>e.getClientRects().length&&e.children.length===0&&e.textContent.trim()).map(e=>parseFloat(getComputedStyle(e).fontSize)))}})()""")
+            p.foto(f'{w}x{h}-resultados-{visao}-{"claro" if tema == "light" else "escuro"}')
+            conferir(f'{nome} (resultados, {visao}): sem rolagem lateral e nada fora da area', r['lateral'] and not r['fora'], r)
+            conferir(f'{nome} (resultados, {visao}): botoes e abas com a mesma altura', len(r['alturas']) == 1, r['alturas'])
+            conferir(f'{nome} (resultados, {visao}): fonte maxima 14', r['maior'] <= 14, r['maior'])
+        medidas_res('1366x768 claro', 1366, 768, 'light', 'lista')
+        medidas_res('1366x768 escuro', 1366, 768, 'dark', 'lista')
+        medidas_res('1366x768 claro', 1366, 768, 'light', 'grade')
+        medidas_res('1280x720 claro', 1280, 720, 'light', 'lista')
+        medidas_res('1500x900 claro', 1500, 900, 'light', 'lista')
+        medidas_res('1920x1080 claro', 1920, 1080, 'light', 'lista')
+        medidas_res('390x844 claro', 390, 844, 'light', 'lista')
+        medidas_res('390x844 escuro', 390, 844, 'dark', 'grade')
+        p.tema('light')
+        p.tamanho(1366, 768)
 
         # ---- foco, estados e acessibilidade basica
         p.tamanho(1366, 768)

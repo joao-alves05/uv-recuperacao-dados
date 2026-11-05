@@ -53,6 +53,11 @@
     const partes = String(caminho == null ? '' : caminho).split(/[\\/]+/).filter(Boolean);
     return partes.length ? partes[partes.length - 1] : String(caminho || 'Sem nome');
   }
+  function tituloJob(j) {
+    if (j && j.tipo === 'varredura') return 'Busca em ' + nomeDe(j.origem);
+    if (j && j.tipo === 'recuperar') return 'Arquivos recuperados';
+    return nomeDe(j && j.origem);
+  }
   function bytes(n) {
     n = Number(n);
     if (!isFinite(n) || n < 0) return '—';
@@ -343,7 +348,7 @@
     c.dataset.modo = modo;
     $('conexao-texto').textContent = MODOS[modo];
     const j = abertoId && jobs.get(abertoId);
-    document.title = (j ? nomeDe(j.origem) + ' — ' : '') + appNome;
+    document.title = (j ? tituloJob(j) + ' — ' : '') + appNome;
   }
 
   const itens = new Map();
@@ -373,7 +378,7 @@
     return { li, a, nome, tag, barra, cheia, esq, dir };
   }
   function atualizarItem(it, j) {
-    const n = nomeDe(j.origem);
+    const n = tituloJob(j);
     it.nome.textContent = n;
     it.a.title = String(j.origem == null ? '' : j.origem);
     it.tag.textContent = ESTADOS[j.estado] || String(j.estado || '');
@@ -423,10 +428,10 @@
     $('v-imagem').hidden = vt !== 'imagem';
     $('v-nova').hidden = vt !== 'avancado';
     $('v-job').hidden = !abertoId;
-    if (!abertoId) return;
+    if (!abertoId) { destruirResultados(); return; }
     const j = jobs.get(abertoId);
     const temJob = !!j;
-    $('j-nome').textContent = j ? nomeDe(j.origem) : 'Recuperação';
+    $('j-nome').textContent = j ? tituloJob(j) : 'Recuperação';
     $('j-nome').title = j ? String(j.origem == null ? '' : j.origem) : '';
     const tag = $('j-tag');
     tag.hidden = !j;
@@ -436,7 +441,8 @@
     $('j-erro').hidden = !(!temJob && detEstado === 'erro');
     $('j-erro-texto').textContent = detErro;
     $('j-conteudo').hidden = !temJob;
-    if (!j) return;
+    if (!j) { destruirResultados(); return; }
+    const tipoJob = j.tipo || 'imagem';
 
     const p = pct(j);
     $('j-pct').textContent = p + ' %';
@@ -447,6 +453,8 @@
     barra.setAttribute('aria-valuenow', String(p));
     $('j-barra-cheia').style.width = p + '%';
     const total = Number(j.bytes_total) > 0 ? ' de ' + bytes(j.bytes_total) : '';
+    $('j-l-copiado').textContent = tipoJob === 'varredura' ? 'Varrido' : tipoJob === 'recuperar' ? 'Recuperado' : 'Copiado';
+    $('j-n-ruins').hidden = tipoJob !== 'imagem';
     $('j-copiado').textContent = bytes(j.bytes_feitos || 0) + total;
     $('j-vel').textContent = velocidade(j);
     $('j-resta').textContent = restante(j);
@@ -455,19 +463,23 @@
     $('j-origem').title = $('j-origem').textContent;
     $('j-destino').textContent = String(j.destino == null ? '' : j.destino);
     $('j-destino').title = $('j-destino').textContent;
+    $('j-dt-destino').textContent = tipoJob === 'recuperar' ? 'Salvando em' : 'Cópia';
+    $('j-dt-destino').hidden = $('j-destino').hidden = tipoJob === 'varredura' || !j.destino;
+    $('j-confirma-txt').textContent = tipoJob === 'varredura' ? 'Cancelar a busca? O que já foi achado continua na lista.' : tipoJob === 'recuperar' ? 'Cancelar a recuperação? O que já foi salvo continua na pasta.' : 'Cancelar esta recuperação? O que já foi copiado continua guardado.';
 
     const alerta = $('j-alerta');
     let txt = '', tipo = '';
     if (j.estado === 'interrompido') {
-      txt = 'Esta recuperação foi interrompida porque o programa parou de repente. O que já foi copiado está guardado. Clique em Retomar para continuar de onde parou.';
+      txt = 'Esta recuperação foi interrompida porque o programa parou de repente. ' + (tipoJob === 'varredura' ? 'O que já foi achado está na lista.' : 'O que já foi copiado está guardado.') + ' Clique em Retomar para continuar de onde parou.';
       tipo = 'aviso';
     } else if (j.estado === 'falhou') {
       txt = 'Não foi possível terminar.' + (j.erro ? ' ' + String(j.erro) : '');
       tipo = 'perigo';
     } else if (j.estado === 'cancelado') {
-      txt = 'Recuperação cancelada. O que já foi copiado continua guardado.';
+      txt = tipoJob === 'varredura' ? 'Busca cancelada. O que já foi achado continua na lista.' : 'Recuperação cancelada. O que já foi copiado continua guardado.';
     } else if (j.estado === 'concluido') {
-      txt = ruins(j) ? 'Cópia pronta, mas alguns trechos do original não puderam ser lidos. Eles ficaram em branco na cópia.' : 'Cópia pronta.';
+      txt = tipoJob === 'varredura' ? 'Busca terminada. Marque os arquivos que você quer recuperar.' : tipoJob === 'recuperar' ? 'Arquivos recuperados. Abra a pasta para ver.'
+        : ruins(j) ? 'Cópia pronta, mas alguns trechos do original não puderam ser lidos. Eles ficaram em branco na cópia.' : 'Cópia pronta.';
     }
     alerta.hidden = !txt;
     alerta.textContent = txt;
@@ -485,8 +497,58 @@
     $('j-acao-erro').hidden = !erroAcao;
     $('j-acao-erro').textContent = erroAcao;
 
+    const pos = tipoJob === 'recuperar' && j.estado === 'concluido';
+    $('j-pos').hidden = !pos;
+    if (pos) $('j-relatorio').href = '/api/jobs/' + encodeURIComponent(j.id) + '/relatorio';
+    if (!pos) { $('j-pos-erro').hidden = true; }
+    $('v-job').classList.toggle('larga', tipoJob === 'varredura');
+    document.querySelector('#j-conteudo .progresso').hidden = tipoJob === 'varredura' && j.estado === 'concluido';
+    if (tipoJob === 'varredura') mostrarResultados(j); else destruirResultados();
+
     desenharHistorico();
   }
+
+  /* ---------- resultados da busca (lista de achados) ---------- */
+  let resComp = null;
+  function destruirResultados() {
+    if (!resComp) return;
+    resComp.obj.destruir();
+    resComp = null;
+    $('j-resultados').hidden = true;
+  }
+  function mostrarResultados(j) {
+    if (!window.Resultados) return;
+    if (resComp && resComp.id !== j.id) destruirResultados();
+    if (!resComp) {
+      $('j-resultados').hidden = false;
+      resComp = { id: j.id, obj: window.Resultados.montar($('j-resultados'), {
+        jobId: j.id, api, bytes, destinos: () => destinosPara(jobs.get(j.id)),
+        aoRecuperar: (novo) => { if (novo && novo.id) { aplicarJob(novo); ir('/jobs/' + encodeURIComponent(novo.id)); } },
+      }) };
+    }
+    resComp.obj.atualizar(j);
+  }
+  function destinosPara(j) {
+    const origem = j ? textoDe(j.origem) : '';
+    const a = [...alvos.volumes, ...alvos.discos].find((x) => x.caminho === origem && !x.vazio);
+    let lista;
+    if (a) lista = candidatos(a);
+    else {
+      const l = /^\\\\\.\\([A-Za-z]:)$/.exec(origem);
+      lista = alvos.volumes.filter((v) => v.tipo === 'volume' && !v.vazio && v.tipoFonte !== 'optico' && /^[A-Za-z]:$/.test(v.letra) && !(l && v.letra.toUpperCase() === l[1].toUpperCase()));
+    }
+    const sug = a ? sugerido(a, lista) : lista[0];
+    return lista.map((v) => ({ rotulo: v.titulo, base: v.letra, livre: v.livre, sugerido: v === sug }));
+  }
+  $('j-abrir-pasta').addEventListener('click', async () => {
+    if (!abertoId) return;
+    $('j-pos-erro').hidden = true;
+    try { await api('POST', '/api/jobs/' + encodeURIComponent(abertoId) + '/abrir'); } catch (e) {
+      const j = jobs.get(abertoId);
+      $('j-pos-erro').textContent = e.message + (j && j.destino ? ' A pasta é ' + j.destino : '');
+      $('j-pos-erro').hidden = false;
+    }
+  });
 
   let histChave = '';
   function desenharHistorico() {
@@ -740,7 +802,7 @@
     if (t !== 'alvo' && t !== 'buscar' && t !== 'imagem') { alvoAtual = null; fluxoChave = ''; return; }
     alvoAtual = acharAlvo(rota);
     const corpo = t === 'alvo' ? $('vol-corpo') : t === 'buscar' ? $('buscar-corpo') : $('imagem-corpo');
-    const chave = [t, rota.passo, rota.alvoTipo, rota.alvoId, fontesVer, fontesEstado, admin, img.destino, alvoAtual ? 1 : 0].join('|');
+    const chave = [t, rota.passo, rota.alvoTipo, rota.alvoId, fontesVer, fontesEstado, admin, img.destino, modoBusca, alvoAtual ? 1 : 0].join('|');
     if (chave === fluxoChave) return;
     fluxoChave = chave;
     corpo.replaceChildren();
@@ -769,18 +831,64 @@
     ac.append(b1, b2);
     corpo.append(ac);
   }
+  const MODOS_BUSCA = [
+    ['rapida', 'Rápida', 'Procura as fotos, vídeos e documentos que ainda estão inteiros; leva alguns minutos.'],
+    ['profunda', 'Profunda', 'Lê o disco inteiro, byte a byte, e acha mais arquivos, até os danificados; leva bem mais tempo.'],
+  ];
+  let modoBusca = 'rapida';
+  let buscaErro = '';
+  let buscaEnviando = false;
   function fluxoBuscar(corpo, a) {
     $('buscar-volta').onclick = () => ir(urlAlvo(a));
     corpo.append(cartaoFonte(a, false));
-    const c = el('div', 'cartao coluna');
-    c.append(el('p', null, 'A busca de fotos, vídeos e documentos chega na próxima atualização.'));
-    c.append(el('p', 'ajuda', 'Você já pode fazer a cópia de segurança, que é o primeiro passo dela: a busca vai trabalhar na cópia e o original fica protegido.'));
+    const av = blocoAvisos(a);
+    if (av) corpo.append(av);
+    const c = el('div', 'cartao formulario');
+    c.append(el('h2', null, 'Como procurar?'));
+    const grupo = el('div', 'opcoes');
+    grupo.setAttribute('role', 'radiogroup');
+    grupo.setAttribute('aria-label', 'Como procurar');
+    for (const [chave, nome, texto] of MODOS_BUSCA) {
+      const lab = el('label', 'opcao');
+      const r = el('input');
+      r.type = 'radio'; r.name = 'modo-busca'; r.value = chave; r.checked = modoBusca === chave;
+      r.addEventListener('change', () => { modoBusca = chave; render(); });
+      const t = el('span', 'opcao-txt');
+      t.append(el('span', 'opcao-nome', nome), el('span', 'fonte-meta opcao-explica', texto));
+      lab.append(r, t);
+      grupo.append(lab);
+    }
+    c.append(grupo);
+    const erro = el('p', 'alerta alerta-perigo', buscaErro);
+    erro.id = 'busca-erro';
+    erro.setAttribute('role', 'alert');
+    erro.hidden = !buscaErro;
+    c.append(erro);
     const ac = el('div', 'acoes');
-    const b = botao('Fazer cópia de segurança', 'btn-primario', () => ir(urlAlvo(a, 'imagem')));
-    b.id = 'b-buscar-imagem';
-    b.disabled = a.tipoFonte === 'optico';
-    ac.append(b);
+    const ini = botao('Começar a busca', 'btn-primario', async () => {
+      if (buscaEnviando) return;
+      buscaEnviando = true; buscaErro = '';
+      ini.disabled = true; ini.textContent = 'Iniciando…'; erro.hidden = true;
+      try {
+        const j = jobDe(await api('POST', '/api/jobs', { tipo: 'varredura', origem: a.caminho, opcoes: { modo: modoBusca } }));
+        aplicarJob(j);
+        if (j && j.id) ir('/jobs/' + encodeURIComponent(j.id));
+      } catch (e) {
+        buscaErro = e.message;
+        erro.textContent = e.message; erro.hidden = false;
+      } finally {
+        buscaEnviando = false;
+        ini.disabled = a.tipoFonte === 'optico'; ini.textContent = 'Começar a busca';
+      }
+    });
+    ini.id = 'b-iniciar-busca';
+    ini.disabled = a.tipoFonte === 'optico';
+    const b2 = botao('Fazer cópia de segurança antes', 'btn-suave', () => ir(urlAlvo(a, 'imagem')));
+    b2.id = 'b-buscar-imagem';
+    b2.disabled = a.tipoFonte === 'optico';
+    ac.append(ini, b2);
     c.append(ac);
+    c.append(el('p', 'dica', 'A busca só lê o disco: nada é gravado nele.'));
     corpo.append(c);
   }
 
@@ -1102,5 +1210,6 @@
   });
   window.__painel = { // só para leitura nos testes de tela
     estado: () => ({ modo, falhas, emConsulta, abertoId, detEstado, avisandoSaida, jobs: jobs.size }),
+    resultados: () => (resComp ? resComp.obj.estado() : null),
   };
 })();

@@ -138,10 +138,10 @@
             <div class="barra-cheia" id="j-barra-cheia"></div>
           </div>
           <dl class="numeros">
-            <div><dt>Copiado</dt><dd id="j-copiado">—</dd></div>
+            <div><dt id="j-l-copiado">Copiado</dt><dd id="j-copiado">—</dd></div>
             <div><dt>Velocidade</dt><dd id="j-vel">—</dd></div>
             <div><dt>Tempo restante</dt><dd id="j-resta">—</dd></div>
-            <div><dt>Trechos ilegíveis</dt><dd id="j-ruins">0</dd></div>
+            <div id="j-n-ruins"><dt>Trechos ilegíveis</dt><dd id="j-ruins">0</dd></div>
           </dl>
         </div>
 
@@ -153,7 +153,7 @@
           <button type="button" class="btn btn-suave" data-acao="cancelar">Cancelar</button>
         </div>
         <div class="confirma" id="j-confirma" hidden>
-          <p>Cancelar esta recuperação? O que já foi copiado continua guardado.</p>
+          <p id="j-confirma-txt">Cancelar esta recuperação? O que já foi copiado continua guardado.</p>
           <div class="acoes">
             <button type="button" class="btn btn-perigo" id="j-confirma-sim">Sim, cancelar</button>
             <button type="button" class="btn btn-suave" id="j-confirma-nao">Não, continuar</button>
@@ -161,9 +161,17 @@
         </div>
         <p class="alerta alerta-perigo" id="j-acao-erro" role="alert" hidden></p>
 
+        <div class="acoes" id="j-pos" hidden>
+          <button type="button" class="btn btn-primario" id="j-abrir-pasta">Abrir pasta</button>
+          <a class="btn btn-suave" id="j-relatorio" target="_blank" rel="noopener">Ver relatório</a>
+        </div>
+        <p class="alerta alerta-perigo" id="j-pos-erro" role="alert" hidden></p>
+
+        <section class="resultados-box" id="j-resultados" aria-label="Arquivos encontrados" hidden></section>
+
         <dl class="dados">
           <dt>Origem</dt><dd id="j-origem"></dd>
-          <dt>Cópia</dt><dd id="j-destino"></dd>
+          <dt id="j-dt-destino">Cópia</dt><dd id="j-destino"></dd>
         </dl>
 
         <details class="historico" id="j-hist">
@@ -184,6 +192,7 @@
   </div>
 </div>
 
+<script src="/resultados.js"></script>
 <script src="/painel.js"></script>
 </body>
 </html>

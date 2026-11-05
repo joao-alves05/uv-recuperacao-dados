@@ -14,9 +14,12 @@ Nunca escreve em disco e escuta so em 127.0.0.1.
 import argparse
 import json
 import queue
+import random
+import struct
 import sys
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -75,6 +78,147 @@ def dados_iniciais():
     }
 
 
+# ---------------------------------------------------------------- achados (fase 5)
+GRUPOS_FALSOS = {
+    'foto': ['JPG', 'JPG', 'JPG', 'JPG', 'PNG', 'GIF', 'HEIC', 'CR2'],
+    'video': ['MP4', 'MOV', 'AVI'],
+    'audio': ['MP3', 'WAV'],
+    'documento': ['PDF', 'PDF', 'DOCX', 'XLSX', 'PPTX', 'DOC'],
+    'compactado': ['ZIP', 'RAR', '7Z'],
+    'banco': ['SQLITE'],
+    'outro': ['RTF'],
+}
+PESOS_GRUPO = [('foto', 380), ('video', 40), ('audio', 60), ('documento', 110), ('compactado', 30), ('banco', 6), ('outro', 14)]
+PASTAS_FALSAS = {'foto': ['DCIM/100CANON', 'DCIM/101CANON', 'DCIM/Viagem'], 'video': ['Videos/Viagem', 'DCIM/100CANON'],
+                 'audio': ['Musicas/Albuns'], 'documento': ['Documentos/Trabalho', 'Documentos/Escola'], 'compactado': ['Documentos/Trabalho']}
+KB = 1024
+TAMANHOS_FALSOS = {'foto': (300 * KB, 6 * 1024 * KB), 'video': (10 * 1024 * KB, 400 * 1024 * KB), 'audio': (2 * 1024 * KB, 12 * 1024 * KB),
+                   'documento': (20 * KB, 5 * 1024 * KB), 'compactado': (1024 * KB, 200 * 1024 * KB), 'banco': (100 * KB, 50 * 1024 * KB),
+                   'outro': (2 * KB, 300 * KB)}
+
+
+def png_pequeno(w, h, cor):
+    """PNG de verdade, sem biblioteca: degradê simples da cor dada."""
+    linhas = b''
+    for y in range(h):
+        linhas += b'\x00' + b''.join(bytes((min(255, cor[0] + y * 2), min(255, cor[1] + x), min(255, cor[2] + (x + y)))) for x in range(w))
+
+    def bloco(tipo, dados):
+        c = struct.pack('>I', zlib.crc32(tipo + dados) & 0xffffffff)
+        return struct.pack('>I', len(dados)) + tipo + dados + c
+    return b'\x89PNG\r\n\x1a\n' + bloco(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + bloco(b'IDAT', zlib.compress(linhas)) + bloco(b'IEND', b'')
+
+
+def gerar_achados(n=640):
+    r = random.Random(7)
+    grupos = [g for g, p in PESOS_GRUPO for _ in range(p)]
+    out = []
+    for i in range(1, n + 1):
+        g = r.choice(grupos)
+        tipo = r.choice(GRUPOS_FALSOS[g])
+        lo, hi = TAMANHOS_FALSOS[g]
+        sorte = r.random()
+        estado = 'bom' if sorte < .8 else 'parcial' if sorte < .92 else 'ruim'
+        data = None
+        if r.random() < .85:
+            data = '%04d-%02d-%02d %02d:%02d:00' % (r.randint(2021, 2026), r.randint(1, 10), r.randint(1, 28), r.randint(0, 23), r.randint(0, 59))
+        caminho = ''
+        nome = 'f%07d.%s' % (i, tipo.lower())
+        if g in PASTAS_FALSAS and r.random() < .4:
+            caminho = r.choice(PASTAS_FALSAS[g])
+            nome = ('IMG_%04d.%s' % (r.randint(1000, 9999), tipo) if g == 'foto' else 'Arquivo %d.%s' % (r.randint(1, 99), tipo.lower()))
+        a = {'id': i, 'nome': nome, 'tipo': tipo, 'grupo': g, 'tamanho': r.randint(lo, hi), 'offset': i * 4 * 1024 * 1024, 'estado': estado,
+             'data': data, 'pontuacao': {'bom': 90, 'parcial': 55, 'ruim': 15}[estado] + r.randint(0, 9), 'recuperado_em': None}
+        if g == 'foto':
+            a['largura'], a['altura'] = r.choice([(4000, 3000), (1920, 1080), (3024, 4032), (800, 600)])
+        if caminho:
+            a['caminho'] = caminho
+            a['apagado'] = True
+        out.append(a)
+    # alguns nomes longos e com marcas para provar reticências e texto puro
+    out[0]['nome'] = 'Um nome de arquivo extremamente comprido para provar as reticencias da lista de resultados.jpg'
+    out[0]['tipo'], out[0]['grupo'] = 'JPG', 'foto'
+    out[1]['nome'] = '<img src=x onerror="window.__xss=6">.jpg'
+    out[1]['tipo'], out[1]['grupo'] = 'JPG', 'foto'
+    out[1]['estado'] = 'bom'
+    return out
+
+
+ACHADOS = gerar_achados()
+
+
+def visiveis(job):
+    if job['estado'] == 'concluido' or job['progresso'] >= 1:
+        return ACHADOS
+    return ACHADOS[:int(len(ACHADOS) * job['progresso'])]
+
+
+def filtrar(itens, q, sem_grupo=False):
+    def um(k, padrao=''):
+        return (q.get(k) or [padrao])[0]
+    g, t, e, b, pasta = um('grupo'), um('tipo').upper(), um('estado'), um('busca').lower(), um('pasta')
+    mn = int(um('min', '0') or 0)
+    mx = int(um('max', '0') or 0)
+    de, ate = um('de'), um('ate')
+    r = []
+    for a in itens:
+        if g and not sem_grupo and a['grupo'] != g:
+            continue
+        if t and a['tipo'] != t:
+            continue
+        if e and a['estado'] != e:
+            continue
+        if b and b not in a['nome'].lower():
+            continue
+        if mn and a['tamanho'] < mn:
+            continue
+        if mx and a['tamanho'] > mx:
+            continue
+        if (de or ate) and not a['data']:
+            continue
+        if de and a['data'][:10] < de:
+            continue
+        if ate and a['data'][:10] > ate:
+            continue
+        if pasta and not (a.get('caminho') == pasta or a.get('caminho', '').startswith(pasta + '/')):
+            continue
+        r.append(a)
+    return r
+
+
+def resposta_achados(job, q):
+    base = visiveis(job)
+    itens = filtrar(base, q)
+    por_grupo = {}
+    for a in filtrar(base, q, sem_grupo=True):
+        por_grupo[a['grupo']] = por_grupo.get(a['grupo'], 0) + 1
+    ordem = (q.get('ordem') or ['nome'])[0]
+    chave = {'nome': lambda a: a['nome'].lower(), 'tamanho': lambda a: a['tamanho'], 'data': lambda a: a['data'] or '', 'tipo': lambda a: a['tipo']}.get(ordem, lambda a: a['nome'].lower())
+    itens = sorted(itens, key=lambda a: (chave(a), a['id']), reverse=(q.get('sentido') or ['asc'])[0] == 'desc')
+    por = max(1, min(500, int((q.get('por_pagina') or ['100'])[0] or 100)))
+    pag = max(1, int((q.get('pagina') or ['1'])[0] or 1))
+    return {'total': len(itens), 'pagina': pag, 'itens': itens[(pag - 1) * por:pag * por],
+            'resumo': {'por_grupo': por_grupo, 'tamanho_total': sum(a['tamanho'] for a in itens)}}
+
+
+def arvore(job, caminho):
+    filhos = {}
+    for a in visiveis(job):
+        c = a.get('caminho')
+        if not c:
+            continue
+        if caminho:
+            if not c.startswith(caminho + '/'):
+                continue
+            resto = c[len(caminho) + 1:]
+        else:
+            resto = c
+        nome = resto.split('/')[0]
+        d = filhos.setdefault(nome, {'nome': nome, 'caminho': (caminho + '/' if caminho else '') + nome, 'total': 0})
+        d['total'] += 1
+    return {'caminho': caminho, 'pastas': sorted(filhos.values(), key=lambda d: d['nome'])}
+
+
 class Estado:
     def __init__(s):
         s.trava = threading.RLock()
@@ -93,6 +237,11 @@ class Estado:
         s.dvd = False
         s.fontes_vazias = False
         s.ultimo = None
+        s.ultimo_opcoes = None
+        s.ultimo_rec = None
+        s.abriu = None
+        s.abrir_falha = False
+        s.contador2 = 900
 
     def lista(s):
         return sorted(s.jobs.values(), key=lambda j: j['criado_em'], reverse=True)
@@ -174,8 +323,8 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(corpo)
                 return
             return self._arquivo(PAINEL / 'index.html', 'text/html; charset=utf-8')
-        if p == '/painel.js':
-            return self._arquivo(PAINEL / 'painel.js', 'text/javascript; charset=utf-8')
+        if p in ('/painel.js', '/resultados.js'):
+            return self._arquivo(PAINEL / p[1:], 'text/javascript; charset=utf-8')
         if p == '/painel.css':
             return self._arquivo(PAINEL / 'painel.css', 'text/css; charset=utf-8')
         if p.startswith('/api/'):
@@ -199,6 +348,41 @@ class H(BaseHTTPRequestHandler):
                 if quebrado:
                     return self._json(500, {'erro': 'O serviço não conseguiu responder.'})
                 return self._json(200, dado)
+            partes = p.split('/')
+            if len(partes) == 5 and partes[2] == 'jobs' and partes[4] in ('achados', 'arvore', 'relatorio'):
+                with E.trava:
+                    j = E.jobs.get(partes[3])
+                    atraso, quebrado = E.atraso, E.quebrado
+                    if not j:
+                        return self._json(404, {'erro': 'Recuperação não encontrada.'})
+                    if partes[4] == 'relatorio':
+                        corpo = '<!doctype html><meta charset=utf-8><h1>Relatório</h1><p>Arquivos recuperados.</p>'.encode()
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'text/html; charset=utf-8')
+                        self.send_header('Content-Length', str(len(corpo)))
+                        self.end_headers()
+                        self.wfile.write(corpo)
+                        return
+                    dado = resposta_achados(j, q) if partes[4] == 'achados' else arvore(j, (q.get('caminho') or [''])[0])
+                time.sleep(atraso)
+                if quebrado:
+                    return self._json(500, {'erro': 'Não consegui ler os resultados.'})
+                return self._json(200, dado)
+            if len(partes) == 5 and partes[2] == 'achados' and partes[4] == 'previa':
+                try:
+                    a = ACHADOS[int(partes[3]) - 1]
+                except (ValueError, IndexError):
+                    return self._json(404, {'erro': 'Arquivo não encontrado.'})
+                if a['grupo'] != 'foto' or a['estado'] == 'ruim':
+                    return self._json(404, {'erro': 'Sem prévia.'})
+                corpo = png_pequeno(64, 48, ((a['id'] * 37) % 120, (a['id'] * 91) % 120, (a['id'] * 53) % 120))
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/png')
+                self.send_header('Content-Length', str(len(corpo)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(corpo)
+                return
             if p.startswith('/api/jobs/'):
                 with E.trava:
                     j = E.jobs.get(p.split('/')[3])
@@ -227,14 +411,50 @@ class H(BaseHTTPRequestHandler):
                     return self._json(400, {'erro': 'O destino não pode ser a própria origem.'})
                 E.contador += 1
                 E.ultimo = {'tipo': corpo.get('tipo'), 'origem': o, 'destino': d}
+                E.ultimo_opcoes = corpo.get('opcoes')
                 id_ = f'j-20261104-{E.contador:04d}'
                 j = novo(id_, 'rodando', o, 0.0, vel=1024 ** 2, criado_em=agora() + 1)
                 j['destino'] = d
+                if corpo.get('tipo') == 'varredura':
+                    j['tipo'], j['destino'], j['opcoes'] = 'varredura', '', corpo.get('opcoes') or {}
                 E.jobs[id_] = j
                 E.eventos[id_] = []
                 E.mudou(j)
                 return self._json(201, j)
             partes = p.split('/')
+            if len(partes) == 5 and partes[2] == 'jobs' and partes[4] == 'recuperar':
+                j = E.jobs.get(partes[3])
+                if not j or j.get('tipo') != 'varredura':
+                    return self._json(404, {'erro': 'Busca não encontrada.'})
+                destino = str(corpo.get('destino', '')).strip()
+                if not destino:
+                    return self._json(400, {'erro': 'Escolha onde salvar os arquivos.'})
+                if destino[:2].upper() == j['origem'][-2:].upper():
+                    return self._json(400, {'erro': 'O destino não pode ficar no mesmo disco da origem.'})
+                if corpo.get('ids') == 'todos':
+                    alvo = filtrar(visiveis(j), {k: [str(v)] for k, v in (corpo.get('filtros') or {}).items()})
+                else:
+                    ids = {int(i) for i in (corpo.get('ids') or [])}
+                    alvo = [a for a in visiveis(j) if a['id'] in ids]
+                if not alvo:
+                    return self._json(400, {'erro': 'Nenhum arquivo para recuperar.'})
+                E.contador2 += 1
+                id_ = f'j-20261104-{E.contador2:04d}'
+                n = novo(id_, 'rodando', j['origem'], 0.3, total=sum(a['tamanho'] for a in alvo), vel=20 * 1024 ** 2, criado_em=agora() + 1)
+                n['tipo'], n['destino'] = 'recuperar', destino
+                E.jobs[id_] = n
+                E.eventos[id_] = []
+                for a in alvo:
+                    a['recuperado_em'] = agora()
+                E.ultimo_rec = {'ids': 'todos' if corpo.get('ids') == 'todos' else sorted(a['id'] for a in alvo), 'n': len(alvo), 'filtros': corpo.get('filtros'), 'destino': destino}
+                E.mudou(n)
+                return self._json(201, n)
+            if len(partes) == 5 and partes[2] == 'jobs' and partes[4] == 'abrir':
+                j = E.jobs.get(partes[3])
+                if not j or E.abrir_falha:
+                    return self._json(500, {'erro': 'Não consegui abrir a pasta.'})
+                E.abriu = j['destino']
+                return self._json(200, {'ok': True})
             if len(partes) == 5 and partes[2] == 'jobs' and partes[4] in PERMITE:
                 j = E.jobs.get(partes[3])
                 if not j:
@@ -299,6 +519,23 @@ class H(BaseHTTPRequestHandler):
                 E.atraso = float(q.get('s', ['0'])[0])
             elif p == '/_teste/admin':
                 E.admin = q.get('on', ['1'])[0] == '1'
+            elif p == '/_teste/varredura':
+                E.contador2 += 1
+                id_ = f'j-20261104-{E.contador2:04d}'
+                prog = float(q.get('progresso', ['1'])[0])
+                n = novo(id_, q.get('estado', ['concluido'])[0], '\\\\.\\E:', prog, total=int(28.8 * 1024 ** 3), criado_em=agora() + 1)
+                n['tipo'], n['destino'], n['opcoes'] = 'varredura', '', {'modo': 'rapida'}
+                E.jobs[id_] = n
+                E.eventos[id_] = []
+                E.mudou(n)
+                return self._json(200, {'id': id_})
+            elif p == '/_teste/abrir_falha':
+                E.abrir_falha = q.get('on', ['1'])[0] == '1'
+            elif p == '/_teste/ultimo_rec':
+                return self._json(200, {'rec': E.ultimo_rec, 'abriu': E.abriu, 'opcoes': E.ultimo_opcoes})
+            elif p == '/_teste/zerar_recuperados':
+                for a in ACHADOS:
+                    a['recuperado_em'] = None
             elif p == '/_teste/dvd':
                 E.dvd = q.get('on', ['1'])[0] == '1'
             elif p == '/_teste/fontes_vazias':
