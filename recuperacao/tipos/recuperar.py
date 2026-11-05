@@ -16,7 +16,7 @@ import re
 import shutil
 import time
 
-from .. import achados, config, leitor, setores_ruins, unidade
+from .. import achados, config, leitor, relatorio, setores_ruins, unidade
 from ..executor import ErroJob
 from ..leitor import ErroLeitor
 from . import imagem
@@ -28,9 +28,7 @@ MAX_NOME = 120
 _PROIBIDOS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 RESULTADOS = {'ok': 'ok', 'com_falhas': 'com trechos ilegíveis (zerados)', 'sumiu': 'achado não encontrado',
               'falhou': 'falhou ao gravar'}
-CSS_RELATORIO = ('body{font-family:sans-serif;margin:2rem}table{border-collapse:collapse;width:100%}'
-                 'th,td{border:1px solid #ccc;padding:4px 8px;text-align:left;font-size:14px}th{background:#f0f0f0}'
-                 '.num{text-align:right}.ruim{color:#a00}.parcial{color:#a60}')
+CSS_RELATORIO = relatorio.CSS
 ROTULO_ESTADO = {'bom': 'bom', 'parcial': 'parcial', 'ruim': 'ruim'}
 
 
@@ -182,6 +180,7 @@ def executar(job, ctrl):
             if achado is None or achado['job_id'] != job['opcoes'].get('varredura'):
                 con.execute('INSERT OR REPLACE INTO recuperacoes (job_id, achado_id, ordem, resultado, quando)'
                             ' VALUES (?,?,?,?,?)', (job_id, achado_id if type(achado_id) is int else -1, ordem, 'sumiu', time.time()))
+                ctrl.log('Achado %s não encontrado: pulado.' % (achado_id,))
                 continue
             pasta_rel = PASTAS.get(achado['grupo'], PASTAS['outro'])
             previa = linhas.get(achado_id)
@@ -218,6 +217,7 @@ def executar(job, ctrl):
                 # um arquivo que não grava (disco cheio, nome inválido, permissão) não derruba o trabalho
                 _remover(tmp)
                 motivo = str(e.strerror or e)[:200]
+                ctrl.log('Falhou ao gravar %s (achado %d): %s' % (rel, achado_id, motivo))
                 con.execute("UPDATE recuperacoes SET resultado='falhou', motivo=?, bytes=0, quando=? "
                             "WHERE job_id=? AND achado_id=?", (motivo, time.time(), job_id, achado_id))
                 ctrl.evento('Não consegui gravar %s: %s' % (rel, motivo))
@@ -241,6 +241,8 @@ def executar(job, ctrl):
                     setores_ruins.anotar(destino, rel, aberto.lacunas_do_arquivo)
                 except OSError:
                     ctrl.evento('Não consegui gravar lacunas.csv no destino.')
+            ctrl.log('%s: %s, %d bytes, achado %d (bytes %s da origem), sha256 %s.' % (
+                rel, resultado, n, achado_id, ' + '.join('%d..%d' % (o, o + c) for o, c in achados.extents_de(achado)[:20]), sha))
             feitos += n
             ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (ordem + 1, len(ids)))
             ctrl.checkpoint(None)
@@ -262,10 +264,8 @@ def _remover(caminho):
 
 
 # --- relatório -------------------------------------------------------------------------------------------------
-def _celula(v):
-    """Texto seguro para planilha: célula que começa com = + - @ vira texto."""
-    v = '' if v is None else str(v)
-    return "'" + v if v[:1] in ('=', '+', '-', '@', '\t', '\r') else v
+_celula = relatorio.celula
+_tam = relatorio.tam
 
 
 def linhas_do_relatorio(store, job):
@@ -306,14 +306,6 @@ def escrever_relatorio(store, job):
         f.write(_html(linhas, job))
     nomes.append(os.path.basename(caminho))
     return nomes
-
-
-def _tam(n):
-    n = float(n or 0)
-    for u in ('B', 'KB', 'MB', 'GB', 'TB'):
-        if n < 1024 or u == 'TB':
-            return ('%d %s' % (n, u)) if u == 'B' else ('%.1f %s' % (n, u))
-        n /= 1024
 
 
 def _html(linhas, job):

@@ -251,6 +251,10 @@ def executar(job, ctrl):
                 novos = restam
             pendentes.extend(novos)
             total += len(novos)
+            for a in novos:
+                ctrl.log('Achado %s em %d: %d bytes, %s (pontuação %s).' % (a['tipo'], a['offset'], a['tamanho'], a['estado'], a['pontuacao']))
+            if ruins_bloco:
+                ctrl.log('%d setores ilegíveis perto do byte %d: lidos como zeros.' % (ruins_bloco, pos))
             est['pos'], est['ruins'] = pos, est['ruins'] + ruins_bloco
             ctrl.progresso(pos, alvo, texto(), est['ruins'])
             if novos:

@@ -6,6 +6,7 @@ A origem só é aberta com os.O_RDONLY. O mapfile `<destino>.mapa.json` é uma l
 sem buracos, no espírito do ddrescue. O arquivo do mapa é `{"versao", "origem", "tamanho", "faixas"}`: a
 origem (caminho resolvido) e o tamanho são conferidos na retomada. Retomar lê o mapfile e só lê as faixas pendentes.
 """
+import csv
 import hashlib
 import json
 import os
@@ -353,6 +354,69 @@ def _criar_destino(destino, mapa, tamanho, remover_mapa):
     return fd
 
 
+def _log(ctrl, texto):
+    """Linha no log do job (ctrl falso de teste pode não ter `log`)."""
+    f = getattr(ctrl, 'log', None)
+    if f:
+        f(texto)
+
+
+def _relatorio_final(ctrl, job, faixas, tamanho, setor, origem, destino, sha256):
+    """Grava `<destino>.relatorio.html` e `.csv` (nunca por cima de arquivo existente) e guarda os nomes no checkpoint do
+    job. Devolve os nomes. Falha de escrita só vira aviso: a imagem já está pronta."""
+    import html
+    from .. import relatorio
+    ruins = [(a, b) for a, b, e in faixas if e == 'ruim']
+    ok = somar(faixas, 'ok')
+    ruim_bytes = sum(b - a for a, b in ruins)
+    inicio = job.get('iniciado_em')
+    duracao = max(0.0, time.time() - inicio) if inicio else None
+    job_id = job.get('id') or 'imagem'
+    nomes = []
+    try:
+        caminho, f = relatorio.criar_exclusivo(destino + '.relatorio', '.csv', job_id)
+        with f:
+            f.write('﻿')
+            w = csv.writer(f)
+            w.writerow(['inicio', 'fim', 'bytes', 'setores', 'estado'])
+            for a, b in ruins:
+                w.writerow([a, b, b - a, -(-(b - a) // setor), 'ilegivel'])
+        nomes.append(os.path.basename(caminho))
+        caminho, f = relatorio.criar_exclusivo(destino + '.relatorio', '.html', job_id)
+        e = html.escape
+        with f:
+            f.write('<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Relatório da imagem</title><style>'
+                    + relatorio.CSS + '</style><h1>Relatório da imagem</h1><table>')
+            linhas = [('Origem', origem), ('Imagem', destino), ('Tamanho', relatorio.tam(tamanho)),
+                      ('Copiado e lido', '%s (%.2f%%)' % (relatorio.tam(ok), 100.0 * ok / tamanho if tamanho else 100.0)),
+                      ('Ilegível (zerado na imagem)', '%s em %d faixas, %d setores' % (
+                          relatorio.tam(ruim_bytes), len(ruins), sum(-(-(b - a) // setor) for a, b in ruins))),
+                      ('Conferência SHA-256', sha256 or 'não se aplica (há trechos ilegíveis)' if ruins else sha256 or 'não feita'),
+                      ('Duração', '%d s' % duracao if duracao is not None else 'não registrada')]
+            for k, v in linhas:
+                f.write('<tr><th>%s</th><td>%s</td></tr>' % (e(k), e(str(v))))
+            f.write('</table>')
+            if ruins:
+                f.write('<h2>Trechos ilegíveis</h2><table><tr><th>Início</th><th>Fim</th><th class="num">Bytes</th>'
+                        '<th class="num">Setores</th></tr>')
+                for a, b in ruins[:5000]:
+                    f.write('<tr class="ruim"><td>%d</td><td>%d</td><td class="num">%d</td><td class="num">%d</td></tr>'
+                            % (a, b, b - a, -(-(b - a) // setor)))
+                f.write('</table>')
+                if len(ruins) > 5000:
+                    f.write('<p>... e mais %d faixas (veja o .csv).</p>' % (len(ruins) - 5000))
+            f.write('<p>Esses trechos estão com zeros na imagem. O que está marcado como lido veio da origem sem erro.</p>')
+        nomes.append(os.path.basename(caminho))
+    except OSError as err:
+        ctrl.evento('Não consegui gravar o relatório da imagem: %s' % (getattr(err, 'strerror', None) or err))
+        return nomes
+    store = getattr(ctrl, 'store', None)
+    if store is not None and job.get('id'):
+        store.salvar_checkpoint(job['id'], dict(store.obter_checkpoint(job['id']) or {}, relatorio=nomes))
+    ctrl.evento('Relatório da imagem: %s.' % ', '.join(nomes))
+    return nomes
+
+
 def executar(job, ctrl):
     origem, destino = job['origem'], job['destino']
     bloco = bloco_de(job.get('opcoes'))
@@ -406,6 +470,7 @@ def executar(job, ctrl):
             os.fsync(fd_d)
             salvar_mapa(mapa, faixas, origem_real, tamanho)
             ctrl.evento('Imagem criada: %d bytes, blocos de %d.' % (tamanho, bloco))
+        _log(ctrl, 'Origem %s: %d bytes, setor de %d bytes. Imagem em %s.' % (origem, tamanho, getattr(fd_o, 'setor', SETOR), destino))
 
         op = opcoes_de(job.get('opcoes'))
         tentativas, limite, pular = op['tentativas'], float(op['limite_velocidade']), op['pular']
@@ -484,11 +549,13 @@ def executar(job, ctrl):
                     seguidos, salto = 0, bloco
                 else:
                     marcar(faixas, ini, fim, 'suspeito')
+                    _log(ctrl, 'Erro de leitura no bloco de %d a %d.' % (ini, fim))
                     seguidos += 1
                     if pode_pular and seguidos >= SEGUIDOS_PARA_PULAR:
                         for a, b, e in faixas:
                             if a == fim and e == 'pendente':
                                 marcar(faixas, fim, min(b, fim + salto), 'pulado')
+                                _log(ctrl, 'Pulou %d a %d depois de %d erros seguidos (volta depois).' % (fim, min(b, fim + salto), seguidos))
                                 salto = min(salto * 2, teto)
                                 break
                 passo(fim - ini)
@@ -516,6 +583,7 @@ def executar(job, ctrl):
                         # todo trecho da pilha já falhou inteiro: com um setor só, é um setor ruim (sem reler)
                         _escrever(fd_d, a, bytes(b - a))
                         marcar(faixas, a, b, 'ruim')
+                        _log(ctrl, 'Setor ilegível: %d a %d.' % (a, b))
                     else:
                         meio = a + max(setor, (b - a) // 2 // setor * setor)
                         falhou = []
@@ -542,6 +610,7 @@ def executar(job, ctrl):
                     if dados is not None:
                         gravar(x, y, dados)
                         recuperados += y - x
+                        _log(ctrl, 'Releitura recuperou %d a %d.' % (x, y))
                     passo(y - x)
                     x -= setor
             if recuperados:
@@ -550,6 +619,8 @@ def executar(job, ctrl):
 
         def relatar_faixas_ruins():
             ruins = [(a, b) for a, b, e in faixas if e == 'ruim']
+            for a, b in ruins:
+                _log(ctrl, 'Faixa ilegível final: %d a %d (%d setores).' % (a, b, -(-(b - a) // setor)))
             for a, b in ruins[:MAX_EVENTOS_DE_FAIXA]:
                 ctrl.evento('Setores ilegíveis: bytes %d a %d (%d setores).' % (a, b, -(-(b - a) // setor)))
             if len(ruins) > MAX_EVENTOS_DE_FAIXA:
@@ -565,6 +636,7 @@ def executar(job, ctrl):
             else:
                 est['fase'] = fase
                 andamento(texto)
+                _log(ctrl, 'Fase: %s.' % texto)
                 resultado = rodar()
             if resultado:
                 andamento()
@@ -579,6 +651,8 @@ def executar(job, ctrl):
         ctrl.checkpoint(salvar, forcar=True)
         if somar(faixas, 'ruim'):
             ctrl.evento('Terminou com %d setores ilegíveis; a conferência por SHA-256 não se aplica.' % setores_ruins(faixas, setor))
+            _log(ctrl, 'Lido da origem: %d bytes no total (contando as releituras).' % est['lidos'])
+            _relatorio_final(ctrl, job, faixas, tamanho, setor, origem, destino, None)
             return 'concluido'
         h_origem = _sha256(fd_o, ctrl)
         if h_origem in ('pausado', 'cancelado'):
@@ -591,6 +665,8 @@ def executar(job, ctrl):
         if h_origem != h_destino:
             raise ErroJob('A cópia não confere com a origem (SHA-256 diferente). Não use esta imagem.')
         ctrl.evento('Conferido: SHA-256 igual ao da origem (%s).' % h_destino)
+        _log(ctrl, 'Lido da origem: %d bytes na cópia, mais a conferência.' % est['lidos'])
+        _relatorio_final(ctrl, job, faixas, tamanho, setor, origem, destino, h_destino)
         return 'concluido'
     finally:
         if registro:

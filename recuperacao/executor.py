@@ -12,7 +12,7 @@ import threading
 import time
 import traceback
 
-from . import config
+from . import config, logjob
 
 MAX_SIMULTANEOS = 2
 CHECKPOINT_S = 2.0
@@ -39,6 +39,7 @@ class Controle:
     def __init__(self, store, job_id):
         self._store = store
         self.store = store            # os tipos gravam achados e checkpoint por aqui
+        self._log = logjob.LogJob(job_id)
         self.job_id = job_id
         self._pausa = threading.Event()
         self._cancelamento = threading.Event()
@@ -64,6 +65,11 @@ class Controle:
 
     def evento(self, texto):
         self._store.evento(self.job_id, texto)
+        self._log.escrever(texto)
+
+    def log(self, texto):
+        """Só no arquivo de log do job (detalhe demais para a tela): o que foi lido, pulado, falhou. Sem conteúdo de arquivo."""
+        self._log.escrever(texto)
 
     def velocidade(self):
         a = self._amostras
@@ -150,21 +156,26 @@ class Executor:
                 return                          # foi pausado ou cancelado na fila
             job = self.store.obter(job_id)
             self.store.evento(job_id, 'Começou a rodar.')
+            ctrl.log('Começou a rodar: tipo %s, origem %s, destino %s.' % (job['tipo'], job['origem'], job['destino']))
             tipo = self.tipos.get(job['tipo'])
             try:
                 if tipo is None:
                     raise ErroJob('Tipo de trabalho desconhecido: %s.' % job['tipo'])
                 resultado = tipo.executar(job, ctrl)
+                ctrl.log('Resultado: %s.' % resultado)
                 self._finalizar(job_id, resultado)
             except ErroJob as e:
+                ctrl.log('Falhou: %s' % e)
                 self._falhar(job_id, str(e))
             except Exception as e:
                 self._registrar_erro(job_id, traceback.format_exc())
+                ctrl.log('Erro inesperado: %s: %s' % (type(e).__name__, e))
                 self._falhar(job_id, 'Erro inesperado: %s: %s' % (type(e).__name__, e))
         finally:
             with self._trava:
                 if self._ativos.get(job_id) is ctrl:
                     del self._ativos[job_id]
+            ctrl._log.fechar()
             ctrl.terminou.set()
 
     def _finalizar(self, job_id, resultado):
