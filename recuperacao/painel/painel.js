@@ -56,6 +56,7 @@
   function tituloJob(j) {
     if (j && j.tipo === 'varredura') return 'Busca em ' + nomeDe(j.origem);
     if (j && j.tipo === 'recuperar') return 'Arquivos recuperados';
+    if (j && j.tipo === 'particoes') return 'Partições em ' + nomeDe(j.origem);
     return nomeDe(j && j.origem);
   }
   function bytes(n) {
@@ -169,6 +170,7 @@
       else if (detEstado === 'ok' && $('j-hist').open) agendarHistorico();
       if (detEstado === 'naoachado') carregarDetalhe(abertoId, true);
     }
+    verificarDepois();
     render();
   }
   function agendarHistorico() {
@@ -294,8 +296,10 @@
     if (h === 'avancado' || h === 'nova') return { tela: 'avancado', id: null };
     const seg = h.split('/').map(decodificar);
     if ((seg[0] === 'volume' || seg[0] === 'disco') && seg[1]) {
-      const tela = seg[2] === 'recuperar' ? 'buscar' : seg[2] === 'imagem' ? 'imagem' : 'alvo';
-      return { tela, id: null, alvoTipo: seg[0], alvoId: seg[1], passo: seg[3] === 'confirmar' ? 3 : 2 };
+      const tela = seg[2] === 'recuperar' ? 'buscar' : seg[2] === 'imagem' ? 'imagem' : seg[2] === 'particoes' ? 'particoes' : 'alvo';
+      const r = { tela, id: null, alvoTipo: seg[0], alvoId: seg[1], passo: seg[3] === 'confirmar' ? 3 : 2 };
+      if (tela === 'buscar' && /^\d+$/.test(seg[3] || '') && /^\d+$/.test(seg[4] || '')) r.parte = { inicio: Number(seg[3]), tamanho: Number(seg[4]) };
+      return r;
     }
     return { tela: 'inicio', id: null };
   }
@@ -337,6 +341,8 @@
     desenharTopo();
     desenharLista();
     desenharPagina();
+    desenharPassos();
+    desenharBuscas();
     desenharInicio();
     desenharFluxo();
     atualizarAvisoDeSaida();
@@ -427,8 +433,9 @@
     $('v-buscar').hidden = vt !== 'buscar';
     $('v-imagem').hidden = vt !== 'imagem';
     $('v-nova').hidden = vt !== 'avancado';
+    $('v-particoes').hidden = vt !== 'particoes';
     $('v-job').hidden = !abertoId;
-    if (!abertoId) { destruirResultados(); return; }
+    if (!abertoId) { destruirResultados(); esconderParticoes(); return; }
     const j = jobs.get(abertoId);
     const temJob = !!j;
     $('j-nome').textContent = j ? tituloJob(j) : 'Recuperação';
@@ -441,7 +448,7 @@
     $('j-erro').hidden = !(!temJob && detEstado === 'erro');
     $('j-erro-texto').textContent = detErro;
     $('j-conteudo').hidden = !temJob;
-    if (!j) { destruirResultados(); return; }
+    if (!j) { destruirResultados(); esconderParticoes(); return; }
     const tipoJob = j.tipo || 'imagem';
 
     const p = pct(j);
@@ -453,7 +460,7 @@
     barra.setAttribute('aria-valuenow', String(p));
     $('j-barra-cheia').style.width = p + '%';
     const total = Number(j.bytes_total) > 0 ? ' de ' + bytes(j.bytes_total) : '';
-    $('j-l-copiado').textContent = tipoJob === 'varredura' ? 'Varrido' : tipoJob === 'recuperar' ? 'Recuperado' : 'Copiado';
+    $('j-l-copiado').textContent = tipoJob === 'varredura' || tipoJob === 'particoes' ? 'Varrido' : tipoJob === 'recuperar' ? 'Recuperado' : 'Copiado';
     $('j-n-ruins').hidden = tipoJob !== 'imagem';
     $('j-copiado').textContent = bytes(j.bytes_feitos || 0) + total;
     $('j-vel').textContent = velocidade(j);
@@ -463,9 +470,9 @@
     $('j-origem').title = $('j-origem').textContent;
     $('j-destino').textContent = String(j.destino == null ? '' : j.destino);
     $('j-destino').title = $('j-destino').textContent;
-    $('j-dt-destino').textContent = tipoJob === 'recuperar' ? 'Salvando em' : 'Cópia';
+    $('j-dt-destino').textContent = tipoJob === 'recuperar' ? 'Salvando em' : tipoJob === 'particoes' ? 'Relatório em' : 'Cópia';
     $('j-dt-destino').hidden = $('j-destino').hidden = tipoJob === 'varredura' || !j.destino;
-    $('j-confirma-txt').textContent = tipoJob === 'varredura' ? 'Cancelar a busca? O que já foi achado continua na lista.' : tipoJob === 'recuperar' ? 'Cancelar a recuperação? O que já foi salvo continua na pasta.' : 'Cancelar esta recuperação? O que já foi copiado continua guardado.';
+    $('j-confirma-txt').textContent = tipoJob === 'varredura' || tipoJob === 'particoes' ? 'Cancelar a busca? O que já foi achado continua guardado.' : tipoJob === 'recuperar' ? 'Cancelar a recuperação? O que já foi salvo continua na pasta.' : 'Cancelar esta recuperação? O que já foi copiado continua guardado.';
 
     const alerta = $('j-alerta');
     let txt = '', tipo = '';
@@ -476,12 +483,12 @@
       txt = 'Não foi possível terminar.' + (j.erro ? ' ' + String(j.erro) : '');
       tipo = 'perigo';
     } else if (j.estado === 'cancelado') {
-      txt = tipoJob === 'varredura' ? 'Busca cancelada. O que já foi achado continua na lista.' : 'Recuperação cancelada. O que já foi copiado continua guardado.';
+      txt = tipoJob === 'varredura' || tipoJob === 'particoes' ? 'Busca cancelada. O que já foi achado continua guardado.' : 'Recuperação cancelada. O que já foi copiado continua guardado.';
     } else if (j.estado === 'concluido') {
-      txt = tipoJob === 'varredura' ? 'Busca terminada. Marque os arquivos que você quer recuperar.' : tipoJob === 'recuperar' ? 'Arquivos recuperados. Abra a pasta para ver.'
+      txt = tipoJob === 'varredura' ? 'Busca terminada. Marque os arquivos que você quer recuperar.' : tipoJob === 'particoes' ? 'Busca terminada. Veja abaixo as partições encontradas.' : tipoJob === 'recuperar' ? 'Arquivos recuperados. Abra a pasta para ver.'
         : ruins(j) ? 'Cópia pronta, mas alguns trechos do original não puderam ser lidos. Eles ficaram em branco na cópia.' : 'Cópia pronta.';
     }
-    alerta.hidden = !txt;
+    alerta.hidden = !txt || (tipoJob === 'varredura' && j.estado === 'concluido');
     alerta.textContent = txt;
     if (tipo) alerta.dataset.tipo = tipo; else delete alerta.dataset.tipo;
 
@@ -501,15 +508,52 @@
     $('j-pos').hidden = !pos;
     if (pos) $('j-relatorio').href = '/api/jobs/' + encodeURIComponent(j.id) + '/relatorio';
     if (!pos) { $('j-pos-erro').hidden = true; }
+    desenharExtrasJob(j, tipoJob);
     $('v-job').classList.toggle('larga', tipoJob === 'varredura');
     document.querySelector('#j-conteudo .progresso').hidden = tipoJob === 'varredura' && j.estado === 'concluido';
     if (tipoJob === 'varredura') mostrarResultados(j); else destruirResultados();
+    if (tipoJob === 'particoes') mostrarParticoes(j); else esconderParticoes();
 
     desenharHistorico();
   }
 
+  /* ---------- extras da página do job: aviso de espaço, arquivos que não gravaram, buscar na cópia ---------- */
+  let falhasChave = '';
+  function desenharExtrasJob(j, tipoJob) {
+    const av = tipoJob === 'recuperar' ? avisosRec.get(j.id) || '' : '';
+    $('j-aviso-rec').hidden = !av;
+    $('j-aviso-rec').textContent = av;
+    const ev = detalhe && detalhe.id === abertoId ? detalhe.eventos : [];
+    let falhas = [], total = 0;
+    if (tipoJob === 'recuperar') {
+      falhas = ev.filter((e) => /^Não consegui gravar /.test(textoDe(e.texto))).map((e) => textoDe(e.texto).replace(/^Não consegui gravar /, ''));
+      const r = ev.map((e) => /^(\d+) arquivos? não puderam ser gravados/.exec(textoDe(e.texto))).find(Boolean);
+      total = r ? Number(r[1]) : falhas.length;
+    }
+    const box = $('j-falhas');
+    box.hidden = !total;
+    const chave = j.id + '|' + total + '|' + falhas.join('~');
+    if (total && chave !== falhasChave) {
+      falhasChave = chave;
+      $('j-falhas-txt').textContent = total + (total === 1 ? ' arquivo não foi gravado' : ' arquivos não foram gravados') + ': veja o relatório.';
+      const ul = $('j-falhas-lista');
+      ul.replaceChildren();
+      for (const f of falhas) ul.append(el('li', null, f));
+      ul.hidden = !falhas.length;
+    }
+    const copiaPronta = tipoJob === 'imagem' && j.estado === 'concluido' && !!j.destino;
+    $('j-pos-img').hidden = !copiaPronta;
+    const depois = lerDepois()[j.id];
+    const esperando = tipoJob === 'imagem' && !!depois && !['concluido', 'falhou', 'cancelado'].includes(j.estado);
+    $('j-encadeada').hidden = !esperando;
+    if (esperando) $('j-encadeada').textContent = 'Quando a cópia terminar, a busca de arquivos começa sozinha (' + (depois.modo === 'profunda' ? 'Profunda' : 'Rápida') + ').';
+    if (erroDepois.has(j.id)) { $('j-pos-erro').textContent = 'Não foi possível começar a busca na cópia: ' + erroDepois.get(j.id); $('j-pos-erro').hidden = false; }
+  }
+  $('j-buscar-copia').addEventListener('click', () => { const j = jobs.get(abertoId); if (j && j.destino) { erroDepois.delete(j.id); buscarNaCopia(j, 'rapida'); } });
+
   /* ---------- resultados da busca (lista de achados) ---------- */
   let resComp = null;
+  const avisosRec = new Map();
   function destruirResultados() {
     if (!resComp) return;
     resComp.obj.destruir();
@@ -523,7 +567,13 @@
       $('j-resultados').hidden = false;
       resComp = { id: j.id, obj: window.Resultados.montar($('j-resultados'), {
         jobId: j.id, api, bytes, destinos: () => destinosPara(jobs.get(j.id)),
-        aoRecuperar: (novo) => { if (novo && novo.id) { aplicarJob(novo); ir('/jobs/' + encodeURIComponent(novo.id)); } },
+        aoRecuperar: (novo, resp) => {
+          if (!novo || !novo.id) return;
+          const av = (resp && typeof resp.aviso === 'string' && resp.aviso) || (typeof novo.aviso === 'string' && novo.aviso) || '';
+          if (av) avisosRec.set(novo.id, av);
+          aplicarJob(novo);
+          ir('/jobs/' + encodeURIComponent(novo.id));
+        },
       }) };
     }
     resComp.obj.atualizar(j);
@@ -754,14 +804,253 @@
     return c;
   }
 
+  /* ---------- etapas da recuperação: Escolher local, Buscar, Ver e recuperar ---------- */
+  const PASSOS_REC = ['Escolher local', 'Buscar', 'Ver e recuperar'];
+  let passosChave = '';
+  function passoRec() {                  // 0 = não mostra; 4 = tudo feito
+    const t = rota.tela;
+    if (t === 'inicio' || t === 'alvo') return 1;
+    if (t === 'buscar') return 2;
+    if (t === 'job') {
+      const j = jobs.get(abertoId);
+      if (!j) return 0;
+      if (j.tipo === 'varredura') return j.estado === 'concluido' ? 3 : 2;
+      if (j.tipo === 'recuperar') return j.estado === 'concluido' ? 4 : 3;
+    }
+    return 0;
+  }
+  function desenharPassos() {
+    const n = passoRec();
+    const nav = $('passos-rec');
+    nav.hidden = n === 0;
+    const j = rota.tela === 'job' ? jobs.get(abertoId) : null;
+    nav.classList.toggle('larga', !!(j && j.tipo === 'varredura'));
+    if (!n) { passosChave = ''; nav.querySelector('ol').replaceChildren(); return; }
+    if (passosChave === String(n)) return;
+    passosChave = String(n);
+    const ol = nav.querySelector('ol');
+    ol.replaceChildren();
+    PASSOS_REC.forEach((nome, i) => {
+      const k = i + 1;
+      const li = el('li', k < n ? 'feito' : k === n ? 'atual' : '');
+      if (k === n) li.setAttribute('aria-current', 'step');
+      li.append(el('span', 'passo-num', k < n ? '✓' : String(k)), el('span', 'passo-nome', nome));
+      ol.append(li);
+    });
+  }
+
+  /* ---------- buscas anteriores: reabrir os resultados sem varrer de novo ---------- */
+  const totaisBusca = new Map();
+  let buscasChave = '';
+  const num = (n) => Number(n).toLocaleString('pt-BR');
+  async function carregarTotal(j) {
+    const chave = j.estado + '|' + Math.floor((Number(j.progresso) || 0) * 100);
+    const c = totaisBusca.get(j.id);
+    if (c && (c.chave === chave || c.pedindo)) return;
+    totaisBusca.set(j.id, { chave, total: c ? c.total : null, pedindo: true });
+    try {
+      const d = await api('GET', '/api/jobs/' + encodeURIComponent(j.id) + '/achados?por_pagina=1');
+      totaisBusca.set(j.id, { chave, total: Math.max(0, parseInt(d && d.total, 10) || 0), pedindo: false });
+    } catch (e) {
+      totaisBusca.set(j.id, { chave, total: c ? c.total : null, pedindo: false });
+    }
+    render();
+  }
+  function desenharBuscas() {
+    const lista = [...jobs.values()].filter((j) => j.tipo === 'varredura').sort(comparar).slice(0, 8);
+    const box = $('i-buscas');
+    box.hidden = !lista.length || rota.tela === 'avancado';
+    if (!lista.length) { buscasChave = ''; return; }
+    for (const j of lista) carregarTotal(j);
+    const sig = lista.map((j) => [j.id, j.estado, pct(j), (totaisBusca.get(j.id) || {}).total].join(':')).join('|');
+    if (sig === buscasChave) return;
+    buscasChave = sig;
+    const ul = $('i-buscas-lista');
+    ul.replaceChildren();
+    for (const j of lista) {
+      const li = el('li');
+      const a = el('a', 'item');
+      a.href = '/jobs/' + encodeURIComponent(j.id);
+      a.dataset.estado = j.estado;
+      const topo = el('div', 'item-topo');
+      const nome = el('span', 'item-nome', 'Busca em ' + nomeDe(j.origem));
+      nome.title = textoDe(j.origem);
+      const tag = el('span', 'tag', ESTADOS[j.estado] || textoDe(j.estado));
+      tag.dataset.estado = j.estado;
+      topo.append(nome, tag);
+      const t = (totaisBusca.get(j.id) || {}).total;
+      const achados = t == null ? 'Contando…' : t === 1 ? '1 arquivo achado' : num(t) + ' arquivos achados';
+      const sub = el('div', 'item-meta');
+      sub.append(el('span', 'esq', achados + (j.estado === 'rodando' ? ' · ' + pct(j) + ' %' : '')), el('span', 'dir', quando(j.criado_em)));
+      a.append(topo, sub);
+      a.addEventListener('click', (e) => {
+        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        ir(a.getAttribute('href'));
+      });
+      li.append(a);
+      ul.append(li);
+    }
+  }
+
+  /* ---------- procurar partições perdidas ---------- */
+  const part = { destino: null, erro: '', enviando: false };
+  function fluxoParticoes(corpo, a) {
+    $('particoes-volta').onclick = () => ir(urlAlvo(a));
+    corpo.append(cartaoFonte(a, false));
+    const av = blocoAvisos(a);
+    if (av) corpo.append(av);
+    const cand = candidatos(a);
+    const sug = sugerido(a, cand);
+    if (!cand.find((v) => v.hash === part.destino)) part.destino = sug ? sug.hash : null;
+    const dest = cand.find((v) => v.hash === part.destino) || null;
+    const nome = 'Particoes-' + textoDe(a.fonte.id).replace(/[^A-Za-z0-9]/g, '') + '-' + hoje() + '.json';
+    const c = el('div', 'cartao formulario');
+    c.append(el('h2', null, 'Procurar partições perdidas'));
+    c.append(el('p', null, 'O programa varre o disco inteiro atrás de partições apagadas e mostra o que achar. Nada é gravado no disco.'));
+    if (!cand.length) {
+      c.append(el('p', 'alerta alerta-perigo', 'Não há outro disco com letra para guardar o relatório. Conecte um disco externo e toque em Atualizar.'));
+    } else {
+      const rot = el('label', null, 'Guardar o relatório em');
+      rot.htmlFor = 'part-dest';
+      const sel = el('select');
+      sel.id = 'part-dest';
+      cand.forEach((v) => { const o = el('option', null, v.titulo + (sug && v === sug ? ' (sugerido)' : '')); o.value = v.hash; o.selected = v.hash === part.destino; sel.append(o); });
+      sel.addEventListener('change', () => { part.destino = sel.value; render(); });
+      c.append(rot, sel);
+      c.append(el('p', 'dica', 'O relatório fica em ' + destinoCompleto(dest, nome) + ', junto dos arquivos que o técnico pode usar para refazer a tabela.'));
+    }
+    const erro = el('p', 'alerta alerta-perigo', part.erro);
+    erro.id = 'part-erro';
+    erro.setAttribute('role', 'alert');
+    erro.hidden = !part.erro;
+    c.append(erro);
+    const ac = el('div', 'acoes');
+    const ini = botao('Procurar partições perdidas', 'btn-primario', async () => {
+      if (part.enviando || !dest) return;
+      part.enviando = true; part.erro = '';
+      ini.disabled = true; ini.textContent = 'Iniciando…'; erro.hidden = true;
+      try {
+        const j = jobDe(await api('POST', '/api/jobs', { tipo: 'particoes', origem: a.caminho, destino: destinoCompleto(dest, nome), opcoes: {} }));
+        aplicarJob(j);
+        if (j && j.id) ir('/jobs/' + encodeURIComponent(j.id));
+      } catch (e) {
+        part.erro = e.message; erro.textContent = e.message; erro.hidden = false;
+      } finally {
+        part.enviando = false; ini.disabled = !dest; ini.textContent = 'Procurar partições perdidas';
+      }
+    });
+    ini.id = 'b-iniciar-particoes';
+    ini.disabled = !dest;
+    ac.append(ini);
+    c.append(ac);
+    corpo.append(c);
+  }
+
+  const SISTEMAS = { exfat: 'exFAT', 'hfs+': 'HFS+', hfsx: 'HFSX', apfs: 'APFS', iso9660: 'ISO 9660', ext2: 'ext2', ext3: 'ext3', ext4: 'ext4' };
+  const NIVEIS = { alta: ['Alta', 'bom'], media: ['Média', 'parcial'], baixa: ['Baixa', 'ruim'] };
+  const TABELA_ESTADO = { ok: 'sem problemas', tabela_danificada: 'danificada', gpt_reserva_usada: 'danificada, lida pela cópia reserva', sem_tabela: 'não existe' };
+  let partDados = { id: null, estado: 'nada', dados: null, erro: '' };
+  let partChave = '';
+  function esconderParticoes() { partDados = { id: null, estado: 'nada', dados: null, erro: '' }; partChave = ''; $('j-particoes').hidden = true; }
+  async function buscarParticoes(id) {
+    try {
+      const d = await api('GET', '/api/jobs/' + encodeURIComponent(id) + '/particoes');
+      if (partDados.id !== id) return;
+      partDados.dados = d; partDados.estado = 'ok';
+    } catch (e) {
+      if (partDados.id !== id) return;
+      partDados.estado = 'erro'; partDados.erro = e.message;
+    }
+    partChave = '';
+    render();
+  }
+  function mostrarParticoes(j) {
+    const box = $('j-particoes');
+    if (j.estado !== 'concluido') { esconderParticoes(); return; }
+    box.hidden = false;
+    if (partDados.id !== j.id) { partDados = { id: j.id, estado: 'carregando', dados: null, erro: '' }; partChave = ''; buscarParticoes(j.id); }
+    const chave = j.id + '|' + partDados.estado + '|' + alvos.discos.length + '|' + alvos.volumes.length;
+    if (chave === partChave) return;
+    partChave = chave;
+    box.replaceChildren();
+    if (partDados.estado === 'carregando') { box.append(el('p', 'vazio', 'Carregando as partições encontradas…')); return; }
+    if (partDados.estado === 'erro') {
+      const v = el('div', 'vazio vazio-erro');
+      v.append(el('p', null, partDados.erro), botao('Tentar de novo', 'btn-suave', () => { partDados = { id: j.id, estado: 'carregando', dados: null, erro: '' }; partChave = ''; buscarParticoes(j.id); render(); }));
+      box.append(v);
+      return;
+    }
+    const d = partDados.dados || {};
+    const lista = (Array.isArray(d.candidatos) ? d.candidatos : []).slice().sort((x, y) => (Number(y.confianca) || 0) - (Number(x.confianca) || 0));
+    const proposta = new Set((Array.isArray(d.proposta) ? d.proposta : []).map((c) => Number(c.inicio)));
+    box.append(el('h2', null, 'Partições encontradas'));
+    const ta = d.tabela_atual;
+    if (ta && typeof ta === 'object') {
+      const n = Array.isArray(ta.particoes) ? ta.particoes.length : 0;
+      box.append(el('p', 'dica', 'Tabela de partições atual do disco: ' + textoDe(ta.esquema || '—').toUpperCase() + ', ' + (TABELA_ESTADO[ta.estado] || textoDe(ta.estado)) + ', com ' + n + (n === 1 ? ' partição.' : ' partições.')));
+    }
+    if (!lista.length) { box.append(el('p', 'vazio', 'Não encontramos nenhuma partição neste disco.')); }
+    const ul = el('ul', 'partes');
+    for (const c of lista) {
+      const li = el('li', 'parte');
+      const topo = el('div', 'parte-topo');
+      const sis = textoDe(c.sistema);
+      topo.append(el('strong', 'parte-nome', SISTEMAS[sis] || sis.toUpperCase() || 'Sistema desconhecido'));
+      const [nivTxt, nivQ] = NIVEIS[c.nivel] || [textoDe(c.nivel), ''];
+      const t = el('span', 'tag q', 'Confiança ' + nivTxt.toLowerCase() + ' (' + Math.round((Number(c.confianca) || 0) * 100) + ' %)');
+      t.dataset.q = nivQ;
+      topo.append(t);
+      if (c.na_tabela_atual) topo.append(el('span', 'tag', 'Já está na tabela'));
+      else if (proposta.has(Number(c.inicio))) topo.append(el('span', 'tag', 'Sugerida'));
+      li.append(topo);
+      li.append(el('p', 'parte-meta', bytes(c.tamanho) + ' · começa em ' + bytes(c.inicio)));
+      const ev = Array.isArray(c.evidencias) ? c.evidencias : [];
+      if (ev.length) {
+        const det = el('details', 'parte-ev');
+        det.append(el('summary', null, 'Por que achamos que existe'));
+        const e = el('ul');
+        for (const x of ev) e.append(el('li', null, textoDe(x)));
+        det.append(e);
+        li.append(det);
+      }
+      for (const x of (Array.isArray(c.avisos) ? c.avisos : [])) { const p = el('p', 'alerta', textoDe(x)); p.dataset.tipo = 'aviso'; li.append(p); }
+      const ac = el('div', 'acoes');
+      const b = botao('Ver arquivos desta partição', 'btn-suave', () => {
+        const a = [...alvos.discos, ...alvos.volumes].find((x) => x.caminho === textoDe(j.origem));
+        if (!a) { partErro('Não encontramos mais o disco desta busca. Atualize a lista de discos.'); return; }
+        ir('/#' + a.hash + '/recuperar/' + Math.round(Number(c.inicio)) + '/' + Math.round(Number(c.tamanho)));
+      });
+      ac.append(b);
+      li.append(ac);
+      ul.append(li);
+    }
+    box.append(ul);
+    const er = el('p', 'alerta alerta-perigo');
+    er.id = 'parte-erro';
+    er.hidden = true;
+    er.setAttribute('role', 'alert');
+    box.append(er);
+    box.append(el('p', 'dica', 'Nada foi gravado no disco. O relatório ficou em ' + textoDe(j.destino) + '.'));
+  }
+  function partErro(t) { const e = $('parte-erro'); if (e) { e.textContent = t; e.hidden = !t; } }
+
   /* ---------- avisos por tipo ---------- */
+  // CD/DVD vale, a menos que o serviço mande motivos de bloqueio em avisos_bloqueio
+  const opticoLiberado = (a) => a.tipoFonte === 'optico' && !(Array.isArray(a.fonte.avisos_bloqueio) && a.fonte.avisos_bloqueio.length > 0);
   function avisosDe(a) {
     const l = [];
     const t = a.tipoFonte;
-    if (admin === false && t !== 'optico') {
+    const optico = t === 'optico';
+    if (admin === false && !optico) {
       l.push({ tipo: 'aviso', texto: 'Para ler ' + (ADMIN_OBJETO[t] || 'o disco') + ', o programa precisa de permissão de administrador: feche e abra pelo atalho “iniciar-admin.cmd”.' });
     }
-    if (t === 'optico') l.push({ tipo: 'aviso', texto: 'A leitura de CD/DVD chega numa próxima versão.' });
+    if (optico && opticoLiberado(a)) l.push({ tipo: 'aviso', texto: 'A leitura de CD/DVD é lenta e pode levar horas. Não tire o disco da unidade até terminar.' });
+    else if (optico) {
+      const m = Array.isArray(a.fonte.avisos_bloqueio) ? a.fonte.avisos_bloqueio.filter(Boolean) : [];
+      if (m.length) for (const x of m) l.push({ tipo: 'aviso', texto: textoDe(x) });
+      else l.push({ tipo: 'aviso', texto: 'A leitura de CD/DVD chega numa próxima versão.' });
+    }
     if (t === 'usb' || t === 'ssd') l.push({ tipo: '', texto: 'Neste tipo de disco o sistema pode apagar de vez o que foi excluído (TRIM): quanto antes, melhor.' });
     if (t === 'cartao') l.push({ tipo: '', texto: 'Pare de usar o cartão até terminar: não tire fotos nem salve nada nele.' });
     if (t === 'usb') l.push({ tipo: '', texto: 'Pare de usar o pen drive até terminar: não salve nada nele.' });
@@ -799,10 +1088,10 @@
 
   function desenharFluxo() {
     const t = rota.tela;
-    if (t !== 'alvo' && t !== 'buscar' && t !== 'imagem') { alvoAtual = null; fluxoChave = ''; return; }
+    if (t !== 'alvo' && t !== 'buscar' && t !== 'imagem' && t !== 'particoes') { alvoAtual = null; fluxoChave = ''; return; }
     alvoAtual = acharAlvo(rota);
-    const corpo = t === 'alvo' ? $('vol-corpo') : t === 'buscar' ? $('buscar-corpo') : $('imagem-corpo');
-    const chave = [t, rota.passo, rota.alvoTipo, rota.alvoId, fontesVer, fontesEstado, admin, img.destino, modoBusca, alvoAtual ? 1 : 0].join('|');
+    const corpo = t === 'alvo' ? $('vol-corpo') : t === 'buscar' ? $('buscar-corpo') : t === 'particoes' ? $('particoes-corpo') : $('imagem-corpo');
+    const chave = [t, rota.passo, rota.alvoTipo, rota.alvoId, fontesVer, fontesEstado, admin, img.destino, modoBusca, part.destino, cp.destino, rota.parte ? rota.parte.inicio : '', alvoAtual ? 1 : 0].join('|');
     if (chave === fluxoChave) return;
     fluxoChave = chave;
     corpo.replaceChildren();
@@ -815,6 +1104,7 @@
     }
     if (t === 'alvo') fluxoVolume(corpo, alvoAtual);
     else if (t === 'buscar') fluxoBuscar(corpo, alvoAtual);
+    else if (t === 'particoes') fluxoParticoes(corpo, alvoAtual);
     else fluxoImagem(corpo, alvoAtual);
   }
   function fluxoVolume(corpo, a) {
@@ -822,29 +1112,29 @@
     const av = blocoAvisos(a);
     if (av) corpo.append(av);
     const ac = el('div', 'acoes');
-    const bloqueado = a.tipoFonte === 'optico';
+    const bloqueado = a.tipoFonte === 'optico' && !opticoLiberado(a);
     const b1 = botao('Recuperar arquivos', 'btn-primario', () => ir(urlAlvo(a, 'recuperar')));
     const b2 = botao('Fazer cópia de segurança (imagem)', 'btn-suave', () => ir(urlAlvo(a, 'imagem')));
     b1.id = 'b-recuperar';
     b2.id = 'b-imagem';
     b1.disabled = b2.disabled = bloqueado;
     ac.append(b1, b2);
+    if (a.tipo === 'disco') {
+      const b3 = botao('Procurar partições perdidas', 'btn-suave', () => ir(urlAlvo(a, 'particoes')));
+      b3.id = 'b-particoes';
+      b3.disabled = bloqueado;
+      ac.append(b3);
+    }
     corpo.append(ac);
   }
   const MODOS_BUSCA = [
-    ['rapida', 'Rápida', 'Procura as fotos, vídeos e documentos que ainda estão inteiros; leva alguns minutos.'],
-    ['profunda', 'Profunda', 'Lê o disco inteiro, byte a byte, e acha mais arquivos, até os danificados; leva bem mais tempo.'],
+    ['rapida', 'Rápida', 'Primeiro lê a lista de arquivos do disco, com nome e pasta, e depois procura os que ainda estão inteiros; leva alguns minutos.'],
+    ['profunda', 'Profunda', 'Lê a lista de arquivos do disco e depois o disco inteiro, byte a byte, e acha mais arquivos, até os danificados; leva bem mais tempo.'],
   ];
   let modoBusca = 'rapida';
   let buscaErro = '';
   let buscaEnviando = false;
-  function fluxoBuscar(corpo, a) {
-    $('buscar-volta').onclick = () => ir(urlAlvo(a));
-    corpo.append(cartaoFonte(a, false));
-    const av = blocoAvisos(a);
-    if (av) corpo.append(av);
-    const c = el('div', 'cartao formulario');
-    c.append(el('h2', null, 'Como procurar?'));
+  function radiosModo() {
     const grupo = el('div', 'opcoes');
     grupo.setAttribute('role', 'radiogroup');
     grupo.setAttribute('aria-label', 'Como procurar');
@@ -858,7 +1148,109 @@
       lab.append(r, t);
       grupo.append(lab);
     }
-    c.append(grupo);
+    return grupo;
+  }
+
+  /* CD/DVD: primeiro a cópia do disco para um arquivo, depois a busca dentro da cópia, num passo só */
+  const DEPOIS = 'painel.depois';
+  const lerDepois = () => { try { const o = JSON.parse(localStorage.getItem(DEPOIS) || '{}'); return o && typeof o === 'object' ? o : {}; } catch (e) { return {}; } };
+  const gravarDepois = (o) => { try { localStorage.setItem(DEPOIS, JSON.stringify(o)); } catch (e) { /* tudo bem */ } };
+  const iniciandoDepois = new Set();
+  const erroDepois = new Map();
+  async function buscarNaCopia(j, modo) {
+    if (iniciandoDepois.has(j.id)) return;
+    iniciandoDepois.add(j.id);
+    const o = lerDepois();
+    delete o[j.id];
+    gravarDepois(o);                                  // uma tentativa só: se falhar, o botão manual continua lá
+    try {
+      const novo = jobDe(await api('POST', '/api/jobs', { tipo: 'varredura', origem: j.destino, opcoes: { modo: modo || 'rapida', sistema_antes: true } }));
+      erroDepois.delete(j.id);
+      aplicarJob(novo);
+      if (novo && novo.id && abertoId === j.id) ir('/jobs/' + encodeURIComponent(novo.id));
+    } catch (e) {
+      erroDepois.set(j.id, e.message);
+      render();
+    } finally {
+      iniciandoDepois.delete(j.id);
+    }
+  }
+  function verificarDepois() {
+    const o = lerDepois();
+    for (const id of Object.keys(o)) {
+      const j = jobs.get(id);
+      if (!j) continue;
+      if (j.estado === 'concluido') buscarNaCopia(j, o[id] && o[id].modo);
+      else if (j.estado === 'falhou' || j.estado === 'cancelado') { delete o[id]; gravarDepois(o); }
+    }
+  }
+  const cp = { destino: null, erro: '', enviando: false };
+  function fluxoBuscarOptico(corpo, a) {
+    const cand = candidatos(a);
+    const sug = sugerido(a, cand);
+    if (!cand.find((v) => v.hash === cp.destino)) cp.destino = sug ? sug.hash : null;
+    const dest = cand.find((v) => v.hash === cp.destino) || null;
+    const nome = 'Copia-' + (a.l || 'disco') + '-' + hoje() + '.img';
+    const c = el('div', 'cartao formulario');
+    c.append(el('h2', null, 'Copiar o disco e depois buscar'));
+    c.append(el('p', null, 'Disco de CD ou DVD é lento e pode ter trechos ruins. Por isso o programa copia o disco para um arquivo, insistindo nos trechos difíceis, e depois procura os arquivos dentro da cópia.'));
+    c.append(el('h2', null, 'Como procurar depois?'));
+    c.append(radiosModo());
+    if (!cand.length) {
+      c.append(el('p', 'alerta alerta-perigo', 'Não há outro disco com letra para guardar a cópia. Conecte um disco externo e toque em Atualizar.'));
+    } else {
+      const rot = el('label', null, 'Guardar a cópia em');
+      rot.htmlFor = 'cp-dest';
+      const sel = el('select');
+      sel.id = 'cp-dest';
+      cand.forEach((v) => { const o = el('option', null, v.titulo + (sug && v === sug ? ' (sugerido)' : '') + (v.livre < a.tamanho ? ' · não cabe' : '')); o.value = v.hash; o.selected = v.hash === cp.destino; sel.append(o); });
+      sel.addEventListener('change', () => { cp.destino = sel.value; render(); });
+      c.append(rot, sel);
+      c.append(el('p', 'dica', 'A cópia fica em ' + destinoCompleto(dest, nome) + ' (' + bytes(a.tamanho) + ').'));
+    }
+    const falta = dest && dest.livre < a.tamanho;
+    const erro = el('p', 'alerta alerta-perigo', cp.erro || (falta ? 'Não cabe: faltam ' + bytes(a.tamanho - dest.livre) + ' em ' + dest.titulo + '. Escolha outro lugar.' : ''));
+    erro.id = 'cp-erro';
+    erro.setAttribute('role', 'alert');
+    erro.hidden = !erro.textContent;
+    c.append(erro);
+    const ac = el('div', 'acoes');
+    const ini = botao('Copiar o disco e depois buscar', 'btn-primario', async () => {
+      if (cp.enviando || !dest || falta) return;
+      cp.enviando = true; cp.erro = '';
+      ini.disabled = true; ini.textContent = 'Iniciando…'; erro.hidden = true;
+      try {
+        const j = jobDe(await api('POST', '/api/jobs', { tipo: 'imagem', origem: a.caminho, destino: destinoCompleto(dest, nome), opcoes: {} }));
+        if (j && j.id) { const o = lerDepois(); o[j.id] = { modo: modoBusca }; gravarDepois(o); }
+        aplicarJob(j);
+        if (j && j.id) ir('/jobs/' + encodeURIComponent(j.id));
+      } catch (e) {
+        cp.erro = e.message; erro.textContent = e.message; erro.hidden = false;
+      } finally {
+        cp.enviando = false; ini.disabled = !dest || falta; ini.textContent = 'Copiar o disco e depois buscar';
+      }
+    });
+    ini.id = 'b-copiar-buscar';
+    ini.disabled = !dest || !!falta;
+    const b2 = botao('Só fazer a cópia de segurança', 'btn-suave', () => ir(urlAlvo(a, 'imagem')));
+    b2.id = 'b-buscar-imagem';
+    ac.append(ini, b2);
+    c.append(ac);
+    c.append(el('p', 'dica', 'A unidade só é lida: nada é gravado no disco.'));
+    corpo.append(c);
+  }
+  function fluxoBuscar(corpo, a) {
+    $('buscar-volta').onclick = () => ir(urlAlvo(a));
+    const bloqueadoOptico = a.tipoFonte === 'optico' && !opticoLiberado(a);
+    const parte = rota.parte || null;
+    corpo.append(cartaoFonte(a, false));
+    const av = blocoAvisos(a);
+    if (av) corpo.append(av);
+    if (parte) corpo.append(el('p', 'alerta', 'A busca vai olhar só a partição que começa em ' + bytes(parte.inicio) + ' e tem ' + bytes(parte.tamanho) + '.'));
+    if (a.tipoFonte === 'optico' && opticoLiberado(a)) { fluxoBuscarOptico(corpo, a); return; }
+    const c = el('div', 'cartao formulario');
+    c.append(el('h2', null, 'Como procurar?'));
+    c.append(radiosModo());
     const erro = el('p', 'alerta alerta-perigo', buscaErro);
     erro.id = 'busca-erro';
     erro.setAttribute('role', 'alert');
@@ -870,7 +1262,7 @@
       buscaEnviando = true; buscaErro = '';
       ini.disabled = true; ini.textContent = 'Iniciando…'; erro.hidden = true;
       try {
-        const j = jobDe(await api('POST', '/api/jobs', { tipo: 'varredura', origem: a.caminho, opcoes: { modo: modoBusca } }));
+        const j = jobDe(await api('POST', '/api/jobs', { tipo: 'varredura', origem: a.caminho, opcoes: Object.assign({ modo: modoBusca, sistema_antes: true }, parte ? { offset: parte.inicio, tamanho: parte.tamanho } : {}) }));
         aplicarJob(j);
         if (j && j.id) ir('/jobs/' + encodeURIComponent(j.id));
       } catch (e) {
@@ -878,14 +1270,14 @@
         erro.textContent = e.message; erro.hidden = false;
       } finally {
         buscaEnviando = false;
-        ini.disabled = a.tipoFonte === 'optico'; ini.textContent = 'Começar a busca';
+        ini.disabled = bloqueadoOptico; ini.textContent = 'Começar a busca';
       }
     });
     ini.id = 'b-iniciar-busca';
-    ini.disabled = a.tipoFonte === 'optico';
+    ini.disabled = bloqueadoOptico;
     const b2 = botao('Fazer cópia de segurança antes', 'btn-suave', () => ir(urlAlvo(a, 'imagem')));
     b2.id = 'b-buscar-imagem';
-    b2.disabled = a.tipoFonte === 'optico';
+    b2.disabled = bloqueadoOptico;
     ac.append(ini, b2);
     c.append(ac);
     c.append(el('p', 'dica', 'A busca só lê o disco: nada é gravado nele.'));

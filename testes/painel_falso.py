@@ -32,13 +32,13 @@ GB = 1024 ** 3
 BARRAS = chr(92) * 2 + '.' + chr(92)      # prefixo de disco do Windows
 
 
-def fontes_falsas(dvd=False):
+def fontes_falsas(dvd=False, optico_bloqueado=False):
     """Como o Windows mostraria: SSD do sistema, HD com duas partições, pen drive, cartão, leitor vazio e DVD vazio."""
     def vol(letra, rotulo, fs, tam, livre):
         return {'letra': letra, 'rotulo': rotulo, 'sistema_arquivos': fs, 'tamanho': tam, 'livre': livre}
     def disco(id_, caminho, nome, tam, tipo, rem, sistema, vols):
         return {'id': id_, 'caminho': caminho, 'nome': nome, 'tamanho': tam, 'tipo': tipo, 'removivel': rem, 'setor': 512, 'sistema': sistema, 'volumes': vols}
-    return [
+    lista = [
         disco('disco-0', BARRAS + 'PhysicalDrive0', 'Samsung SSD 860 EVO 500GB', 465 * GB, 'ssd', False, True, [vol('C:', '', 'NTFS', 465 * GB, 120 * GB)]),
         disco('disco-1', BARRAS + 'PhysicalDrive1', 'ST1000DM010-2EP102', 931 * GB, 'hd', False, False,
               [vol('D:', 'Dados', 'NTFS', 500 * GB, 310 * GB), vol('G:', XSS_ROTULO, 'NTFS', 431 * GB, 400 * GB)]),
@@ -47,6 +47,9 @@ def fontes_falsas(dvd=False):
         disco('disco-4', BARRAS + 'PhysicalDrive4', 'Leitor de cartões USB', 0, 'usb', True, False, []),
         disco('optico-0', BARRAS + 'CdRom0', 'HL-DT-ST DVDRAM GH24NSD1', 4 * GB if dvd else 0, 'optico', True, False, [vol('H:', 'FILMES', 'UDF', 4 * GB, 0) if dvd else vol('H:', '', '', 0, 0)]),
     ]
+    if optico_bloqueado:
+        lista[-1]['avisos_bloqueio'] = ['A unidade está em uso por outro programa.']
+    return lista
 
 
 XSS_MSG = '<img src=x onerror="window.__xss=2"> lendo o setor <b>42</b>'
@@ -219,6 +222,17 @@ def arvore(job, caminho):
     return {'caminho': caminho, 'pastas': sorted(filhos.values(), key=lambda d: d['nome'])}
 
 
+def resultado_particoes():
+    c1 = {'inicio': 1024 ** 2, 'tamanho': 500 * GB, 'fim': 500 * GB + 1024 ** 2, 'sistema': 'ntfs', 'confianca': .95, 'nivel': 'alta',
+          'na_tabela_atual': True, 'evidencias': ['Setor de boot NTFS no começo da partição.', 'Cópia reserva do boot no fim da partição.'], 'avisos': []}
+    c2 = {'inicio': 500 * GB + 2 * 1024 ** 2, 'tamanho': 50 * GB, 'fim': 550 * GB, 'sistema': 'fat32', 'confianca': .62, 'nivel': 'media',
+          'na_tabela_atual': False, 'evidencias': ['Setor de boot FAT32 no começo.', 'Cópia reserva no setor 6.', '<b onmouseover="window.__xss=7">Tabela FAT</b> coerente.'], 'avisos': []}
+    c3 = {'inicio': 600 * GB, 'tamanho': 400 * GB, 'fim': 1000 * GB, 'sistema': 'ext4', 'confianca': .3, 'nivel': 'baixa',
+          'na_tabela_atual': False, 'evidencias': ['Superbloco ext4 encontrado.'], 'avisos': ['A partição passaria do fim do disco.']}
+    return {'tabela_atual': {'esquema': 'gpt', 'estado': 'ok', 'particoes': [{'inicio': c1['inicio'], 'tamanho': c1['tamanho'], 'sistema': 'ntfs'}]},
+            'candidatos': [c3, c1, c2], 'proposta': [c1, c2], 'aplicacao': {}}
+
+
 class Estado:
     def __init__(s):
         s.trava = threading.RLock()
@@ -235,6 +249,7 @@ class Estado:
         s.contador = 100
         s.admin = True
         s.dvd = False
+        s.optico_bloqueado = False
         s.fontes_vazias = False
         s.ultimo = None
         s.ultimo_opcoes = None
@@ -338,7 +353,7 @@ class H(BaseHTTPRequestHandler):
                 time.sleep(atraso)
                 if quebrado:
                     return self._json(500, {'erro': 'Não consegui listar os discos.'})
-                return self._json(200, [] if vazias else fontes_falsas(E.dvd))
+                return self._json(200, [] if vazias else fontes_falsas(E.dvd, E.optico_bloqueado))
             if p == '/api/jobs':
                 with E.trava:
                     E.consultas += 1
@@ -349,12 +364,18 @@ class H(BaseHTTPRequestHandler):
                     return self._json(500, {'erro': 'O serviço não conseguiu responder.'})
                 return self._json(200, dado)
             partes = p.split('/')
-            if len(partes) == 5 and partes[2] == 'jobs' and partes[4] in ('achados', 'arvore', 'relatorio'):
+            if len(partes) == 5 and partes[2] == 'jobs' and partes[4] in ('achados', 'arvore', 'relatorio', 'particoes'):
                 with E.trava:
                     j = E.jobs.get(partes[3])
                     atraso, quebrado = E.atraso, E.quebrado
                     if not j:
                         return self._json(404, {'erro': 'Recuperação não encontrada.'})
+                    if partes[4] == 'particoes':
+                        if j.get('tipo') != 'particoes':
+                            return self._json(404, {'erro': 'Este job não procura partições.'})
+                        if j['estado'] != 'concluido':
+                            return self._json(404, {'erro': 'A busca ainda não terminou.'})
+                        return self._json(200, resultado_particoes())
                     if partes[4] == 'relatorio':
                         corpo = '<!doctype html><meta charset=utf-8><h1>Relatório</h1><p>Arquivos recuperados.</p>'.encode()
                         self.send_response(200)
@@ -417,6 +438,8 @@ class H(BaseHTTPRequestHandler):
                 j['destino'] = d
                 if corpo.get('tipo') == 'varredura':
                     j['tipo'], j['destino'], j['opcoes'] = 'varredura', '', corpo.get('opcoes') or {}
+                elif corpo.get('tipo') == 'particoes':
+                    j['tipo'], j['opcoes'] = 'particoes', corpo.get('opcoes') or {}
                 E.jobs[id_] = j
                 E.eventos[id_] = []
                 E.mudou(j)
@@ -438,6 +461,11 @@ class H(BaseHTTPRequestHandler):
                     alvo = [a for a in visiveis(j) if a['id'] in ids]
                 if not alvo:
                     return self._json(400, {'erro': 'Nenhum arquivo para recuperar.'})
+                aviso = None
+                if destino[:2].upper() == 'F:':
+                    return self._json(400, {'erro': 'Não cabe: o destino tem 41 GB livres e os arquivos escolhidos precisam de mais.'})
+                if destino[:2].upper() == 'C:':
+                    aviso = 'Atenção: o destino tem 120 GB livres e faltam gravar mais; alguns arquivos podem falhar por falta de espaço.'
                 E.contador2 += 1
                 id_ = f'j-20261104-{E.contador2:04d}'
                 n = novo(id_, 'rodando', j['origem'], 0.3, total=sum(a['tamanho'] for a in alvo), vel=20 * 1024 ** 2, criado_em=agora() + 1)
@@ -448,7 +476,7 @@ class H(BaseHTTPRequestHandler):
                     a['recuperado_em'] = agora()
                 E.ultimo_rec = {'ids': 'todos' if corpo.get('ids') == 'todos' else sorted(a['id'] for a in alvo), 'n': len(alvo), 'filtros': corpo.get('filtros'), 'destino': destino}
                 E.mudou(n)
-                return self._json(201, n)
+                return self._json(201, dict(n, aviso=aviso) if aviso else n)
             if len(partes) == 5 and partes[2] == 'jobs' and partes[4] == 'abrir':
                 j = E.jobs.get(partes[3])
                 if not j or E.abrir_falha:
@@ -536,6 +564,10 @@ class H(BaseHTTPRequestHandler):
             elif p == '/_teste/zerar_recuperados':
                 for a in ACHADOS:
                     a['recuperado_em'] = None
+            elif p == '/_teste/optico_bloqueado':
+                E.optico_bloqueado = q.get('on', ['1'])[0] == '1'
+            elif p == '/_teste/evento':
+                E.eventos.setdefault(q['id'][0], []).append({'id': len(E.eventos.get(q['id'][0], [])) + 1, 'job_id': q['id'][0], 'quando': agora(), 'texto': q['texto'][0]})
             elif p == '/_teste/dvd':
                 E.dvd = q.get('on', ['1'])[0] == '1'
             elif p == '/_teste/fontes_vazias':

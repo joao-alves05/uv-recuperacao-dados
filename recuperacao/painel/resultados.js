@@ -534,10 +534,103 @@
       aviso.dataset.ocupado = '';
       aplicarPref();
       atualizarRec();
+      if (dlg.open) desenharPrevia();
+    }
+
+    /* ---- prévia ampliada e detalhes ---- */
+    const PORQUE = {
+      bom: 'A estrutura do arquivo está inteira e coerente.',
+      parcial: 'Só o começo do arquivo está certo; o resto se perdeu. Ele pode abrir com defeito.',
+      ruim: 'O arquivo está inteiro, mas a conferência falhou. Provavelmente está corrompido.',
+    };
+    const pv = { item: null, opener: null };
+    const dlg = el('dialog', 'previa');
+    dlg.setAttribute('aria-labelledby', 'pv-titulo');
+    const pvTopo = el('div', 'pv-topo');
+    const pvTitulo = el('h2', 'pv-titulo');
+    pvTitulo.id = 'pv-titulo';
+    const pvFecha = botao('Fechar', 'btn-suave', () => dlg.close());
+    pvFecha.id = 'pv-fechar';
+    pvTopo.append(pvTitulo, pvFecha);
+    const pvCorpo = el('div', 'pv-corpo');
+    const pvImg = el('div', 'pv-img');
+    const pvDet = el('dl', 'pv-det');
+    pvCorpo.append(pvImg, pvDet);
+    const pvRod = el('div', 'pv-rod');
+    const pvAnt = botao('‹ Anterior', 'btn-suave', () => navegarPrevia(-1));
+    const pvPos = el('span', 'pg-txt');
+    const pvProx = botao('Próximo ›', 'btn-suave', () => navegarPrevia(1));
+    const pvMarca = botao('', 'btn-primario', () => {
+      if (!pv.item) return;
+      const on = !(sel.modo === 'filtro' || sel.ids.has(pv.item.id));
+      alternar(pv.item, on).then(() => desenharPrevia());
+    });
+    pvAnt.id = 'pv-ant'; pvProx.id = 'pv-prox'; pvMarca.id = 'pv-marcar';
+    pvRod.append(pvAnt, pvPos, pvProx, pvMarca);
+    dlg.append(pvTopo, pvCorpo, pvRod);
+    document.body.append(dlg);
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+    dlg.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') { e.preventDefault(); navegarPrevia(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); navegarPrevia(1); }
+    });
+    dlg.addEventListener('close', () => { pv.item = null; if (pv.opener && pv.opener.isConnected) pv.opener.focus(); pv.opener = null; pvImg.replaceChildren(); });
+    function indicePrevia() { return pv.item ? dados.itens.findIndex((x) => x.id === pv.item.id) : -1; }
+    function navegarPrevia(d) {
+      const i = indicePrevia();
+      const n = i + d;
+      if (i < 0 || n < 0 || n >= dados.itens.length) return;
+      pv.item = dados.itens[n];
+      desenharPrevia();
+    }
+    function abrirPrevia(a, opener) {
+      pv.item = a;
+      pv.opener = opener || null;
+      desenharPrevia();
+      if (!dlg.open) dlg.showModal();
+    }
+    function desenharPrevia() {
+      const a = pv.item;
+      if (!a) return;
+      pvTitulo.textContent = a.nome == null ? '' : String(a.nome);
+      pvTitulo.title = nomeCompleto(a);
+      const i = indicePrevia();
+      pvAnt.disabled = i <= 0;
+      pvProx.disabled = i < 0 || i >= dados.itens.length - 1;
+      pvPos.textContent = i >= 0 ? (i + 1) + ' de ' + dados.itens.length + ' nesta página' : '';
+      const marcado = sel.modo === 'filtro' || sel.ids.has(a.id);
+      pvMarca.textContent = marcado ? 'Tirar da seleção' : 'Marcar para recuperar';
+      pvMarca.classList.toggle('btn-primario', !marcado);
+      pvMarca.classList.toggle('btn-suave', marcado);
+      pvImg.replaceChildren();
+      const semPrevia = (txt) => { const v = el('div', 'pv-sem'); v.append(icone(a.grupo), el('p', null, txt)); pvImg.replaceChildren(v); };
+      if (a.grupo === 'foto' && a.id != null) {
+        const im = el('img');
+        im.alt = 'Prévia de ' + (a.nome == null ? '' : String(a.nome));
+        im.src = '/api/achados/' + encodeURIComponent(a.id) + '/previa';
+        im.addEventListener('error', () => semPrevia('Não foi possível mostrar a prévia desta foto.'));
+        pvImg.append(im);
+      } else semPrevia('Este tipo de arquivo não tem prévia. Veja os detalhes ao lado.');
+      pvDet.replaceChildren();
+      const linha = (k, v, el2) => { pvDet.append(el('dt', null, k)); const dd = el('dd'); if (el2) dd.append(el2); else dd.textContent = v; pvDet.append(dd); };
+      linha('Tipo', [a.tipo, a.grupo].filter(Boolean).map(String).join(' · ') || '—');
+      linha('Tamanho', bytes(a.tamanho));
+      if (a.largura && a.altura) linha('Dimensões', a.largura + ' × ' + a.altura);
+      linha('Data', dataTxt(a.data));
+      linha('Pasta de origem', a.caminho ? String(a.caminho) : 'Não se sabe: o arquivo foi achado pelo conteúdo.');
+      if (a.apagado === true || a.apagado === false) linha('Apagado', a.apagado ? 'Sim' : 'Não');
+      linha('Estado', '', etiquetaQual(a));
+      linha('Por quê', PORQUE[a.estado] || '—');
+      if (a.pontuacao != null) linha('Confiança', Number(a.pontuacao) + ' de 100');
+      if (a.recuperado_em) linha('Recuperado', 'Sim, já foi salvo.');
     }
 
     function miniatura(a) {
-      const caixa = el('span', 'mini');
+      const caixa = el('button', 'mini');
+      caixa.type = 'button';
+      caixa.setAttribute('aria-label', 'Ver ' + String(a.nome == null ? '' : a.nome));
+      caixa.title = 'Ver em tamanho maior';
+      caixa.addEventListener('click', () => abrirPrevia(a, caixa));
       const poe = () => { caixa.replaceChildren(icone(a.grupo)); };
       if (a.grupo === 'foto' && a.id != null) {
         const im = el('img');
@@ -564,20 +657,30 @@
       c.addEventListener('change', () => alternar(a, c.checked));
       return c;
     }
+    function selosApagado() {
+      const t = el('span', 'tag apagado', 'Apagado');
+      t.title = 'Este arquivo foi apagado do disco; ainda dá para tentar recuperar.';
+      return t;
+    }
     function nomeCompleto(a) { return (a.caminho ? String(a.caminho) + '/' : '') + String(a.nome == null ? '' : a.nome); }
     function linha(a) {
       const tr = el('tr');
       tr.dataset.linha = String(a.id);
       const tdC = el('td', 'col-marca'); tdC.append(caixa(a));
       const tdM = el('td', 'col-mini'); tdM.append(miniatura(a));
-      const tdN = el('td', 'col-nome', a.nome == null ? '' : String(a.nome));
+      const tdN = el('td', 'col-nome');
+      tdN.append(el('span', 'nome-txt', a.nome == null ? '' : String(a.nome)));
+      if (a.caminho) tdN.append(el('span', 'nome-cam', String(a.caminho)));
       tdN.title = nomeCompleto(a);
       const tdT = el('td', 'col-tipo', a.tipo == null ? '' : String(a.tipo));
       const tdS = el('td', 'col-tamanho', bytes(a.tamanho));
       const tdD = el('td', 'col-data', dataTxt(a.data));
       const tdE = el('td', 'col-estado');
-      tdE.append(etiquetaQual(a));
-      if (a.recuperado_em) tdE.append(el('span', 'recuperado', 'Recuperado'));
+      const est = el('div', 'estados');
+      est.append(etiquetaQual(a));
+      if (a.apagado === true) est.append(selosApagado());
+      if (a.recuperado_em) est.append(el('span', 'recuperado', 'Recuperado'));
+      tdE.append(est);
       tr.append(tdC, tdM, tdN, tdT, tdS, tdD, tdE);
       tr.addEventListener('click', (e) => {
         if (e.target.closest('input,button,a')) return;
@@ -595,7 +698,10 @@
       const nome = el('span', 'ig-nome', a.nome == null ? '' : String(a.nome));
       nome.title = nomeCompleto(a);
       const meta = el('span', 'ig-meta', [a.tipo, bytes(a.tamanho)].filter(Boolean).join(' · '));
-      d.append(topo, miniatura(a), nome, meta);
+      d.append(topo, miniatura(a), nome);
+      if (a.caminho) { const cam = el('span', 'ig-meta nome-cam', String(a.caminho)); cam.title = String(a.caminho); d.append(cam); }
+      d.append(meta);
+      if (a.apagado === true) d.append(selosApagado());
       if (a.recuperado_em) d.append(el('span', 'recuperado', 'Recuperado'));
       d.addEventListener('click', (e) => {
         if (e.target.closest('input,button,a')) return;
@@ -649,7 +755,7 @@
       try {
         const j = await api('POST', '/api/jobs/' + encodeURIComponent(opts.jobId) + '/recuperar', corpoPost);
         recuperando = false;
-        if (opts.aoRecuperar) opts.aoRecuperar(j && j.job && typeof j.job === 'object' ? j.job : j);
+        if (opts.aoRecuperar) opts.aoRecuperar(j && j.job && typeof j.job === 'object' ? j.job : j, j);
       } catch (e) {
         recuperando = false; avisoRec = e.message;
       }
@@ -671,7 +777,7 @@
       else timerAtraso = setTimeout(() => vivo && buscar(true), 1500 - (agora - ultimoPedido));
       if (estado === 'ok') desenhar();
     }
-    function destruir() { vivo = false; clearTimeout(timerBusca); clearTimeout(timerAtraso); seq++; raiz.replaceChildren(); raiz.classList.remove('resultados'); }
+    function destruir() { if (dlg.open) dlg.close(); dlg.remove(); vivo = false; clearTimeout(timerBusca); clearTimeout(timerAtraso); seq++; raiz.replaceChildren(); raiz.classList.remove('resultados'); }
 
     desenhar();
     buscar();
