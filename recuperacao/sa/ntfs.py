@@ -86,7 +86,7 @@ def aplicar_fixups(rec):
 
 
 def atributos(rec):
-    """Gera (tipo, nome, nao_residente, flags, conteudo/atributo bruto, dados_runs, tamanho_real, tamanho_alocado)."""
+    """Gera (tipo, nome, nao_residente, flags, conteudo, data runs, tamanho real, posição do conteúdo residente no registro)."""
     i = struct.unpack_from('<H', rec, 20)[0]
     while i + 16 <= len(rec):
         tipo, tam = struct.unpack_from('<II', rec, i)
@@ -99,13 +99,13 @@ def atributos(rec):
             clen, coff = struct.unpack_from('<IH', rec, i + 16)
             if coff + clen > tam:
                 return
-            yield tipo, nome, False, flags, rec[i + coff: i + coff + clen], None, clen
+            yield tipo, nome, False, flags, rec[i + coff: i + coff + clen], None, clen, i + coff
         else:
             if tam < 64:
                 return
             roff = struct.unpack_from('<H', rec, i + 32)[0]
             real = struct.unpack_from('<Q', rec, i + 48)[0]
-            yield tipo, nome, True, flags, None, decodificar_runs(rec[i: i + tam], roff), real
+            yield tipo, nome, True, flags, None, decodificar_runs(rec[i: i + tam], roff), real, None
         i += tam
 
 
@@ -133,14 +133,14 @@ class Ntfs(Volume):
         rec = aplicar_fixups(self._registro_bruto(self.mft * self.csize))
         if rec is None:
             raise ErroSA('O registro 0 da MFT está ilegível.')
-        for tipo, nome, nr, _f, _c, runs, real in atributos(rec):
+        for tipo, nome, nr, _f, _c, runs, real, _p in atributos(rec):
             if tipo == 0x80 and not nome and nr:
                 self._mft_runs, self._mft_tam = runs, real
                 return
         raise ErroSA('A MFT não tem $DATA não residente.')
 
     def _blocos_mft(self):
-        """Gera (número do primeiro registro, bytes) percorrendo os data runs da MFT em pedaços de até 4 MiB."""
+        """Gera (número do primeiro registro, bytes, offset do pedaço no volume) pelos data runs da MFT, em pedaços de até 4 MiB."""
         falta, n = self._mft_tam, 0
         por_pedaco = max(1, (4 << 20) // self.tam_reg) * self.tam_reg
         for lcn, cl in self._mft_runs:
@@ -151,7 +151,7 @@ class Ntfs(Volume):
                 q -= q % self.tam_reg
                 if q <= 0 or lcn is None or (lcn * self.csize + off + q) > self.tamanho:
                     return
-                yield n, self._ler(lcn * self.csize + off, q)
+                yield n, self._ler(lcn * self.csize + off, q), lcn * self.csize + off
                 n += q // self.tam_reg
                 off += q
                 falta -= q
@@ -182,7 +182,7 @@ class Ntfs(Volume):
         info = dict(n=n, em_uso=bool(flags & 1), dir=bool(flags & 2), base=base, nome=None, ns=9, pai=None,
                     criado=None, modif=None, acess=None, tam=0, runs=None, inline=None, achou_dados=False,
                     comprimido=False, cifrado=False, lista=False, rotulo=None)
-        for tipo, nome, nr, af, cont, runs, real in atributos(rec):
+        for tipo, nome, nr, af, cont, runs, real, pos in atributos(rec):
             if tipo == 0x10 and not nr and len(cont) >= 32:
                 info['criado'], info['modif'], _, info['acess'] = (_tempo(x) for x in struct.unpack_from('<QQQQ', cont, 0))
             elif tipo == 0x30 and not nr and len(cont) >= 66:
@@ -208,6 +208,7 @@ class Ntfs(Volume):
                     info['runs'] = runs
                 else:
                     info['inline'] = cont
+                    info['inline_pos'] = pos
         return info
 
     def _caminho(self, n, infos, memo):
@@ -243,7 +244,7 @@ class Ntfs(Volume):
         except OSError as e:
             raise ErroSA('Não consegui ler a MFT: %s' % e) from None
         infos = {}
-        for ini, bloco in self._blocos_mft():
+        for ini, bloco, off_bloco in self._blocos_mft():
             for k in range(len(bloco) // self.tam_reg):
                 rec = aplicar_fixups(bloco[k * self.tam_reg:(k + 1) * self.tam_reg])
                 if rec is None:
@@ -253,6 +254,8 @@ class Ntfs(Volume):
                     info = self._extrair(n, rec)
                 except (struct.error, IndexError):
                     continue
+                info['rec_off'] = off_bloco + k * self.tam_reg
+                info['usa'] = struct.unpack_from('<HH', rec, 4)
                 if n == 3 and info['rotulo'] is not None:
                     self.rotulo = info['rotulo']
                 if n == 6:
@@ -296,6 +299,7 @@ class Ntfs(Volume):
         if i['inline'] is not None:
             e.inline = i['inline']
             e.tamanho = len(i['inline'])
+            e.runs = self._runs_residente(i)
             return
         if not i['achou_dados']:
             if i['lista']:
@@ -325,3 +329,30 @@ class Ntfs(Volume):
                 e.estado, e.nota = 'parcial', 'clusters já reutilizados (conforme o $Bitmap)'
             elif self._bitmap is None:
                 e.nota = 'sem $Bitmap para conferir reuso'
+
+    def _runs_residente(self, i):
+        """Onde estão, na origem, os bytes de um $DATA residente. O NTFS troca os 2 últimos bytes de cada setor de 512
+        do registro pelo número de sequência (fixup); os bytes verdadeiros ficam no vetor de fixups. Então o
+        conteúdo que cruza esse ponto vira 3 faixas: antes, os 2 bytes do vetor, depois."""
+        ini, n = i['inline_pos'], len(i['inline'])
+        base = self.inicio + i['rec_off']
+        uo, _uc = i['usa']
+        faixas, pos, falta = [], ini, n
+        while falta > 0:
+            fim_setor = (pos // 512 + 1) * 512
+            if pos >= fim_setor - 2:                         # dentro dos 2 bytes trocados deste setor
+                s = fim_setor // 512
+                q = min(fim_setor - pos, falta)
+                faixas.append((base + uo + 2 * s + (pos - (fim_setor - 2)), q))
+            else:
+                q = min(fim_setor - 2 - pos, falta)
+                faixas.append((base + pos, q))
+            pos += q
+            falta -= q
+        fund = []
+        for o, q in faixas:                                  # junta faixas vizinhas
+            if fund and fund[-1][0] + fund[-1][1] == o:
+                fund[-1] = (fund[-1][0], fund[-1][1] + q)
+            else:
+                fund.append((o, q))
+        return fund

@@ -29,7 +29,7 @@ from . import config, fontes, leitor
 from .executor import ErroAcao, Executor
 from .jobs import DestinoEmUso, JobStore
 from .tipos import imagem
-from . import rotas_achados, rotas_particoes
+from . import rotas_achados, rotas_arvore, rotas_particoes
 from .tipos import recuperar as tipo_recuperar
 from .tipos import varredura as tipo_varredura
 from .tipos import particoes as tipo_particoes
@@ -392,6 +392,7 @@ def criar_app(ctx=None):
 
     rotas_particoes.registrar(app, ctx)
     rotas_achados.registrar(app, ctx)
+    rotas_arvore.registrar(app, ctx)
     return app
 
 

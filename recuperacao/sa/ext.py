@@ -184,6 +184,8 @@ class Ext(Volume):
         if flags & F_INLINE:
             if tam <= 60:
                 ent.inline = ino_dados[40:40 + tam]
+                g, i = divmod(ent.ident - 1, self.ipg)       # os bytes também estão na origem: no i_block do inode
+                ent.runs = [(self.inicio + self._grupo(g)[1] * self.bs + i * self.isize + 40, tam)] if tam else []
             else:
                 ent.estado, ent.nota = 'ruim', 'inline data maior que 60 bytes: não suportado'
             return
