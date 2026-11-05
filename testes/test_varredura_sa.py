@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import amostras as A
 import imagens_ext as ie
+import imagens_hfs as ih
 import imagens_ntfs as nt
 import imagens_sa as im
 from auxiliar import sha256_de
@@ -239,6 +240,25 @@ class TestExtApagadoSemConteudo(Base):
         self.assertEqual(set(a), {'/viva.bin'})
         self.assertEqual(sha(bytes_do_achado(caminho, a['/viva.bin'])), sha(viva))
         self.assertTrue(any('só com o nome' in t for t in self.eventos(job['id'])))
+
+
+class TestSistemaHfs(Base):
+    def test_hfs_na_varredura_pelo_sistema_de_arquivos(self):
+        f = ih.HfsImg()
+        d1, d2 = conteudo(5000, 1), conteudo(10 * 4096 + 7, 2)
+        pasta = f.add_dir(2, 'Documentos')
+        f.add_file(pasta, 'carta.txt', d1)
+        f.add_file(2, 'grande fragmentado.bin', d2, fragmentos=10)
+        caminho = f.gravar(os.path.join(self.trabalho, 'mac.img'))
+        job = self.varrer(caminho, 'sistema')
+        self.esperar_estado(job['id'], 'concluido')
+        a = self.por_caminho(job['id'])
+        self.assertEqual(set(a), {'/Documentos/carta.txt', '/grande fragmentado.bin'})
+        self.assertEqual(sha(bytes_do_achado(caminho, a['/Documentos/carta.txt'])), sha(d1))
+        g = a['/grande fragmentado.bin']
+        self.assertEqual((g['apagado'], len(g['extents'])), (False, 10))
+        self.assertEqual(sha(bytes_do_achado(caminho, g)), sha(d2))
+        self.assertTrue(any('HFS+' in t for t in self.eventos(job['id'])))
 
 
 class TestRetomada(Base):
