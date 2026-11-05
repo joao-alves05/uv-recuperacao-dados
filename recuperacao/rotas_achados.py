@@ -14,13 +14,16 @@ from xml.sax.saxutils import escape
 
 from flask import Response, jsonify, request
 
-from . import achados, leitor
+import time
+
+from . import achados, identidade, leitor
 from .jobs import DestinoEmUso
 from .tipos import recuperar as tipo_recuperar
 
 MAX_PREVIA = 2 * 1024 * 1024
 ID_JOB = re.compile(r'j-\d{8}-[0-9a-f]{4}')
 MAX_SELECIONADOS = 200000
+TTL_CONFERENCIA = 30.0        # segundos que a conferência da origem vale para a prévia (vem uma por miniatura)
 RESULTADOS_VALIDOS = ('ok', 'com_falhas', 'falhou', 'sumiu', 'copiando')
 COR_GRUPO = {'foto': '#2f7d6d', 'video': '#7a4fa3', 'audio': '#b0701f', 'documento': '#2f5f9e',
              'compactado': '#8a6d1f', 'banco': '#5b6770', 'outro': '#6b6b6b'}
@@ -55,6 +58,20 @@ def _resposta(corpo, tipo):
 
 def registrar(app, ctx):
     store = ctx.store
+    conferidas = {}                 # id da varredura -> (instante, frase de erro ou None)
+
+    def origem_mudou(job):
+        """Frase de erro se a origem deste job não é mais a de quando a busca começou (conferência com validade curta)."""
+        guardada = (job.get('opcoes') or {}).get('impressao_origem')
+        if not guardada:
+            return None
+        agora = time.monotonic()
+        antiga = conferidas.get(job['id'])
+        if antiga and agora - antiga[0] < TTL_CONFERENCIA:
+            return antiga[1]
+        erro = identidade.conferir(job['origem'], guardada)
+        conferidas[job['id']] = (agora, erro)
+        return erro
 
     @app.get('/api/achados/<int:achado_id>/previa')
     def previa(achado_id):
@@ -64,6 +81,9 @@ def registrar(app, ctx):
         job = store.obter(achado['job_id'])
         if (achado.get('grupo') == 'foto' and 0 < achado['tamanho'] <= MAX_PREVIA
                 and (achado.get('extensao') or '').lower() in ('jpg', 'jpeg', 'png', 'gif', 'bmp')):
+            mudou = origem_mudou(job)
+            if mudou:
+                return _erro(mudou, 409)                 # nunca mostra bytes de outro disco como se fossem o achado
             try:
                 with leitor.abrir(job['origem']) as l:
                     dados = b''.join(achados.ler_achado(l, achado, MAX_PREVIA))
@@ -119,6 +139,10 @@ def registrar(app, ctx):
         msg = tipo_recuperar.validar(job['origem'], destino)
         if msg:
             return _erro(msg, 400)
+        conferidas.pop(job_id, None)                      # recuperar sempre confere de novo
+        mudou = origem_mudou(job)
+        if mudou:
+            return _erro(mudou, 409)
         escolha = corpo.get('ids')
         try:
             if escolha == 'todos':

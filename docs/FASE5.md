@@ -122,3 +122,11 @@ Estado e pontuação: `bom` = estrutura inteira e coerente (100, ou 90 nos tipos
 
 - `GET /api/jobs/<id_do_recuperar>/recuperados?resultado=&pagina=&por_pagina=` → `{total, pagina, por_pagina, itens:[{arquivo, achado_id, resultado, motivo, bytes}], resumo:{por_resultado:{ok: n, ...}}}`, na ordem em que foram pedidos. `arquivo` é o caminho relativo no destino (`Fotos/f0001234.jpg`; nulo se o achado não foi achado). `resultado` = `ok` | `com_falhas` (trechos ilegíveis zerados) | `falhou` (não gravou; o `motivo` traz o texto do sistema) | `sumiu` | `copiando` (em andamento ou interrompido); `resultado` aceita vários separados por vírgula. `pagina` a partir de 1, `por_pagina` de 1 a 500 (padrão 50); valor inválido = 400. 404 se o job não existe, 409 se não é `recuperar`. O `resumo` ignora o filtro `resultado`.
 - `GET /api/jobs/<id>/relatorio` (e `/relatorio.css`) serve também o relatório do job `imagem` (`<destino>.relatorio.html`, ver TECNICO.md): 404 enquanto não foi gerado (a imagem só gera ao concluir), 409 para outros tipos de job. O arquivo é achado pelo nome gravado no checkpoint, só como nome simples ao lado da imagem (ou na pasta de destino, no `recuperar`).
+
+### Identidade da origem (revisão final)
+
+Ao **criar** um job `imagem` ou `varredura`, o serviço grava em `opcoes.impressao_origem` o `{tamanho, inicio, fim}` da origem: tamanho e SHA-256 do primeiro e do último MiB (lidos pelo `Leitor`, `recuperacao/identidade.py`). O valor enviado pelo cliente nesse campo é sempre descartado. O número de série do dispositivo (IOCTL) não entra; as duas pontas bastam. A impressão é conferida de novo em:
+- `POST /api/jobs/<varredura>/recuperar`: 409 "A origem não é mais a mesma...", sem criar job nem pasta;
+- `GET /api/achados/<id>/previa` de foto: 409; o resultado da conferência vale 30 s por varredura (a tela pede uma prévia por miniatura); ícones não leem a origem e não conferem;
+- **retomar** (`POST /api/jobs/<id>/retomar`) de `imagem`, `varredura` e `recuperar` (este usa a impressão da varredura): 409 e o job continua pausado ou interrompido.
+Job criado antes desta mudança (sem impressão) não é conferido. Origem que não abre na hora da conferência também recusa ("Ela está conectada?"). Limite: volume montado e em uso pode mudar nas pontas entre a busca e a recuperação; nesse caso a conferência recusa e é preciso refazer a busca.

@@ -96,10 +96,18 @@ def _offsets_com_nome(store, job_id):
         'SELECT offset FROM achados WHERE job_id=? AND caminho IS NOT NULL AND tamanho > 0', (job_id,))}
 
 
-def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho, janela=None):
+def _aviso_lista_incompleta(motivo, op):
+    texto = 'a lista pelo sistema de arquivos ficou incompleta: %s.' % motivo
+    if op['modo'] == 'sistema':
+        texto += ' Rode a busca por assinatura (rápida ou profunda) para achar o que faltou.'
+    return texto
+
+
+def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho, janela=None, resultado=None):
     """Lista os arquivos pelos sistemas de arquivos da origem (rápido, com nome e caminho, apagados incluídos) e grava
     em `achados`. Devolve 'pausado'/'cancelado' se parou no meio, ou None se terminou. O ponto de retomada é quantas
     entradas já foram consumidas (a ordem de `arquivos_sa.entradas` é fixa), então retomar não repete achado."""
+    resultado = resultado if resultado is not None else {}
     retomando = bool(cp) and cp.get('fase') == 'sistema'
     ja = int(cp.get('feitos', 0)) if retomando else 0
     pulados = dict(cp.get('pulados') or {}) if retomando else {}
@@ -130,7 +138,7 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho, janela=None):
         store.adicionar_achados(job_id, pendentes, checkpoint={
             'fase': 'sistema', 'feitos': est['n'], 'pulados': pulados, 'tamanho': tamanho, 'modo': op['modo'],
             'ruins': 0, 'sistema_antes': op['sistema_antes'], 'offset': op.get('offset', 0),
-            'janela': janela[1] if janela else tamanho})
+            'janela': janela[1] if janela else tamanho, 'lista_incompleta': resultado.get('incompleta')})
         pendentes.clear()
 
     antes, soma = {}, 0
@@ -171,10 +179,18 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho, janela=None):
         ctrl.checkpoint(None, forcar=True)
         return 'cancelado' if ctrl.cancelamento_pedido() else 'pausado'
     except (arquivos_sa.sa.ErroSA, OSError) as e:
-        gravar()
+        resultado['incompleta'] = 'a leitura parou no meio (%s)' % e
         ctrl.evento('A lista pelo sistema de arquivos parou: %s' % e)
+    ilegiveis = sum(va.volume.ilegiveis for va in lista)
+    resultado['ilegiveis'] = ilegiveis
+    if ilegiveis and not resultado.get('incompleta'):
+        resultado['incompleta'] = '%d setores do sistema de arquivos estavam ilegíveis' % ilegiveis
     gravar()
-    ctrl.progresso(total_bytes, total_bytes, 'Lista de arquivos pronta: %d achados' % total)
+    if resultado.get('incompleta'):
+        ctrl.aviso_final = _aviso_lista_incompleta(resultado['incompleta'], op)
+        ctrl.evento('ATENÇÃO: ' + ctrl.aviso_final)
+    ctrl.progresso(total_bytes, total_bytes, 'Lista de arquivos pronta: %d achados' % total, ilegiveis)
+    ctrl.checkpoint(None, forcar=True)                      # o total de setores ilegíveis tem de chegar ao job
     por_grupo = achados.contar_por_grupo(store, job_id)
     resumo = ', '.join('%d %s' % (n, NOMES_GRUPO.get(g, g)) for g, n in sorted(por_grupo.items(), key=lambda x: -x[1]))
     ctrl.evento('Lista pelo sistema de arquivos concluída: %d arquivos%s.' % (total, ' (%s)' % resumo if resumo else ''))
@@ -207,20 +223,25 @@ def executar(job, ctrl):
             fatia = carving.Fatia(aberto, op['offset'], tamanho - op['offset'] if op['tamanho'] is None else op['tamanho'])
         alvo = fatia.tamanho if fatia else tamanho            # quantos bytes esta varredura percorre
         cp = store.obter_checkpoint(job_id)
-        inicio, ruins = 0, 0
+        inicio, ruins, incompleta = 0, 0, None
         if cp:
             if (cp.get('tamanho') != tamanho or cp.get('modo') != op['modo'] or cp.get('offset', 0) != op['offset']
                     or cp.get('janela', alvo) != alvo):
                 raise ErroJob('A origem ou o modo mudaram desde que a varredura começou. Por segurança, nada foi alterado.')
         if op['modo'] == 'sistema' or op['sistema_antes']:
             if not cp or cp.get('fase') == 'sistema':        # a fase do sistema de arquivos vem antes do carving
+                lista = {}
                 resultado = _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho,
-                                          (fatia.deslocamento, fatia.tamanho) if fatia else None)
+                                          (fatia.deslocamento, fatia.tamanho) if fatia else None, lista)
                 if resultado or op['modo'] == 'sistema':
                     return resultado or 'concluido'
-                cp = None
+                cp, ruins = None, lista.get('ilegiveis', 0)
+                incompleta = lista.get('incompleta')
         if cp:
             inicio, ruins = int(cp.get('pos', 0)), int(cp.get('ruins', 0))
+            incompleta = cp.get('lista_incompleta')
+            if incompleta:
+                ctrl.aviso_final = _aviso_lista_incompleta(incompleta, op)
             ctrl.evento('Retomando a varredura a partir do byte %d (%d arquivos já achados).' % (inicio, achados.contar(store, job_id)))
         else:
             ctrl.evento('Varredura %s: %d bytes%s, %d tipos de arquivo.'
@@ -237,7 +258,8 @@ def executar(job, ctrl):
         def gravar():
             store.adicionar_achados(job_id, pendentes, checkpoint={
                 'fase': 'carving', 'pos': est['pos'], 'tamanho': tamanho, 'modo': op['modo'], 'ruins': est['ruins'],
-                'sistema_antes': op['sistema_antes'], 'offset': op.get('offset', 0), 'janela': alvo})
+                'sistema_antes': op['sistema_antes'], 'offset': op.get('offset', 0), 'janela': alvo,
+                'lista_incompleta': incompleta})
             pendentes.clear()
 
         def texto():
@@ -269,6 +291,8 @@ def executar(job, ctrl):
                 time.sleep(atraso)
         est['pos'] = alvo
         gravar()
+        ctrl.progresso(alvo, alvo, texto(), est['ruins'])
+        ctrl.checkpoint(None, forcar=True)
     por_grupo = achados.contar_por_grupo(store, job_id)
     resumo = ', '.join('%d %s' % (n, NOMES_GRUPO.get(g, g)) for g, n in sorted(por_grupo.items(), key=lambda x: -x[1]))
     ctrl.evento('Varredura concluída: %d arquivos achados%s.' % (total, ' (%s)' % resumo if resumo else ''))

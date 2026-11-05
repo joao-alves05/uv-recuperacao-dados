@@ -261,6 +261,73 @@ class TestSistemaHfs(Base):
         self.assertTrue(any('HFS+' in t for t in self.eventos(job['id'])))
 
 
+class TestListaIncompleta(Base):
+    """Setor ilegível no meio da MFT: o job não pode terminar como se a lista estivesse inteira."""
+    BOM = ('f0.txt', 'f1.txt', 'f2.txt', 'f4.txt', 'f5.txt')
+
+    def imagem(self):
+        n = nt.NtfsImg()
+        for i in range(6):
+            n.add_file(5, 'f%d.txt' % i, conteudo(80 + i, i))          # registros 24 a 29; o 27 é o f3
+        return n.gravar(os.path.join(self.trabalho, 'ntfs.img'))
+
+    def com_setor_ruim(self):
+        ini = (4 + 27) * 1024 + 512                                  # um setor no meio do registro 27 da MFT
+        original = leitor_mod.LeitorPosix._bruto
+
+        def falho(self_, offset, n):
+            if offset < ini + 512 and offset + n > ini:
+                raise OSError('setor ruim de mentira')
+            return original(self_, offset, n)
+        p = mock.patch.object(leitor_mod.LeitorPosix, '_bruto', falho)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_modo_sistema_diz_que_a_lista_ficou_incompleta_e_conta_os_setores(self):
+        caminho = self.imagem()
+        self.com_setor_ruim()
+        job = self.varrer(caminho, 'sistema')
+        fim = self.esperar_estado(job['id'], 'concluido')
+        self.assertEqual(sorted(a['caminho'] for a in self.lista(job['id'])), ['/' + n for n in self.BOM])
+        self.assertIn('ficou incompleta', fim['mensagem'])
+        self.assertIn('busca por assinatura', fim['mensagem'])
+        self.assertEqual(fim['setores_ruins'], 2)
+        self.assertTrue(any('ATENÇÃO' in t for t in self.eventos(job['id'])))
+
+    def test_com_sistema_antes_o_carving_segue_e_a_mensagem_final_tambem_avisa(self):
+        caminho = self.imagem()
+        self.com_setor_ruim()
+        job = self.varrer(caminho, 'rapida', sistema_antes=True, bloco=65536)
+        fim = self.esperar_estado(job['id'], 'concluido')
+        self.assertIn('ficou incompleta', fim['mensagem'])
+        self.assertNotIn('Rode a busca', fim['mensagem'])
+        self.assertGreaterEqual(fim['setores_ruins'], 2)
+        self.assertEqual(self.ctx.store.obter_checkpoint(job['id'])['fase'], 'carving')
+
+    def test_leitura_que_para_no_meio_tambem_avisa(self):
+        caminho = self.imagem()
+        chamadas = []
+        original = mod_ntfs.Ntfs._montar
+
+        def quebra(self_, *a, **k):
+            chamadas.append(1)
+            if len(chamadas) == 3:
+                raise OSError('o disco sumiu')
+            return original(self_, *a, **k)
+        with mock.patch.object(mod_ntfs.Ntfs, '_montar', quebra):
+            job = self.varrer(caminho, 'sistema')
+            fim = self.esperar_estado(job['id'], 'concluido')
+        self.assertIn('ficou incompleta', fim['mensagem'])
+        self.assertIn('o disco sumiu', fim['mensagem'])
+        self.assertEqual(len(self.lista(job['id'])), 2)
+
+    def test_lista_inteira_continua_dizendo_apenas_concluido(self):
+        job = self.varrer(self.imagem(), 'sistema')
+        fim = self.esperar_estado(job['id'], 'concluido')
+        self.assertEqual((fim['mensagem'], fim['setores_ruins']), ('Concluído.', 0))
+        self.assertEqual(len(self.lista(job['id'])), 6)
+
+
 class TestRetomada(Base):
     def test_pausa_no_meio_da_lista_e_retoma_sem_repetir(self):
         f = im.FatImg('FAT32')

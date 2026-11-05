@@ -12,7 +12,7 @@ import threading
 import time
 import traceback
 
-from . import config, logjob
+from . import config, identidade, logjob
 
 MAX_SIMULTANEOS = 2
 CHECKPOINT_S = 2.0
@@ -48,6 +48,7 @@ class Controle:
         self._ultimo_cp = time.monotonic()
         self._bytes_cp = 0
         self._ult = (0, 0, 0, None)      # feitos, total, ruins, texto
+        self.aviso_final = None          # o tipo preenche: vira parte da mensagem de "Concluído" (resultado parcial)
 
     # chamados pelo executor / pelas rotas
     def pedir_pausa(self):
@@ -163,7 +164,7 @@ class Executor:
                     raise ErroJob('Tipo de trabalho desconhecido: %s.' % job['tipo'])
                 resultado = tipo.executar(job, ctrl)
                 ctrl.log('Resultado: %s.' % resultado)
-                self._finalizar(job_id, resultado)
+                self._finalizar(job_id, resultado, ctrl.aviso_final)
             except ErroJob as e:
                 ctrl.log('Falhou: %s' % e)
                 self._falhar(job_id, str(e))
@@ -178,13 +179,15 @@ class Executor:
             ctrl._log.fechar()
             ctrl.terminou.set()
 
-    def _finalizar(self, job_id, resultado):
+    def _finalizar(self, job_id, resultado, aviso=None):
         agora = time.time()
         de = ('rodando',)
         if resultado == 'concluido':
             atual = self.store.obter(job_id)
             ruins = atual['setores_ruins']
             msg = 'Concluído.' if not ruins else 'Concluído, com %d setores que não foi possível ler.' % ruins
+            if aviso:
+                msg = (msg + ' ' + aviso[:1].upper() + aviso[1:]) if ruins else 'Concluído, mas ' + aviso
             self.store.transicao(job_id, de, 'concluido', progresso=1.0, terminado_em=agora, velocidade=0.0,
                                  mensagem=msg, bytes_feitos=atual['bytes_total'])
             self.store.evento(job_id, msg)
@@ -267,6 +270,9 @@ class Executor:
                 raise ErroAcao(409, 'Não dá para retomar: o job está %s.' % NOME_ESTADO.get(job['estado'], job['estado']))
             if self._parando:
                 raise ErroAcao(409, 'O serviço está sendo desligado.')
+            mudou = identidade.conferir(job['origem'], identidade.da_origem_do_job(self.store, job))
+            if mudou:
+                raise ErroAcao(409, mudou)           # outro disco no mesmo caminho: não retoma por cima
             if not self.store.transicao(job_id, ('pausado', 'interrompido'), 'na_fila', mensagem='Na fila para retomar.',
                                         erro=None):
                 raise ErroAcao(409, 'O estado do job mudou. Atualize a tela.')

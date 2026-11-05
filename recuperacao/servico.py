@@ -25,7 +25,7 @@ from urllib.parse import urlencode
 from flask import Flask, Response, abort, jsonify, make_response, redirect, request, send_from_directory
 from werkzeug.serving import ThreadedWSGIServer
 
-from . import config, fontes, leitor
+from . import config, fontes, identidade, leitor
 from .executor import ErroAcao, Executor
 from .jobs import DestinoEmUso, JobStore
 from .tipos import imagem
@@ -280,6 +280,9 @@ def criar_app(ctx=None):
         erro = modulo.validar(origem, destino, opcoes)
         if erro:
             return _erro(erro, 400)
+        if tipo in ('imagem', 'varredura'):
+            impressao = identidade.impressao(origem)          # para saber depois se a origem ainda é esta
+            opcoes = dict(opcoes, impressao_origem=impressao) if impressao else {k: v for k, v in opcoes.items() if k != 'impressao_origem'}
         try:
             job = store.criar(tipo, origem, destino, opcoes)
         except DestinoEmUso:

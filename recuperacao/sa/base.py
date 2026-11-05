@@ -73,6 +73,7 @@ class Volume:
     tipo = ''
     rotulo = ''
     limitacao = ''
+    ilegiveis = 0           # setores que não deu para ler ao montar a lista (o resto da lista segue sem eles)
 
     def __init__(self, leitor, inicio=0, tamanho=None):
         self.leitor = leitor

@@ -154,10 +154,26 @@ class Ntfs(Volume):
                 q -= q % self.tam_reg
                 if q <= 0 or lcn is None or (lcn * self.csize + off + q) > self.tamanho:
                     return
-                yield n, self._ler(lcn * self.csize + off, q), lcn * self.csize + off
+                try:
+                    dados = self._ler(lcn * self.csize + off, q)
+                except OSError:
+                    dados = self._ler_registro_a_registro(lcn * self.csize + off, q)
+                yield n, dados, lcn * self.csize + off
                 n += q // self.tam_reg
                 off += q
                 falta -= q
+
+    def _ler_registro_a_registro(self, off, q):
+        """Setor ruim no meio do pedaço: relê registro por registro. O que não lê vira zeros (registro sem 'FILE' é
+        ignorado) e entra na conta de `ilegiveis`; a lista segue sem esses registros."""
+        partes = []
+        for i in range(q // self.tam_reg):
+            try:
+                partes.append(self._ler(off + i * self.tam_reg, self.tam_reg))
+            except OSError:
+                partes.append(b'\0' * self.tam_reg)
+                self.ilegiveis += max(1, self.tam_reg // max(1, getattr(self.leitor, 'setor', 512)))
+        return b''.join(partes)
 
     def _bit_ocupado(self, c):
         """True se o $Bitmap marca o cluster como ocupado; None se não deu para ler o $Bitmap."""
