@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""HFS+/HFSX, APFS e UDF: só reconhecer. Não listam nem recuperam arquivos (limitação documentada)."""
+"""APFS (sempre) e HFS+/HFSX/UDF (quando o leitor próprio não abre): só reconhecer, sem listar nem recuperar.
+APFS fica assim de propósito: checkpoints do contêiner e B-trees com cópia na escrita (ver docs/FASE3-4.md)."""
 import struct
 
 from .base import Volume
