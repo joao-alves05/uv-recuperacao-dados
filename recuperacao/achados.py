@@ -135,3 +135,138 @@ def ler_achado(leitor, achado, maximo=None, bloco=1 << 20):
             off, n, falta = off + pedaco, n - pedaco, falta - pedaco
         if falta <= 0:
             return
+
+
+# --- consulta (lista de resultados) -----------------------------------------------------------------------------
+ORDENS = {'nome': 'nome COLLATE NOCASE', 'tamanho': 'tamanho', 'data': 'data', 'tipo': 'tipo COLLATE NOCASE'}
+MAX_POR_PAGINA = 500
+POR_PAGINA_PADRAO = 50
+_DIA = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+
+class ErroFiltro(ValueError):
+    """Filtro inválido; a mensagem (em português) vai para o painel com 400."""
+
+
+def _lista(valor, campo, permitidos=None):
+    itens = [x.strip() for x in str(valor).split(',') if x.strip()]
+    if not itens or len(itens) > 50 or any(len(x) > 40 for x in itens):
+        raise ErroFiltro('Filtro "%s" inválido.' % campo)
+    if permitidos and any(x not in permitidos for x in itens):
+        raise ErroFiltro('Filtro "%s" inválido: use %s.' % (campo, ', '.join(permitidos)))
+    return itens
+
+
+def _bytes(valor, campo):
+    try:
+        n = int(str(valor))
+    except ValueError:
+        n = -1
+    if n < 0:
+        raise ErroFiltro('Filtro "%s" precisa ser um número de bytes (0 ou mais).' % campo)
+    return n
+
+
+def filtros_de(d):
+    """Dict de texto (query string ou corpo do POST) -> filtros limpos. Campos vazios ou ausentes são ignorados."""
+    if not isinstance(d, dict):
+        raise ErroFiltro('Os filtros precisam ser um objeto.')
+    d = {k: v for k, v in d.items() if v is not None and v != ''}
+    f = {}
+    if 'grupo' in d:
+        f['grupo'] = _lista(d['grupo'], 'grupo', GRUPOS)
+    if 'tipo' in d:
+        f['tipo'] = _lista(d['tipo'], 'tipo')
+    if 'estado' in d:
+        f['estado'] = _lista(d['estado'], 'estado', ESTADOS)
+    for c in ('min', 'max'):
+        if c in d:
+            f[c] = _bytes(d[c], c)
+    if 'min' in f and 'max' in f and f['min'] > f['max']:
+        raise ErroFiltro('O tamanho mínimo é maior que o máximo.')
+    for c in ('de', 'ate'):
+        if c in d:
+            if not _DIA.fullmatch(str(d[c])):
+                raise ErroFiltro('Filtro "%s" precisa ser uma data AAAA-MM-DD.' % c)
+            f[c] = str(d[c])
+    if 'pasta' in d:
+        if len(str(d['pasta'])) > 1000 or '\x00' in str(d['pasta']):
+            raise ErroFiltro('A pasta é longa demais.')
+        f['pasta'] = str(d['pasta'])
+    if 'busca' in d:
+        if len(str(d['busca'])) > 100:
+            raise ErroFiltro('A busca é longa demais.')
+        f['busca'] = str(d['busca'])
+    return f
+
+
+def _onde(job_id, f, sem_grupo=False):
+    sql, p = ['job_id=?'], [job_id]
+    for campo in ('grupo', 'tipo', 'estado'):
+        if campo in f and not (sem_grupo and campo == 'grupo'):
+            sql.append('%s IN (%s)' % (campo, ','.join('?' * len(f[campo]))))
+            p += f[campo]
+    if 'min' in f:
+        sql.append('tamanho>=?'), p.append(f['min'])
+    if 'max' in f:
+        sql.append('tamanho<=?'), p.append(f['max'])
+    if 'de' in f:
+        sql.append('data>=?'), p.append(f['de'])
+    if 'ate' in f:
+        sql.append('data<?'), p.append(f['ate'] + ' 99')        # o dia inteiro: "2021-05-17 23:59:59" < "2021-05-17 99"
+    if 'pasta' in f:
+        # a pasta e tudo dentro dela; \ e / valem igual, maiúsculas não importam (LIKE); só achados com caminho original
+        base = f['pasta'].replace(chr(92), '/').rstrip('/')
+        base = base.replace('!', '!!').replace('%', '!%').replace('_', '!_')
+        sql.append("REPLACE(caminho, char(92), '/') LIKE ? ESCAPE '!'"), p.append(base + '/%')
+    if 'busca' in f:
+        achado = '%' + f['busca'].replace('!', '!!').replace('%', '!%').replace('_', '!_') + '%'
+        sql.append("(nome LIKE ? ESCAPE '!' OR caminho LIKE ? ESCAPE '!')"), p.extend([achado, achado])
+    return ' AND '.join(sql), p
+
+
+def listar(store, job_id, f, ordem='nome', sentido='asc', pagina=1, por_pagina=POR_PAGINA_PADRAO):
+    """{total, pagina, por_pagina, itens, resumo:{por_grupo}}. O resumo ignora o filtro de grupo (são as abas)."""
+    if ordem not in ORDENS:
+        raise ErroFiltro('Ordem inválida: use %s.' % ', '.join(ORDENS))
+    if sentido not in ('asc', 'desc'):
+        raise ErroFiltro('Sentido inválido: use asc ou desc.')
+    if type(pagina) is not int or pagina < 1:
+        raise ErroFiltro('A página precisa ser um número a partir de 1.')
+    if type(por_pagina) is not int or not 1 <= por_pagina <= MAX_POR_PAGINA:
+        raise ErroFiltro('Itens por página: de 1 a %d.' % MAX_POR_PAGINA)
+    con = store._con()
+    onde, p = _onde(job_id, f)
+    total = con.execute('SELECT COUNT(*) FROM achados WHERE ' + onde, p).fetchone()[0]
+    d = sentido.upper()
+    ordenar = ORDENS[ordem] + ' ' + d
+    if ordem == 'data':
+        ordenar = 'data IS NULL, ' + ordenar               # sem data vai sempre para o fim
+    linhas = con.execute('SELECT * FROM achados WHERE %s ORDER BY %s, id %s LIMIT ? OFFSET ?' % (onde, ordenar, d),
+                         p + [por_pagina, (pagina - 1) * por_pagina]).fetchall()
+    onde_g, pg = _onde(job_id, f, sem_grupo=True)
+    por_grupo = {l['grupo'] or 'outro': l['n'] for l in con.execute(
+        'SELECT grupo, COUNT(*) AS n FROM achados WHERE %s GROUP BY grupo' % onde_g, pg)}
+    itens = []
+    for l in linhas:
+        a = como_dict(l)
+        a['previa'] = '/api/achados/%d/previa' % a['id']
+        itens.append(a)
+    tamanho_total = con.execute('SELECT COALESCE(SUM(tamanho),0) FROM achados WHERE ' + onde, p).fetchone()[0]
+    return {'total': total, 'pagina': pagina, 'por_pagina': por_pagina, 'itens': itens,
+            'resumo': {'por_grupo': por_grupo, 'tamanho_total': tamanho_total}}
+
+
+def ids_filtrados(store, job_id, f):
+    onde, p = _onde(job_id, f)
+    return [l[0] for l in store._con().execute('SELECT id FROM achados WHERE %s ORDER BY id' % onde, p)]
+
+
+def contar_do_job(store, job_id, ids):
+    """Quantos dos ids existem e pertencem ao job (ids sem repetição)."""
+    n = 0
+    for i in range(0, len(ids), 500):
+        parte = ids[i:i + 500]
+        n += store._con().execute('SELECT COUNT(*) FROM achados WHERE job_id=? AND id IN (%s)' % ','.join('?' * len(parte)),
+                                  [job_id] + parte).fetchone()[0]
+    return n

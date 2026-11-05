@@ -1,16 +1,25 @@
 # -*- coding: utf-8 -*-
 """Rotas dos achados (fase 5). O servico.py só chama `registrar(app, ctx)`.
 
-    GET /api/achados/<id>/previa    miniatura da foto (JPG, PNG, GIF, BMP até 2 MB, como estão) ou ícone do grupo
+    GET  /api/achados/<id>/previa    miniatura da foto (JPG, PNG, GIF, BMP até 2 MB, como estão) ou ícone do grupo
+    GET  /api/jobs/<id>/achados      lista filtrada, ordenada e paginada, com o resumo por grupo
+    POST /api/jobs/<id>/recuperar    cria o job `recuperar` com os achados escolhidos
+    POST /api/jobs/<id>/abrir        abre a pasta de destino de um job `recuperar` no Explorer (só Windows)
+    GET  /api/jobs/<id>/relatorio    o relatorio.html desse job
 """
+import os
 import re
 from xml.sax.saxutils import escape
 
-from flask import Response, jsonify
+from flask import Response, jsonify, request
 
 from . import achados, leitor
+from .jobs import DestinoEmUso
+from .tipos import recuperar as tipo_recuperar
 
 MAX_PREVIA = 2 * 1024 * 1024
+ID_JOB = re.compile(r'j-\d{8}-[0-9a-f]{4}')
+MAX_SELECIONADOS = 200000
 COR_GRUPO = {'foto': '#2f7d6d', 'video': '#7a4fa3', 'audio': '#b0701f', 'documento': '#2f5f9e',
              'compactado': '#8a6d1f', 'banco': '#5b6770', 'outro': '#6b6b6b'}
 ROTULO_GRUPO = {'foto': 'FOTO', 'video': 'VIDEO', 'audio': 'AUDIO', 'documento': 'DOC', 'compactado': 'PACOTE',
@@ -65,3 +74,121 @@ def registrar(app, ctx):
             if tipo:
                 return _resposta(dados, tipo)
         return _resposta(icone_svg(achado), 'image/svg+xml')
+
+    def job_de_varredura(job_id):
+        job = store.obter(job_id) if ID_JOB.fullmatch(job_id) else None
+        if job is None:
+            return None, _erro('Job não encontrado.', 404)
+        if job['tipo'] != 'varredura':
+            return None, _erro('Este trabalho não tem lista de arquivos achados.', 409)
+        return job, None
+
+    def inteiro(valor, padrao):
+        if valor is None or valor == '':
+            return padrao
+        try:
+            return int(valor)
+        except ValueError:
+            return None
+
+    @app.get('/api/jobs/<job_id>/achados')
+    def listar_achados(job_id):
+        job, erro = job_de_varredura(job_id)
+        if erro:
+            return erro
+        a = request.args
+        pagina, por_pagina = inteiro(a.get('pagina'), 1), inteiro(a.get('por_pagina'), achados.POR_PAGINA_PADRAO)
+        try:
+            filtros = achados.filtros_de({k: a.get(k) for k in ('grupo', 'tipo', 'estado', 'min', 'max', 'de', 'ate', 'pasta', 'busca')})
+            return jsonify(achados.listar(store, job_id, filtros, a.get('ordem') or 'nome', a.get('sentido') or 'asc',
+                                          pagina if pagina is not None else 0, por_pagina if por_pagina is not None else 0))
+        except achados.ErroFiltro as e:
+            return _erro(str(e), 400)
+
+    @app.post('/api/jobs/<job_id>/recuperar')
+    def recuperar(job_id):
+        job, erro = job_de_varredura(job_id)
+        if erro:
+            return erro
+        corpo = request.get_json(silent=True, force=True)
+        if not isinstance(corpo, dict):
+            return _erro('Pedido inválido: mande um JSON com ids (ou "todos") e destino.', 400)
+        destino = corpo.get('destino')
+        msg = tipo_recuperar.validar(job['origem'], destino)
+        if msg:
+            return _erro(msg, 400)
+        escolha = corpo.get('ids')
+        try:
+            if escolha == 'todos':
+                ids = achados.ids_filtrados(store, job_id, achados.filtros_de(corpo.get('filtros') or {}))
+            elif isinstance(escolha, list) and all(type(i) is int for i in escolha):
+                ids = list(dict.fromkeys(escolha))
+                if len(ids) > MAX_SELECIONADOS:
+                    return _erro('Arquivos demais num pedido só.', 400)
+                if ids and achados.contar_do_job(store, job_id, ids) != len(ids):
+                    return _erro('Algum arquivo escolhido não pertence a esta varredura.', 400)
+            else:
+                return _erro('Escolha os arquivos: ids (lista de números) ou "todos".', 400)
+        except achados.ErroFiltro as e:
+            return _erro(str(e), 400)
+        if not ids:
+            return _erro('Nenhum arquivo escolhido para recuperar.', 400)
+        try:
+            novo = store.criar('recuperar', job['origem'], destino, {'varredura': job_id, 'total': len(ids)})
+        except DestinoEmUso:
+            return _erro('Já existe um trabalho em andamento para esse destino.', 409)
+        store.salvar_checkpoint(novo['id'], {'ids': ids})          # antes de entrar na fila
+        store.evento(novo['id'], 'Pedido recebido: recuperar %d arquivos para %s.' % (len(ids), destino))
+        ctx.executor.submeter(novo['id'])
+        return jsonify(store.obter(novo['id'])), 201
+
+    def job_recuperar(job_id):
+        job = store.obter(job_id) if ID_JOB.fullmatch(job_id) else None
+        if job is None:
+            return None, _erro('Job não encontrado.', 404)
+        if job['tipo'] != 'recuperar':
+            return None, _erro('Este trabalho não é uma recuperação.', 409)
+        return job, None
+
+    @app.post('/api/jobs/<job_id>/abrir')
+    def abrir_pasta(job_id):
+        job, erro = job_recuperar(job_id)
+        if erro:
+            return erro
+        if not ctx.eh_windows:
+            return _erro('Abrir a pasta pelo programa só funciona no Windows. Abra a pasta pelo gerenciador de arquivos.', 409)
+        if not os.path.isdir(job['destino']):
+            return _erro('A pasta de destino ainda não existe.', 409)
+        try:
+            os.startfile(job['destino'])                 # o caminho vem do job gravado, nunca do pedido
+        except OSError as e:
+            return _erro('Não consegui abrir a pasta: %s' % (e.strerror or e), 409)
+        return jsonify({'ok': True})
+
+    def arquivo_relatorio(job):
+        cp = store.obter_checkpoint(job['id']) or {}
+        nome = next((n for n in cp.get('relatorio') or [] if n.endswith('.html')), None)
+        caminho = os.path.join(job['destino'], nome) if nome and nome == os.path.basename(nome) else None
+        return caminho if caminho and os.path.isfile(caminho) else None
+
+    @app.get('/api/jobs/<job_id>/relatorio')
+    def relatorio(job_id):
+        job, erro = job_recuperar(job_id)
+        if erro:
+            return erro
+        caminho = arquivo_relatorio(job)
+        if caminho is None:
+            return _erro('O relatório ainda não foi gerado.', 404)
+        with open(caminho, 'r', encoding='utf-8') as f:
+            pagina = f.read()
+        # a política do serviço não deixa estilo embutido: o CSS vem de uma rota própria
+        pagina = pagina.replace('<style>' + tipo_recuperar.CSS_RELATORIO + '</style>',
+                                '<link rel="stylesheet" href="/api/jobs/%s/relatorio.css">' % job_id)
+        return Response(pagina, mimetype='text/html')
+
+    @app.get('/api/jobs/<job_id>/relatorio.css')
+    def relatorio_css(job_id):
+        job, erro = job_recuperar(job_id)
+        if erro:
+            return erro
+        return Response(tipo_recuperar.CSS_RELATORIO, mimetype='text/css')

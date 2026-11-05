@@ -30,6 +30,7 @@ from .executor import ErroAcao, Executor
 from .jobs import DestinoEmUso, JobStore
 from .tipos import imagem
 from . import rotas_achados, rotas_particoes
+from .tipos import recuperar as tipo_recuperar
 from .tipos import varredura as tipo_varredura
 from .tipos import particoes as tipo_particoes
 
@@ -73,7 +74,7 @@ class Contexto:
         self.porta = config.porta()
         self.token = config.obter_token()
         self.store = JobStore(config.caminho_db())
-        self.executor = Executor(self.store, TIPOS)
+        self.executor = Executor(self.store, {**TIPOS, 'recuperar': tipo_recuperar})   # `recuperar` nasce só pela rota própria
         self.elevador = pedir_elevacao                   # injetável nos testes (ShellExecute falso)
         self.eh_windows = os.name == 'nt'
         self.provedor_fontes = provedor_fontes          # injetável nos testes; None = discos de verdade (só metadados)

@@ -81,3 +81,27 @@ Estado e pontuação: `bom` = estrutura inteira e coerente (100, ou 90 nos tipos
 ## Testes desta parte
 
 `testes/test_carving.py` (motor e validadores, imagens na memória), `testes/test_varredura.py` (job, FAT sintética de 8 MiB em `testes/fat_sintetica.py`, tabela de achados, prévia, queda do serviço). Os arquivos de exemplo vêm de `testes/amostras.py`. A "FAT32" da imagem sintética não é válida para o Windows (poucos clusters); o carving não a lê.
+
+## API de achados (5.3)
+
+`GET /api/jobs/<id>/achados?grupo=&tipo=&estado=&min=&max=&de=&ate=&busca=&ordem=&sentido=&pagina=&por_pagina=` (só jobs `varredura`; 404 se não existe, 409 se é de outro tipo). `grupo`, `tipo` e `estado` aceitam lista separada por vírgula. `min`/`max` em bytes; `de`/`ate` são datas `AAAA-MM-DD` e o dia final conta inteiro; `busca` procura no nome e no caminho original (sem diferenciar maiúsculas, `%` e `_` são texto). `ordem` = `nome` | `tamanho` | `data` | `tipo` (padrão `nome`), `sentido` = `asc` | `desc`; achado sem data vai sempre para o fim; desempate por id. `por_pagina` de 1 a 500 (padrão 50). Resposta: `{total, pagina, por_pagina, itens:[{...campos do contrato..., previa}], resumo:{por_grupo:{foto: n, ...}}}`. O `resumo` respeita todos os filtros **menos o de grupo**, para as abas mostrarem a contagem de cada grupo. Parâmetro inválido = 400 com frase em português.
+
+## Job `recuperar`
+
+`POST /api/jobs/<id_da_varredura>/recuperar` com `{"ids": [1,2,3] | "todos", "filtros": {...mesmos nomes acima...}, "destino": "<pasta>"}` → 201 com o job (`tipo: "recuperar"`, `origem` = a da varredura, `destino` = a pasta, `opcoes: {varredura, total}`). Com `"todos"` valem os `filtros` (a seleção é congelada na hora do pedido); com lista, só os ids (todos precisam ser dessa varredura). Recusas (400): destino vazio, arquivo, caminho de rede, a própria origem ou dentro dela; origem de disco/volume com destino no mesmo disco (`unidade.conferir`) ou sem como saber; nada escolhido; id de outra varredura. 409 se já há trabalho em andamento para o mesmo destino. Esse tipo só nasce por esta rota (`POST /api/jobs` com `tipo: "recuperar"` dá 400).
+
+- Cada achado vira `<destino>/<Fotos|Videos|Audios|Documentos|Compactados|Bancos de dados|Outros>/<nome>`. O nome é limpo (sem caminho, sem `<>:"/\|?*`, sem nome reservado do Windows) e, se já existir no destino ou for repetido, ganha ` (2)`, ` (3)`. Nada existente é sobrescrito.
+- Grava em `<arquivo>.parte` e renomeia só no fim. Leitura que falha vira zeros e o resultado fica `com trechos ilegíveis`; erro de escrita no destino falha o job (retomável). Os bytes lidos vêm de `achados.extents_de`, então achados da fase 4 funcionam.
+- Retomável: a lista de ids fica no checkpoint e o que cada achado virou na tabela `recuperacoes (job_id, achado_id, ordem, arquivo, resultado, bytes, sha256, quando)`. Pausar, cancelar, cair e retomar pula o que está `ok` e refaz o que ficou `copiando` (mesmo nome; se o arquivo já estiver lá idêntico, aceita).
+- Ao concluir cada arquivo, grava `achados.recuperado_em`.
+- No fim: `relatorio.html` e `relatorio.csv` (UTF-8 com BOM) no destino, com arquivo recuperado, nome, caminho original, grupo, tipo, estado, pontuação, tamanho, resultado e SHA-256. Se `relatorio.*` já existir (de outro trabalho), usa `relatorio-<id do job>.*`; nunca sobrescreve. Célula de planilha que começa com `= + - @` ganha `'` na frente; o HTML escapa tudo.
+- Testes: `testes/test_recuperar.py`.
+
+### Detalhes para o painel (5.4)
+
+- `pasta=<caminho>` em `/achados`: só os achados cujo `caminho` original está nessa pasta ou em subpastas (`\` e `/` valem igual, maiúsculas não importam; `C:/Fotos` não pega `C:/Fotos2`). Achados do carving não têm caminho e saem quando o filtro de pasta está ligado. É o filtro que a árvore da fase 4 usa.
+- `resumo` = `{por_grupo, tamanho_total}`. `por_grupo` ignora **só** o filtro de grupo (as abas não somem); `tamanho_total` é a soma dos bytes de tudo o que passa por **todos** os filtros (inclusive o de grupo), para avisar "não cabe no destino" antes de recuperar com `"todos"`.
+- `por_pagina` vai de 1 a 500 (100 vale). `tipo` vem em maiúsculas (`JPG`) e `data` como `AAAA-MM-DD` ou `AAAA-MM-DD hh:mm:ss`.
+- `ids: "todos"` só vale com os `filtros`; para "todos menos estes", mande a lista de ids (limite de 200000 por pedido).
+- `POST /api/jobs/<id_do_recuperar>/abrir`: abre a pasta de destino do job no Explorer (`os.startfile`; o caminho vem do job gravado, nunca do pedido). 409 fora do Windows, se a pasta ainda não existe ou se o job não é `recuperar`.
+- `GET /api/jobs/<id_do_recuperar>/relatorio`: serve o `relatorio.html` desse job (o nome certo fica no checkpoint, mesmo quando saiu como `relatorio-<id>.html`). O CSS embutido do arquivo é trocado por `<link>` para `/api/jobs/<id>/relatorio.css`, porque a política do serviço (`style-src 'self'`) não aceita estilo embutido; o arquivo salvo no destino continua autônomo. 404 antes de o relatório existir.

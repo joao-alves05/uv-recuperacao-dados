@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS achados (
     data TEXT, estado TEXT, offset INTEGER);
 CREATE INDEX IF NOT EXISTS ix_achados_job ON achados (job_id, id);
 CREATE TABLE IF NOT EXISTS checkpoints (job_id TEXT PRIMARY KEY, dados TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS recuperacoes (
+    job_id TEXT NOT NULL, achado_id INTEGER NOT NULL, ordem INTEGER NOT NULL, arquivo TEXT, resultado TEXT NOT NULL,
+    bytes INTEGER NOT NULL DEFAULT 0, sha256 TEXT, quando REAL, PRIMARY KEY (job_id, achado_id));
 '''
 
 
