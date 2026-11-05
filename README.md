@@ -42,6 +42,8 @@ Para ler um disco inteiro (`/dev/sdb`, `/dev/sr0`) é preciso ser root: `sudo py
 
 O Windows e o Linux só deixam um programa ler o **disco inteiro** (e não só os arquivos de uma pasta) para quem é administrador. Sem isso o programa só enxerga imagens e arquivos comuns, e avisa: "Para ler o disco inteiro, abra o programa como administrador". No Windows, dê dois cliques em `iniciar-admin.cmd` (ele pede a confirmação do Windows), ou use o botão de administrador do painel. Pedir administrador **não** dá ao programa o direito de gravar na origem: ele continua abrindo tudo só para leitura.
 
+**Segurança do modo administrador:** rode o programa de uma pasta que o usuário comum **não consegue gravar** (por exemplo dentro de `C:\Program Files`). Quem pode gravar na pasta do programa pode trocar o código que roda com poder de administrador. Por precaução, o programa também se recusa a gravar imagens, arquivos recuperados ou tabelas dentro das pastas do Windows, de programas, de inicialização automática e da própria pasta do programa.
+
 ## O princípio que não se negocia
 
 **O programa nunca escreve no dispositivo de origem.**

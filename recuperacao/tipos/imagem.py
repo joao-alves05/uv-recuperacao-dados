@@ -14,7 +14,7 @@ import re
 import secrets
 import time
 
-from .. import config, leitor, unidade
+from .. import config, leitor, protecao, unidade
 from ..executor import ErroJob
 from ..leitor import ErroLeitor
 
@@ -90,7 +90,7 @@ def validar(origem, destino, opcoes, retomada=False):
         return 'O limite de velocidade precisa ser um número de bytes por segundo (0 = sem limite).'
     if type(o['pular']) is not bool:
         return 'A opção "pular" precisa ser verdadeiro ou falso.'
-    erro = caminho_proibido(destino)
+    erro = caminho_proibido(destino) or protecao.destino_proibido(destino)
     if erro:
         return erro
     if leitor.eh_dispositivo(origem):

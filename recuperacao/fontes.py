@@ -63,8 +63,18 @@ def _texto(v, padrao=''):
 
 
 # --- Windows ---------------------------------------------------------------
+def _powershell():
+    """Caminho completo do PowerShell do sistema: o serviço pode estar elevado e não deve procurar no PATH."""
+    raiz = os.environ.get('SystemRoot') or os.environ.get('windir')
+    if os.name == 'nt' and raiz:
+        completo = os.path.join(raiz, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+        if os.path.isfile(completo):
+            return completo
+    return 'powershell'
+
+
 def _executar_powershell(script):
-    r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    r = subprocess.run([_powershell(), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
                        capture_output=True, timeout=LIMITE_SCRIPT_S, stdin=subprocess.DEVNULL,
                        creationflags=NO_WINDOW if os.name == 'nt' else 0)
     return r.stdout.decode('utf-8', 'replace')

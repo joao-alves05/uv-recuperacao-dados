@@ -16,7 +16,7 @@ import json
 import os
 import time
 
-from .. import config, leitor, particoes, unidade
+from .. import config, leitor, particoes, protecao, unidade
 from ..executor import ErroJob
 from ..leitor import ErroLeitor
 from . import imagem
@@ -53,7 +53,7 @@ def validar(origem, destino, opcoes, retomada=False):
         return 'O bloco da busca precisa ser um número entre %d e %d bytes, múltiplo de 4096.' % (BLOCO_MIN, BLOCO_MAX)
     if not destino.lower().endswith('.json') or len(destino) <= 5:
         return 'O destino precisa ser um arquivo com extensão .json.'
-    erro = imagem.caminho_proibido(destino)
+    erro = imagem.caminho_proibido(destino) or protecao.destino_proibido(destino)
     if erro:
         return erro
     pasta = os.path.dirname(os.path.abspath(destino))

@@ -16,7 +16,7 @@ import re
 import shutil
 import time
 
-from .. import achados, config, leitor, relatorio, setores_ruins, unidade
+from .. import achados, config, leitor, protecao, relatorio, setores_ruins, unidade
 from ..executor import ErroJob
 from ..leitor import ErroLeitor
 from . import imagem
@@ -53,7 +53,7 @@ def validar(origem, destino, opcoes=None, retomada=False):
         return 'Informe a origem.'
     if not isinstance(destino, str) or not destino.strip() or '\x00' in destino:
         return 'Informe a pasta de destino.'
-    erro = imagem.caminho_proibido(destino)
+    erro = imagem.caminho_proibido(destino) or protecao.destino_proibido(destino)
     if erro:
         return erro
     if os.path.isfile(destino):
