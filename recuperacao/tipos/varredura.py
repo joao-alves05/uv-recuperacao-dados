@@ -35,7 +35,7 @@ def destino_de(origem, destino=None):
 def opcoes_de(opcoes):
     o = opcoes or {}
     return {'modo': o.get('modo', MODO_PADRAO), 'bloco': o.get('bloco', carving.BLOCO_PADRAO),
-            'sistema_antes': o.get('sistema_antes', False)}
+            'sistema_antes': o.get('sistema_antes', False), 'offset': o.get('offset', 0), 'tamanho': o.get('tamanho')}
 
 
 def validar(origem, destino, opcoes, retomada=False):
@@ -54,12 +54,34 @@ def validar(origem, destino, opcoes, retomada=False):
     if leitor.eh_dispositivo(origem):
         if leitor.eh_optico(origem):
             return 'A leitura completa de CD/DVD chega numa versão futura. Por enquanto só discos, volumes e arquivos.'
-        return None
+        return _erro_fatia(o)                               # limites e setor: conferidos ao abrir o disco
     erro = imagem.caminho_proibido(origem)
     if erro:
         return erro
     if not os.path.isfile(origem):
         return 'A origem não existe ou não é um arquivo nem um disco.'
+    return _erro_fatia(o, os.path.getsize(origem))
+
+
+def _erro_fatia(o, total=None, setor=512):
+    """Frase de erro se `offset`/`tamanho` (bytes, para varrer só uma partição) não servem; None se ok. Com `total`
+    (tamanho da origem) confere os limites e o alinhamento ao setor."""
+    off, tam = o['offset'], o['tamanho']
+    for nome, v in (('offset', off), ('tamanho', tam)):
+        if v is not None and (type(v) is not int or v < 0):
+            return 'A opção "%s" precisa ser um número inteiro de bytes, 0 ou mais.' % nome
+    if tam == 0:
+        return 'A opção "tamanho" precisa ser maior que zero.'
+    if off == 0 and tam is None:
+        return None
+    if total is None:
+        return None
+    fim = total if tam is None else off + tam
+    if off >= total or fim > total:
+        return 'O trecho pedido (offset %d, tamanho %s) não cabe na origem, que tem %d bytes.' % (
+            off, 'até o fim' if tam is None else tam, total)
+    if off % setor or (fim != total and fim % setor):
+        return 'O offset e o tamanho precisam ser múltiplos do setor (%d bytes).' % setor
     return None
 
 
@@ -74,7 +96,7 @@ def _offsets_com_nome(store, job_id):
         'SELECT offset FROM achados WHERE job_id=? AND caminho IS NOT NULL AND tamanho > 0', (job_id,))}
 
 
-def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho):
+def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho, janela=None):
     """Lista os arquivos pelos sistemas de arquivos da origem (rápido, com nome e caminho, apagados incluídos) e grava
     em `achados`. Devolve 'pausado'/'cancelado' se parou no meio, ou None se terminou. O ponto de retomada é quantas
     entradas já foram consumidas (a ordem de `arquivos_sa.entradas` é fixa), então retomar não repete achado."""
@@ -82,7 +104,8 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho):
     ja = int(cp.get('feitos', 0)) if retomando else 0
     pulados = dict(cp.get('pulados') or {}) if retomando else {}
     try:
-        lista = arquivos_sa.volumes(aberto)
+        # janela = (offset, tamanho) de uma partição já escolhida: só o sistema de arquivos dela, sem ler a tabela do disco
+        lista = arquivos_sa.volumes(aberto, *janela) if janela else arquivos_sa.volumes(aberto)
     except OSError as e:
         raise ErroJob('Não consegui ler a origem para reconhecer o sistema de arquivos: %s' % e) from None
     if not lista:
@@ -106,7 +129,8 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho):
     def gravar():
         store.adicionar_achados(job_id, pendentes, checkpoint={
             'fase': 'sistema', 'feitos': est['n'], 'pulados': pulados, 'tamanho': tamanho, 'modo': op['modo'],
-            'ruins': 0, 'sistema_antes': op['sistema_antes']})
+            'ruins': 0, 'sistema_antes': op['sistema_antes'], 'offset': op.get('offset', 0),
+            'janela': janela[1] if janela else tamanho})
         pendentes.clear()
 
     antes, soma = {}, 0
@@ -175,14 +199,23 @@ def executar(job, ctrl):
         raise ErroJob(str(e)) from None
     with aberto:
         tamanho = aberto.tamanho
+        erro = _erro_fatia(op, tamanho, max(1, getattr(aberto, 'setor', 512)))
+        if erro:
+            raise ErroJob(erro)
+        fatia = None
+        if op['offset'] or op['tamanho'] is not None:        # só uma partição: o resto da origem nem é lido
+            fatia = carving.Fatia(aberto, op['offset'], tamanho - op['offset'] if op['tamanho'] is None else op['tamanho'])
+        alvo = fatia.tamanho if fatia else tamanho            # quantos bytes esta varredura percorre
         cp = store.obter_checkpoint(job_id)
         inicio, ruins = 0, 0
         if cp:
-            if cp.get('tamanho') != tamanho or cp.get('modo') != op['modo']:
+            if (cp.get('tamanho') != tamanho or cp.get('modo') != op['modo'] or cp.get('offset', 0) != op['offset']
+                    or cp.get('janela', alvo) != alvo):
                 raise ErroJob('A origem ou o modo mudaram desde que a varredura começou. Por segurança, nada foi alterado.')
         if op['modo'] == 'sistema' or op['sistema_antes']:
             if not cp or cp.get('fase') == 'sistema':        # a fase do sistema de arquivos vem antes do carving
-                resultado = _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho)
+                resultado = _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho,
+                                          (fatia.deslocamento, fatia.tamanho) if fatia else None)
                 if resultado or op['modo'] == 'sistema':
                     return resultado or 'concluido'
                 cp = None
@@ -190,9 +223,10 @@ def executar(job, ctrl):
             inicio, ruins = int(cp.get('pos', 0)), int(cp.get('ruins', 0))
             ctrl.evento('Retomando a varredura a partir do byte %d (%d arquivos já achados).' % (inicio, achados.contar(store, job_id)))
         else:
-            ctrl.evento('Varredura %s: %d bytes, %d tipos de arquivo.'
-                        % ('rápida' if op['modo'] == 'rapida' else 'profunda', tamanho, len(catalogo.assinaturas)))
-        varredor = carving.Varredor(aberto, catalogo, op['modo'], op['bloco'])
+            ctrl.evento('Varredura %s: %d bytes%s, %d tipos de arquivo.'
+                        % ('rápida' if op['modo'] == 'rapida' else 'profunda', alvo,
+                           ' (a partir do byte %d da origem)' % op['offset'] if fatia else '', len(catalogo.assinaturas)))
+        varredor = carving.Varredor(fatia or aberto, catalogo, op['modo'], op['bloco'])
         total = achados.contar(store, job_id)
         com_nome = _offsets_com_nome(store, job_id) if op['sistema_antes'] else set()
         repetidos = 0                                       # achados do carving que já estavam na lista com nome
@@ -203,13 +237,13 @@ def executar(job, ctrl):
         def gravar():
             store.adicionar_achados(job_id, pendentes, checkpoint={
                 'fase': 'carving', 'pos': est['pos'], 'tamanho': tamanho, 'modo': op['modo'], 'ruins': est['ruins'],
-                'sistema_antes': op['sistema_antes']})
+                'sistema_antes': op['sistema_antes'], 'offset': op.get('offset', 0), 'janela': alvo})
             pendentes.clear()
 
         def texto():
             return 'Procurando arquivos: %d achados' % total
 
-        ctrl.progresso(inicio, tamanho, texto(), ruins)
+        ctrl.progresso(inicio, alvo, texto(), ruins)
         for pos, novos, ruins_bloco in varredor.blocos(inicio):
             if com_nome and novos:
                 restam = [a for a in novos if a.get('offset') not in com_nome]
@@ -218,7 +252,7 @@ def executar(job, ctrl):
             pendentes.extend(novos)
             total += len(novos)
             est['pos'], est['ruins'] = pos, est['ruins'] + ruins_bloco
-            ctrl.progresso(pos, tamanho, texto(), est['ruins'])
+            ctrl.progresso(pos, alvo, texto(), est['ruins'])
             if novos:
                 gravar()                                    # o painel vê os achados enquanto a varredura anda
                 ctrl.checkpoint(None, forcar=True)
@@ -229,7 +263,7 @@ def executar(job, ctrl):
                 return 'cancelado' if ctrl.cancelamento_pedido() else 'pausado'
             if atraso:
                 time.sleep(atraso)
-        est['pos'] = tamanho
+        est['pos'] = alvo
         gravar()
     por_grupo = achados.contar_por_grupo(store, job_id)
     resumo = ', '.join('%d %s' % (n, NOMES_GRUPO.get(g, g)) for g, n in sorted(por_grupo.items(), key=lambda x: -x[1]))

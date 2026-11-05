@@ -154,10 +154,12 @@ MINIMO_SEGUNDO_PLANO = 64 * 1024 * 1024
 MAX_PROCESSOS = 3
 
 
-def _iniciar_trabalhador(caminho, cat_caminho, modo, setor, registro):
+def _iniciar_trabalhador(caminho, cat_caminho, modo, setor, desl, tam, registro):
     _W.leitor = leitor_mod.abrir(caminho)
     if registro is not None:
         registro.append(_W.leitor)
+    if desl or tam is not None:
+        _W.leitor = Fatia(_W.leitor, desl, tam)
     _W.cat = carregar(cat_caminho)
     _W.rapida = modo == 'rapida'
     _W.setor = setor
@@ -167,6 +169,24 @@ def _tarefa(pos, n, extra):
     dados, ruins = ler_com_zeros(_W.leitor, _W.setor, pos, n, extra)
     c = candidatos(dados, pos, n, _W.cat.grupos, _W.rapida, _W.setor)
     return {i: [s['_i'] for s in sigs] for i, sigs in c.items()}, ruins
+
+
+class Fatia:
+    """Uma janela [deslocamento, deslocamento+tamanho) da origem, vista como se fosse a origem inteira (para varrer só uma
+    partição). Só leitura: delega ao leitor de verdade. Os achados saem com o offset absoluto na origem."""
+
+    def __init__(self, base, deslocamento, tamanho):
+        self.base = base
+        self.deslocamento = deslocamento
+        self.tamanho = tamanho
+        self.setor = base.setor
+        self.caminho = getattr(base, 'caminho', None)
+
+    def ler(self, off, n):
+        if off < 0 or n < 0:
+            raise ValueError('offset e tamanho não podem ser negativos')
+        n = min(n, max(0, self.tamanho - off))
+        return self.base.ler(self.deslocamento + off, n) if n else b''
 
 
 class Varredor:
@@ -181,6 +201,7 @@ class Varredor:
         self.bloco = bloco
         self.setor = max(1, getattr(leitor, 'setor', 512))
         self.janela = validar.Janela(leitor)
+        self.deslocamento = getattr(leitor, 'deslocamento', 0)     # Fatia: onde a janela começa na origem
         self.livre = 0              # nada abaixo desta posição pode começar um achado (já está dentro de um)
         self.erros_validador = 0    # validador que levantou exceção (bug ou dado maluco): conta e segue
         self.trabalhadores = self._escolher(trabalhadores)
@@ -236,8 +257,8 @@ class Varredor:
 
     def _achado(self, inicio, a, r):
         ext = r.get('extensao') or a['extensao']
-        return {'nome': nome_gerado(inicio, ext), 'tipo': r.get('tipo') or a['tipo'], 'grupo': r.get('grupo') or a['grupo'],
-                'extensao': ext, 'tamanho': r['tamanho'], 'offset': inicio, 'estado': r['estado'],
+        return {'nome': nome_gerado(inicio + self.deslocamento, ext), 'tipo': r.get('tipo') or a['tipo'], 'grupo': r.get('grupo') or a['grupo'],
+                'extensao': ext, 'tamanho': r['tamanho'], 'offset': inicio + self.deslocamento, 'estado': r['estado'],
                 'pontuacao': r['pontuacao'], 'data': r.get('data'), 'largura': r.get('largura'),
                 'altura': r.get('altura'), 'apagado': None}
 
@@ -245,7 +266,8 @@ class Varredor:
     def _abrir_pool(self, abertos):
         if not self.trabalhadores:
             return None
-        args = (self.leitor.caminho, self.cat.caminho, self.modo, self.setor)
+        args = (self.leitor.caminho, self.cat.caminho, self.modo, self.setor, self.deslocamento,
+                self.leitor.tamanho if self.deslocamento or hasattr(self.leitor, 'base') else None)
         try:
             if self.modo == 'profunda':
                 pool = ProcessPoolExecutor(max_workers=self.trabalhadores, initializer=_iniciar_trabalhador,

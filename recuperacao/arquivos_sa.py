@@ -41,8 +41,16 @@ class VolumeAchado:
         return '%s%s' % (v.tipo, (' "%s"' % v.rotulo) if v.rotulo else '')
 
 
-def volumes(leitor):
-    """Sistemas de arquivos que a origem tem: um por partição reconhecida, ou o disco inteiro se não há tabela."""
+def volumes(leitor, inicio=None, tamanho=None):
+    """Sistemas de arquivos que a origem tem: um por partição reconhecida, ou o disco inteiro se não há tabela.
+    Com `inicio` (e `tamanho`), olha só o sistema de arquivos que começa ali (uma partição já escolhida), sem ler a
+    tabela de partições; os offsets continuam absolutos na origem."""
+    if inicio is not None:
+        try:
+            vol = sa.detectar(leitor, inicio, tamanho)
+        except (sa.ErroSA, OSError, ValueError):
+            vol = None
+        return [VolumeAchado(vol, '', 1)] if vol is not None else []
     try:
         tabela = particoes.analisar(leitor)['particoes']
     except (OSError, ValueError, KeyError):

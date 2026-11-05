@@ -211,6 +211,164 @@ class TestPedidoInvalido(BaseVarredura):
             self.assertIn('CD/DVD', varredura.validar('\\\\.\\CdRom0', None, None))
 
 
+class TestVarreduraDeUmaParticao(BaseVarredura):
+    MIB = 1 << 20
+
+    def imagem_com_duas_particoes(self):
+        jpg_a, png_b, jpg_fora = A.jpeg(semente=31), A.png(), A.jpeg(semente=32)
+        pdf_na_borda = A.pdf()
+        img = bytearray(8 * self.MIB)
+        img[1 * self.MIB + 4096:1 * self.MIB + 4096 + len(jpg_a)] = jpg_a
+        img[4 * self.MIB + 8192:4 * self.MIB + 8192 + len(png_b)] = png_b
+        img[7 * self.MIB:7 * self.MIB + len(jpg_fora)] = jpg_fora
+        borda = 3 * self.MIB - 200                                  # o fim da partição A corta este PDF
+        img[borda:borda + len(pdf_na_borda)] = pdf_na_borda
+        caminho = os.path.join(self.trabalho, 'disco.img')
+        with open(caminho, 'wb') as f:
+            f.write(img)
+        return caminho, jpg_a, png_b, jpg_fora
+
+    def test_so_acha_dentro_da_particao_com_offset_absoluto(self):
+        caminho, jpg_a, png_b, _ = self.imagem_com_duas_particoes()
+        for modo in ('rapida', 'profunda'):
+            job = self.varrer(caminho, modo, offset=self.MIB, tamanho=2 * self.MIB, bloco=65536)
+            fim = self.esperar_estado(job['id'], 'concluido')
+            lista = self.achados_do_banco(job['id'])
+            self.assertEqual([(a['tipo'], a['offset'], a['tamanho']) for a in lista if a['tipo'] == 'JPG'],
+                             [('JPG', self.MIB + 4096, len(jpg_a))], modo)
+            self.assertEqual(lista[0]['nome'], 'f%07d.jpg' % ((self.MIB + 4096) // 512))   # o nome usa o offset absoluto
+            for a in lista:
+                self.assertTrue(self.MIB <= a['offset'] and a['offset'] + a['tamanho'] <= 3 * self.MIB, a)
+            self.assertNotIn('PNG', [a['tipo'] for a in lista])
+            pdf = [a for a in lista if a['tipo'] == 'PDF']
+            self.assertTrue(all(a['estado'] != 'bom' for a in pdf))            # cortado pelo fim da partição
+            self.assertEqual(fim['progresso'], 1.0)
+        # a segunda partição, sem o tamanho: vai até o fim da origem e acha o PNG e o JPG de fora
+        job = self.varrer(caminho, 'rapida', offset=4 * self.MIB)
+        self.esperar_estado(job['id'], 'concluido')
+        self.assertEqual([(a['tipo'], a['offset']) for a in self.achados_do_banco(job['id'])],
+                         [('PNG', 4 * self.MIB + 8192), ('JPG', 7 * self.MIB)])
+
+    def test_com_segundo_plano_da_o_mesmo(self):
+        from recuperacao import carving, leitor
+        caminho, *_ = self.imagem_com_duas_particoes()
+        def rodar(n, modo):
+            with leitor.abrir(caminho) as l:
+                v = carving.Varredor(carving.Fatia(l, self.MIB, 2 * self.MIB), carving.carregar(), modo, 65536, n)
+                return [(a['offset'], a['tipo'], a['tamanho']) for _, novos, _ in v.blocos(0) for a in novos], v
+        for modo in ('rapida', 'profunda'):
+            base, _ = rodar(0, modo)
+            achados, v = rodar(2, modo)
+            self.assertNotEqual(v.segundo_plano, 'nenhum')
+            self.assertEqual(achados, base)
+            self.assertTrue(base and all(self.MIB <= o < 3 * self.MIB for o, _, _ in base))
+
+    def test_pedidos_invalidos_dao_400(self):
+        caminho, *_ = self.imagem_com_duas_particoes()
+        ruins = [dict(offset=-1), dict(offset='1'), dict(offset=True), dict(offset=1.5), dict(tamanho=0), dict(tamanho=-5),
+                 dict(tamanho='9'), dict(offset=100), dict(offset=self.MIB, tamanho=1000),
+                 dict(offset=9 * self.MIB), dict(offset=self.MIB, tamanho=8 * self.MIB), dict(tamanho=9 * self.MIB)]
+        for o in ruins:
+            r = self.req('POST', '/api/jobs', {'tipo': 'varredura', 'origem': caminho, 'opcoes': dict({'modo': 'rapida'}, **o)})
+            self.assertEqual(r.status_code, 400, o)
+            self.assertTrue(r.get_json()['erro'])
+        # o tamanho que chega exatamente ao fim da origem não precisa ser múltiplo do setor
+        pequeno = os.path.join(self.trabalho, 'quase.img')
+        with open(pequeno, 'wb') as f:
+            f.write(bytes(4096 + 100))
+        r = self.req('POST', '/api/jobs', {'tipo': 'varredura', 'origem': pequeno, 'opcoes': {'offset': 4096, 'tamanho': 100}})
+        self.assertEqual(r.status_code, 201, r.get_json())
+
+    def test_disco_so_confere_os_limites_ao_abrir(self):
+        disco = '\\\\.\\PhysicalDrive7'
+        self.assertIsNone(varredura.validar(disco, None, {'offset': 1 << 40, 'tamanho': 1 << 30}))
+        self.assertIn('inteiro', varredura.validar(disco, None, {'offset': 'x'}))
+
+    def disco_com_particao_fat(self):
+        """Disco de 40 MiB com a tabela de partições zerada e uma FAT32 (com nomes, um apagado) a partir de 2 MiB, mais
+        um JPG solto dentro da partição (sem entrada no diretório) e outros fora dela, antes e depois."""
+        import imagens_sa as im
+        self.jpg_vivo, self.pdf_apagado = A.jpeg(semente=41), A.pdf()
+        f = im.FatImg('FAT32')
+        f.mkdir('/', 'Fotos')
+        f.add('/Fotos', 'viva.jpg', self.jpg_vivo)
+        e, cs = f.add('/', 'apagado.pdf', self.pdf_apagado)
+        f.apagar(e, cs)
+        with open(f.gravar(os.path.join(self.trabalho, 'fat.img')), 'rb') as arq:
+            fat = bytearray(arq.read())
+        self.jpg_solto, self.jpg_antes, self.png_depois = A.jpeg(semente=42), A.jpeg(semente=43), A.png()
+        solto = len(fat) - 100 * 512                                   # área livre no fim da partição
+        fat[solto:solto + len(self.jpg_solto)] = self.jpg_solto
+        self.inicio, self.tam_fat = 2 * self.MIB, len(fat)
+        disco = bytearray(40 * self.MIB)
+        disco[self.inicio:self.inicio + len(fat)] = fat
+        disco[512 * 100:512 * 100 + len(self.jpg_antes)] = self.jpg_antes
+        fora = self.inicio + len(fat) + 512 * 64
+        disco[fora:fora + len(self.png_depois)] = self.png_depois
+        self.solto_abs = self.inicio + solto
+        caminho = os.path.join(self.trabalho, 'disco_sem_tabela.img')
+        with open(caminho, 'wb') as f_:
+            f_.write(disco)
+        return caminho
+
+    def test_ver_arquivos_da_particao_lista_com_nome_e_acha_os_soltos(self):
+        caminho = self.disco_com_particao_fat()
+        com_offset = dict(offset=self.inicio, tamanho=self.tam_fat)
+        # sem o offset, o disco não tem tabela nem sistema de arquivos no byte 0: o modo "sistema" não acha nada
+        job = self.varrer(caminho, 'sistema')
+        self.esperar_estado(job['id'], 'falhou')
+        job = self.varrer(caminho, 'rapida', sistema_antes=True, **com_offset)
+        fim = self.esperar_estado(job['id'], 'concluido')
+        self.assertEqual(fim['progresso'], 1.0)
+        lista = self.achados_do_banco(job['id'])
+        com_nome = {a['caminho']: a for a in lista if a['caminho']}
+        self.assertEqual(set(com_nome), {'/Fotos/viva.jpg', '/apagado.pdf'})
+        self.assertTrue(com_nome['/apagado.pdf']['apagado'])
+        for a in com_nome.values():
+            self.assertTrue(self.inicio <= a['offset'] and a['offset'] + a['tamanho'] <= self.inicio + self.tam_fat, a)
+        soltos = [a for a in lista if not a['caminho']]
+        self.assertEqual([(a['tipo'], a['offset'], a['tamanho']) for a in soltos],
+                         [('JPG', self.solto_abs, len(self.jpg_solto))])           # os de dentro com nome não repetem
+        with open(caminho, 'rb') as f:
+            img = f.read()
+        viva = com_nome['/Fotos/viva.jpg']
+        self.assertEqual(img[viva['offset']:viva['offset'] + viva['tamanho']], self.jpg_vivo)
+        self.assertEqual(img[com_nome['/apagado.pdf']['offset']:][:len(self.pdf_apagado)], self.pdf_apagado)
+        self.assertTrue(all(a['offset'] >= self.inicio for a in lista))
+        self.assertNotIn(512 * 100, [a['offset'] for a in lista])
+        # só a lista com nomes (modo "sistema") dentro da partição
+        job = self.varrer(caminho, 'sistema', **com_offset)
+        self.esperar_estado(job['id'], 'concluido')
+        self.assertEqual({a['caminho'] for a in self.achados_do_banco(job['id'])}, {'/Fotos/viva.jpg', '/apagado.pdf'})
+        # a partição errada (sem sistema de arquivos): sistema_antes segue para a busca por assinatura
+        job = self.varrer(caminho, 'profunda', sistema_antes=True, offset=self.inicio + self.tam_fat, tamanho=2 * self.MIB)
+        self.esperar_estado(job['id'], 'concluido')
+        self.assertEqual([a['tipo'] for a in self.achados_do_banco(job['id'])], ['PNG'])
+
+    def test_pausar_e_retomar_dentro_da_particao(self):
+        caminho, jpg_a, *_ = self.imagem_com_duas_particoes()
+        with mock.patch.dict(os.environ, {'RECDADOS_ATRASO_BLOCO': '0.05'}):
+            job = self.varrer(caminho, 'profunda', offset=self.MIB, tamanho=2 * self.MIB, bloco=65536)
+            esperar(lambda: self.req('GET', '/api/jobs/' + job['id']).get_json()['progresso'] > 0.2, 30, 0.02)
+            self.assertEqual(self.req('POST', '/api/jobs/%s/pausar' % job['id']).status_code, 200)
+            cp = self.ctx.store.obter_checkpoint(job['id'])
+            self.assertEqual((cp['offset'], cp['janela']), (self.MIB, 2 * self.MIB))
+            self.assertGreater(cp['pos'], 0)
+            self.assertEqual(self.req('POST', '/api/jobs/%s/retomar' % job['id']).status_code, 200)
+            self.esperar_estado(job['id'], 'concluido')
+        self.assertEqual(sum(1 for a in self.achados_do_banco(job['id']) if a['tipo'] == 'JPG'), 1)
+
+    def test_retomar_com_outra_particao_e_recusado(self):
+        caminho, *_ = self.imagem_com_duas_particoes()
+        job = self.varrer(caminho, 'rapida', offset=self.MIB, tamanho=2 * self.MIB)
+        self.esperar_estado(job['id'], 'concluido')
+        cp = self.ctx.store.obter_checkpoint(job['id'])
+        self.ctx.store.salvar_checkpoint(job['id'], dict(cp, offset=4 * self.MIB))
+        with self.assertRaises(Exception) as e:
+            varredura.executar(dict(self.ctx.store.obter(job['id'])), mock.Mock(store=self.ctx.store))
+        self.assertIn('mudaram', str(e.exception))
+
+
 class TestTabelaDeAchados(CasoComPasta):
     def setUp(self):
         super().setUp()
