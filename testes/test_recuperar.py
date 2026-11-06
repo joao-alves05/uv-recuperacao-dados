@@ -587,6 +587,110 @@ class TestRecuperar(BaseVarredura):
         self.addCleanup(store.fechar)
         self.assertIsNone(store._con().execute('SELECT motivo FROM recuperacoes').fetchone()[0])
 
+    def test_mensagem_final_diz_quantos_ficaram_zerados_ou_nao_gravaram(self):
+        import errno
+        origem = os.path.join(self.trabalho, 'o.img')
+        with open(origem, 'wb') as f:
+            f.write(b'0123456789')
+        job, _ = fazer_job_com_achados(self, [
+            a('ok.bin', 4, offset=0, grupo='outro'), a('z1.bin', 600, offset=100, grupo='outro'),
+            a('z2.bin', 100, offset=200, grupo='outro'), a('nao.bin', 4, offset=0, grupo='outro')], origem=origem)
+        original = recuperar._copiar
+
+        def copiar(aberto, achado, tmp, ctrl):
+            if achado['nome'] == 'nao.bin':
+                raise OSError(errno.ENOSPC, 'No space left on device')
+            return original(aberto, achado, tmp, ctrl)
+        self.destino = os.path.join(self.pasta, 'saida')
+        with mock.patch.object(recuperar, '_copiar', copiar):
+            r = self.recuperar(job)
+            fim = self.esperar_estado(r['id'], 'concluido')
+        self.assertEqual(fim['setores_ruins'], 3)                            # 600 bytes = 2 setores, 100 bytes = 1
+        self.assertEqual(fim['mensagem'], 'Concluído, com 3 setores que não foi possível ler. '
+                                          '2 arquivos ficaram com trechos zerados e 1 não foi gravado. Veja o relatório.')
+        # tudo certo: a mensagem continua simples
+        o2 = os.path.join(self.trabalho, 'o2.img')
+        with open(o2, 'wb') as f:
+            f.write(b'0123456789')
+        job2, _ = fazer_job_com_achados(self, [a('bom.bin', 4, offset=0, grupo='outro')], origem=o2)
+        r2 = self.recuperar(job2, {'ids': 'todos', 'destino': os.path.join(self.pasta, 'saida2')})
+        self.assertEqual(self.esperar_estado(r2['id'], 'concluido')['mensagem'], 'Concluído.')
+
+    def _atalho(self, alvo, onde):
+        """Cria um link (ou junção, no Windows) em `onde` apontando para `alvo`; pula o teste se o sistema não deixa."""
+        import subprocess
+        try:
+            if os.name == 'nt':
+                r = subprocess.run(['cmd', '/c', 'mklink', '/J', onde, alvo], capture_output=True)
+                if r.returncode != 0:
+                    self.skipTest('sem como criar junção')
+            else:
+                os.symlink(alvo, onde, target_is_directory=True)
+        except OSError:
+            self.skipTest('sem como criar link')
+
+    def _origem_com_dois(self):
+        origem = os.path.join(self.trabalho, 'o.img')
+        with open(origem, 'wb') as f:
+            f.write(b'0123456789')
+        return fazer_job_com_achados(self, [a('f1.jpg', 4, offset=0), a('d1.txt', 4, offset=4, grupo='documento')],
+                                     origem=origem)[0]
+
+    def test_pasta_de_grupo_que_e_atalho_e_recusada_e_nada_vaza_para_fora(self):
+        job = self._origem_com_dois()
+        self.destino = os.path.join(self.pasta, 'saida')
+        fora = os.path.join(self.pasta, 'fora')
+        os.makedirs(fora)
+        os.makedirs(self.destino)
+        self._atalho(fora, os.path.join(self.destino, 'Fotos'))              # alguém plantou "Fotos" como atalho
+        r = self.recuperar(job)
+        self.esperar_estado(r['id'], 'concluido')
+        self.assertEqual(os.listdir(fora), [])
+        res = {l['arquivo'].split('/')[0]: (l['resultado'], l['motivo']) for l in self.ctx.store._con().execute(
+            'SELECT arquivo, resultado, motivo FROM recuperacoes WHERE job_id=?', (r['id'],))}
+        self.assertEqual(res['Fotos'][0], 'falhou')
+        self.assertIn('atalho', res['Fotos'][1])
+        self.assertEqual(res['Documentos'][0], 'ok')                           # o resto do trabalho segue
+
+    def test_parte_plantado_como_link_nao_e_seguido(self):
+        job = self._origem_com_dois()
+        self.destino = os.path.join(self.pasta, 'saida')
+        alvo = os.path.join(self.pasta, 'alvo-do-link.bin')
+        with open(alvo, 'wb') as f:
+            f.write(b'NAO-MEXER')
+        pasta = os.path.join(self.destino, 'Fotos')
+        os.makedirs(pasta)
+        try:
+            os.symlink(alvo, os.path.join(pasta, 'f0000000.jpg.parte'))
+        except (OSError, NotImplementedError):
+            self.skipTest('sem como criar link de arquivo')
+        r = self.recuperar(job)
+        self.esperar_estado(r['id'], 'concluido')
+        with open(alvo, 'rb') as f:
+            self.assertEqual(f.read(), b'NAO-MEXER')                           # o link foi trocado, nunca seguido
+        self.assertEqual(ler(os.path.join(pasta, 'f0000000.jpg')), b'0123')
+
+    def test_copiar_cria_o_parte_so_se_nao_existir(self):
+        import errno
+        tmp = os.path.join(self.trabalho, 'x.parte')
+        origem = os.path.join(self.trabalho, 'o.img')
+        with open(origem, 'wb') as f:
+            f.write(b'0123456789')
+        from recuperacao import leitor
+        ctrl = mock.Mock()
+        ctrl.pausa_pedida.return_value = ctrl.cancelamento_pedido.return_value = False
+        with leitor.abrir(origem) as l:
+            with open(tmp, 'wb') as f:
+                f.write(b'sobra de queda')
+            self.assertEqual(recuperar._copiar(l, {'tamanho': 4, 'offset': 0}, tmp, ctrl)[0], 'ok')
+            self.assertEqual(ler(tmp), b'0123')
+            with mock.patch.object(recuperar, '_remover', lambda c: None):     # sem limpar: O_EXCL tem de recusar
+                with open(tmp, 'wb') as f:
+                    f.write(b'ja existe')
+                with self.assertRaises(FileExistsError):
+                    recuperar._copiar(l, {'tamanho': 4, 'offset': 0}, tmp, ctrl)
+            self.assertEqual(ler(tmp), b'ja existe')
+
     def test_o_tipo_recuperar_nao_nasce_pelo_post_de_jobs(self):
         r = self.req('POST', '/api/jobs', {'tipo': 'recuperar', 'origem': 'x', 'destino': 'y'})
         self.assertEqual(r.status_code, 400)
@@ -610,6 +714,22 @@ class TestNomeSeguro(unittest.TestCase):
         self.assertEqual(n('nul'), '_nul')
         self.assertEqual(n('  ...  '), 'arquivo')
         self.assertLessEqual(len(n('x' * 500 + '.jpg')), 140)
+
+    def test_nomes_de_dispositivo_com_espaco_antes_do_ponto_e_sobrescritos(self):
+        n = recuperar.nome_seguro
+        for ruim in ('NUL .txt', 'AUX .doc', 'COM1 .zip', 'com1  .zip', 'LPT9   .x', 'CON .', 'COM¹.txt', 'LPT²',
+                     'COM³ .a', 'ＣＯＮ.txt', 'PRN.tar.gz', 'conin$'):
+            self.assertTrue(n(ruim).startswith('_'), (ruim, n(ruim)))
+        for bom in ('COM10.txt', 'nulo.txt', 'console.log', 'AUXILIAR.doc', 'COM.txt'):
+            self.assertEqual(n(bom), bom)
+
+    def test_nome_nunca_termina_em_espaco_ou_ponto_nem_depois_de_cortar(self):
+        n = recuperar.nome_seguro
+        self.assertEqual(n('a.txt '), 'a.txt')
+        self.assertEqual(n('x' * 119 + ' .ab' + 'c' * 20), 'x' * 119 + ' .ab' + 'c' * 9)
+        cortado = n('y' * 200 + '.ex t   ')
+        self.assertFalse(cortado.endswith((' ', '.')), repr(cortado))
+        self.assertFalse(n('z' * 130 + '. . . ').endswith((' ', '.')))
 
 
 if __name__ == '__main__':

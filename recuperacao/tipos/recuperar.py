@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import time
+import unicodedata
 
 from .. import achados, config, leitor, protecao, relatorio, setores_ruins, unidade
 from ..executor import ErroJob
@@ -71,13 +72,33 @@ def validar(origem, destino, opcoes=None, retomada=False):
     return None
 
 
+def _reservado(base):
+    """Nome de dispositivo do Windows? Compara só até o primeiro ponto, ignora espaços antes do ponto ('NUL .txt') e
+    trata COM¹/LPT¹ (sobrescrito) e letras de largura total como os números e letras comuns (NFKC)."""
+    nome = unicodedata.normalize('NFKC', base.split('.')[0]).rstrip(' ').upper()
+    return nome in imagem.NOMES_RESERVADOS
+
+
 def nome_seguro(nome):
-    """Nome de arquivo que o Windows e o Linux aceitam, sem caminho."""
-    nome = _PROIBIDOS.sub('_', str(nome).replace('\\', '/').rsplit('/', 1)[-1]).strip(' .') or 'arquivo'
+    """Nome de arquivo que o Windows e o Linux aceitam, sem caminho, sem nome de dispositivo e sem espaço ou ponto no fim."""
+    nome = _PROIBIDOS.sub('_', str(nome).replace(chr(92), '/').rsplit('/', 1)[-1]).strip(' .') or 'arquivo'
     base, ext = os.path.splitext(nome)
-    if base.split('.')[0].upper() in imagem.NOMES_RESERVADOS:
+    if _reservado(base):
         base = '_' + base
-    return base[:MAX_NOME] + ext[:12]
+    return (base[:MAX_NOME] + ext[:12]).rstrip(' .') or 'arquivo'
+
+
+_REPARSE = 0x400
+
+
+def eh_atalho(caminho):
+    """Link simbólico ou ponto de reanálise (junção, no Windows): a pasta aponta para outro lugar."""
+    try:
+        if os.path.islink(caminho):
+            return True
+        return bool(getattr(os.lstat(caminho), 'st_file_attributes', 0) & _REPARSE)
+    except OSError:
+        return False
 
 
 def nome_unico(pasta, nome, usados):
@@ -96,7 +117,9 @@ def _copiar(aberto, achado, tmp, ctrl):
     feitos = 0
     ruins = getattr(aberto, 'ruins', None) or []         # faixas não lidas do mapa da imagem (fase 6)
     aberto.lacunas_do_arquivo = perdidos = []            # [(deslocamento no arquivo, bytes)] que são zeros por falta de leitura
-    with open(tmp, 'wb') as saida:
+    _remover(tmp)                                          # sobra de uma queda nossa (nome reservado a este achado)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0), 0o666)   # nunca segue link plantado
+    with os.fdopen(fd, 'wb') as saida:
         falta = achado['tamanho']
         for off, n in achados.extents_de(achado):
             while n > 0 and falta > 0:
@@ -168,7 +191,10 @@ def executar(job, ctrl):
             ctrl.evento('Atenção: o destino tem %s livres e faltam gravar %s; alguns arquivos podem falhar por falta de espaço.'
                         % (_tam(livre), _tam(total - feitos)))
         falhas = 0
-        ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (sum(pronto(l) for l in linhas.values()), len(ids)))
+        setor = max(1, getattr(aberto, 'setor', 512))
+        ruins_total = int((cp or {}).get('ruins', 0))            # setores zerados por falta de leitura, de todas as execuções
+        ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (sum(pronto(l) for l in linhas.values()), len(ids)),
+                       ruins_total)
         for ordem, achado_id in enumerate(ids):
             if ctrl.cancelamento_pedido():
                 return 'cancelado'
@@ -196,6 +222,8 @@ def executar(job, ctrl):
             tmp = final + '.parte'
             try:
                 os.makedirs(os.path.dirname(final), exist_ok=True)
+                if eh_atalho(os.path.dirname(final)):
+                    raise OSError(0, 'a pasta %s é um atalho (link ou junção): recusada' % pasta_rel)
                 r = _copiar(aberto, achado, tmp, ctrl)
                 if isinstance(r, str):
                     _remover(tmp)
@@ -222,7 +250,7 @@ def executar(job, ctrl):
                             "WHERE job_id=? AND achado_id=?", (motivo, time.time(), job_id, achado_id))
                 ctrl.evento('Não consegui gravar %s: %s' % (rel, motivo))
                 falhas += 1
-                ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (ordem + 1, len(ids)))
+                ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (ordem + 1, len(ids)), ruins_total)
                 continue
             agora = time.time()
             con.execute('BEGIN IMMEDIATE')
@@ -244,14 +272,31 @@ def executar(job, ctrl):
             ctrl.log('%s: %s, %d bytes, achado %d (bytes %s da origem), sha256 %s.' % (
                 rel, resultado, n, achado_id, ' + '.join('%d..%d' % (o, o + c) for o, c in achados.extents_de(achado)[:20]), sha))
             feitos += n
-            ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (ordem + 1, len(ids)))
-            ctrl.checkpoint(None)
+            ruins_total += sum(-(-c // setor) for _, c in aberto.lacunas_do_arquivo)
+            ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (ordem + 1, len(ids)), ruins_total)
+            ctrl.checkpoint(lambda: store.salvar_checkpoint(job_id, dict(store.obter_checkpoint(job_id) or {}, ruins=ruins_total)))
             if config.atraso_bloco():
                 time.sleep(config.atraso_bloco())          # só para os testes
     nomes = escrever_relatorio(store, job)
-    store.salvar_checkpoint(job_id, dict(store.obter_checkpoint(job_id) or {}, relatorio=nomes))
+    store.salvar_checkpoint(job_id, dict(store.obter_checkpoint(job_id) or {}, relatorio=nomes, ruins=ruins_total))
     if falhas:
         ctrl.evento('%d arquivos não puderam ser gravados (veja o motivo no relatório). Peça de novo para tentar só esses.' % falhas)
+    # o resultado do trabalho todo (também de execuções anteriores) vai na mensagem final: nunca só "Concluído."
+    contagem = {l['resultado']: l['n'] for l in con.execute(
+        'SELECT resultado, COUNT(*) AS n FROM recuperacoes WHERE job_id=? GROUP BY resultado', (job_id,))}
+    avisos = []
+    def _n(n, um, varios):
+        return '%d %s' % (n, um if n == 1 else varios)
+    if contagem.get('com_falhas'):
+        avisos.append(_n(contagem['com_falhas'], 'arquivo ficou com trechos zerados', 'arquivos ficaram com trechos zerados'))
+    if contagem.get('falhou'):
+        avisos.append(_n(contagem['falhou'], 'não foi gravado', 'não foram gravados'))
+    if contagem.get('sumiu'):
+        avisos.append(_n(contagem['sumiu'], 'achado não foi encontrado', 'achados não foram encontrados'))
+    if avisos:
+        ctrl.aviso_final = ' e '.join(avisos) + '. Veja o relatório.'
+    ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (len(ids), len(ids)), ruins_total)
+    ctrl.checkpoint(None, forcar=True)                   # grava já o progresso final, com os setores zerados
     ctrl.evento('Recuperação concluída. Relatório: %s.' % ', '.join(nomes))
     return 'concluido'
 
