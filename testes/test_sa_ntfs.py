@@ -12,6 +12,7 @@ from recuperacao import sa
 from recuperacao.sa import ntfs as mod_ntfs
 from recuperacao.sa import ErroSA
 from recuperacao.sa.base import epoch
+from limite import com_limite
 from test_sa_fat import conteudo, sha
 
 
@@ -181,6 +182,81 @@ class TestMftEmLotes(CasoComPasta):
         f.add_file(5, 'normal.txt', conteudo(100, 2))
         saida, _, _ = self.varrer(f.gravar(os.path.join(self.pasta, 'o.img')), pedaco=8 * 1024)
         self.assertEqual(sorted(c for c, _, _, _ in saida), ['/[perdidos]/orfao.txt', '/normal.txt'])
+
+
+class TestNtfsHostil(CasoComPasta):
+    """Data runs e $Bitmap de disco hostil: nada de laço sem fim, offset negativo nem exceção solta."""
+
+    def listar(self, f, nome='h.img'):
+        caminho = f.gravar(os.path.join(self.pasta, nome))
+
+        def tudo():
+            with leitor_mod.abrir(caminho) as l:
+                vol = sa.detectar(l)
+                return {e.nome: e for e in vol.varrer()}
+        return com_limite(tudo)
+
+    def hostil(self, sem_bitmap):
+        f = nt.NtfsImg()
+        f.sem_bitmap = sem_bitmap
+        # 1 cluster de verdade (arquivo de 1 KiB) e depois um run de 2**40 clusters que o tamanho nem alcança
+        n = f.add_file(5, 'apagado hostil.bin', conteudo(1000, 1), runs_forcadas=[(500, 1), (600, 2 ** 40)])
+        f.apagar(n)
+        return f
+
+    def test_run_gigante_alem_do_tamanho_sem_bitmap_nao_trava(self):
+        e = self.listar(self.hostil(sem_bitmap=True))['apagado hostil.bin']
+        self.assertTrue(e.apagado)
+        self.assertEqual(len(e.runs), 1)
+        self.assertIn('sem $Bitmap', e.nota)
+
+    def test_run_gigante_alem_do_tamanho_com_bitmap_nao_trava(self):
+        e = self.listar(self.hostil(sem_bitmap=False))['apagado hostil.bin']
+        self.assertEqual((e.estado, len(e.runs)), ('bom', 1))
+
+    def test_run_gigante_dentro_do_tamanho_e_recusado_sem_demora(self):
+        f = nt.NtfsImg()
+        f.sem_bitmap = True
+        f.apagar(f.add_file(5, 'enorme.bin', b'x' * 1000, runs_forcadas=[(500, 2 ** 40)]))
+        e = self.listar(f)['enorme.bin']
+        self.assertEqual((e.estado, e.runs), ('ruim', []))
+
+    def test_lcn_negativo_nao_vira_offset_negativo(self):
+        f = nt.NtfsImg()
+        f.add_file(5, 'negativo.bin', b'x' * 1000, runs_forcadas=[(-5, 1)])
+        e = self.listar(f)['negativo.bin']
+        self.assertEqual((e.estado, e.runs), ('ruim', []))
+        self.assertIn('fora do volume', e.nota)
+
+    def test_bitmap_apontando_para_fora_do_volume_nao_dispara_indexerror(self):
+        f = nt.NtfsImg()
+        f.add_file(5, 'x.bin', b'x' * 10)
+        caminho = f.gravar(os.path.join(self.pasta, 'b.img'))
+        with leitor_mod.abrir(caminho) as l:
+            vol = sa.detectar(l)
+            vol._bitmap = [(0, 10 ** 9, vol.tamanho)]               # a página do bitmap começa exatamente no fim
+            self.assertIsNone(vol._bit_ocupado(0))
+            vol._bitmap = [(0, 10 ** 9, vol.tamanho + 8192)]
+            self.assertIsNone(vol._bit_ocupado(0))
+
+    def test_soma_das_faixas_maior_que_o_volume_sai_ruim(self):
+        f = nt.NtfsImg()
+        # 3 runs de 1000 clusters sobrepostos: cada um cabe no volume (2000 clusters), a soma (3 MB) não
+        f.add_file(5, 'sobreposto.bin', b'x' * (3000 * 1024), runs_forcadas=[(500, 1000), (500, 1000), (500, 1000)])
+        f.add_file(5, 'normal.bin', b'y' * 1000)
+        r = self.listar(f)
+        self.assertEqual((r['sobreposto.bin'].estado, r['sobreposto.bin'].runs), ('ruim', []))
+        self.assertEqual(r['normal.bin'].estado, 'bom')
+
+    def test_teto_de_clusters_conferidos(self):
+        f = nt.NtfsImg()
+        f.apagar(f.add_file(5, 'grande.bin', b'x' * (50 * 1024), runs_forcadas=[(500, 50)]))
+        import unittest.mock as m
+        chamadas = []
+        original = mod_ntfs.Ntfs._bit_ocupado
+        with m.patch.object(mod_ntfs, 'MAX_CLUSTERS_CONFERIDOS', 10),                 m.patch.object(mod_ntfs.Ntfs, '_bit_ocupado', lambda self_, c: chamadas.append(c) or original(self_, c)):
+            self.listar(f)
+        self.assertLessEqual(len(chamadas), 10)
 
 
 if __name__ == '__main__':

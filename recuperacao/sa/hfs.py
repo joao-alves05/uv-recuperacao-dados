@@ -136,6 +136,8 @@ class Hfs(Volume):
         """Gera (tipo do nó, [bytes de cada registro]) de um nó."""
         b = self._ler_fork(extents, no_n * self.no_tam, self.no_tam)
         flink, _blink, kind, _alt, nreg = struct.unpack_from('>IIbBH', b, 0)
+        if 14 + 2 * (nreg + 1) > self.no_tam:                  # a tabela de offsets nem caberia no nó
+            raise ErroSA('Nó %d do catálogo com %d registros: inválido' % (no_n, nreg))
         offs = [struct.unpack_from('>H', b, self.no_tam - 2 * (i + 1))[0] for i in range(nreg + 1)]
         recs = []
         for i in range(nreg):
@@ -230,6 +232,7 @@ class Hfs(Volume):
             memo[r['id']] = e.caminho
             return e
         self._dados(e, r)
+        self.conferir_tamanho(e)
         return e
 
     def _dados(self, e, r):
@@ -329,9 +332,8 @@ class Hfs(Volume):
                     pendentes = restantes
                 if self.ao_ler and lidos % 16 == 0:
                     self.ao_ler(min(1.0, lidos / max(1, self.total_nos)))
-        except (OSError, ErroSA) as erro:
-            if not lidos:
-                raise ErroSA('Não consegui ler o catálogo HFS+: %s' % erro) from None
+        except (OSError, ErroSA) as erro:                    # o que já saiu fica; quem lista marca a lista como incompleta
+            raise ErroSA('O catálogo HFS+ ficou ilegível depois de %d nós: %s' % (lidos, erro)) from None
         for r in pendentes:
             e = self._entrada(r, pastas, memo, True)
             if e is not None and e is not _ADIAR:

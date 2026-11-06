@@ -13,14 +13,16 @@ htree é lido como pasta linear (os blocos de folha têm o mesmo formato).
 """
 import struct
 
-from .base import ErroSA, Entrada, Volume, MAX_PROFUNDIDADE, juntar, limpar_nome
+from .base import ErroSA, ErroTeto, Entrada, Volume, MAX_PROFUNDIDADE, juntar, limpar_nome
 
 MAGIC = 0xEF53
 RAIZ = 2
 F_EXTENTS = 0x80000
 F_INLINE = 0x10000000
 INC_FILETYPE, INC_EXTENTS, INC_64BIT, INC_FLEX = 0x2, 0x40, 0x80, 0x200
-MAX_BLOCOS_MAPA = 1 << 22         # 4 Mi blocos mapeados por arquivo (4 GiB com blocos de 1 KiB)
+MAX_NOS_EXTENTS = 256                 # nós da árvore de extents visitados por arquivo
+MAX_EXTENTS = 100000                 # extents (e entradas de índice) vistos por arquivo
+MAX_BLOCOS_MAPA = 1 << 20         # arquivo com mapa de blocos (ext2/3) acima disto (1 GiB com blocos de 1 KiB) sai ruim
 
 
 def _super(b):
@@ -102,15 +104,22 @@ class Ext(Volume):
         return self._ler(n * self.bs, self.bs)
 
     # ---- mapa de blocos --------------------------------------------------------------------------------------
-    def _extents(self, dados, prof=0):
+    def _extents(self, dados, prof=0, cont=None):
         """Folhas da árvore de extents em `dados` (cabeçalho + entradas): [(bloco lógico, físico ou None, quantidade)].
         Físico None = extent não inicializado: o conteúdo é zero."""
         if len(dados) < 12 or struct.unpack_from('<H', dados, 0)[0] != 0xF30A or prof > 5:
             raise ErroSA('árvore de extents inválida')
+        cont = cont if cont is not None else {'nos': 0, 'ext': 0}     # contadores compartilhados pela árvore toda
+        cont['nos'] += 1
+        if cont['nos'] > MAX_NOS_EXTENTS:
+            raise ErroTeto('árvore de extents com nós demais')
         n, _, profundidade = struct.unpack_from('<HHH', dados, 2)
         out = []
         for k in range(min(n, (len(dados) - 12) // 12)):
             e = dados[12 + 12 * k: 24 + 12 * k]
+            cont['ext'] += 1
+            if cont['ext'] > MAX_EXTENTS:
+                raise ErroTeto('árvore de extents com extents demais')
             if profundidade == 0:
                 bl, ln, hi, lo = struct.unpack('<IHHI', e)
                 if ln > 32768:                               # extent não inicializado (fallocate): lê como zeros, e o
@@ -119,7 +128,7 @@ class Ext(Volume):
                     out.append((bl, (hi << 32) | lo, ln))
             else:
                 bl, lo, hi = struct.unpack_from('<IIH', e, 0)
-                out += self._extents(self._bloco((hi << 32) | lo), prof + 1)
+                out += self._extents(self._bloco((hi << 32) | lo), prof + 1, cont)
         return out
 
     def _ponteiros(self, bloco, nivel, saida, limite):
@@ -157,7 +166,9 @@ class Ext(Volume):
             return fis
         ptrs = list(struct.unpack('<15I', iblock))
         lista = ptrs[:12]
-        topo = min(nb, MAX_BLOCOS_MAPA)
+        if nb > MAX_BLOCOS_MAPA:
+            raise ErroTeto('arquivo com mais de %d blocos mapeados' % MAX_BLOCOS_MAPA)
+        topo = nb
         for nivel, p in enumerate(ptrs[12:], 1):
             if len(lista) >= topo:
                 break
@@ -195,6 +206,9 @@ class Ext(Volume):
             return
         try:
             fis = self._mapa(ino_dados, tam)
+        except ErroTeto as e:
+            ent.estado, ent.nota, ent.runs = 'ruim', 'estrutura grande demais para ler (%s); inode danificado?' % e, []
+            return
         except (ErroSA, OSError, struct.error):
             fis = []
         if apagado and (tam == 0 or not any(p for p, _ in fis)):
@@ -246,6 +260,7 @@ class Ext(Volume):
         return ent, d
 
     def _ler_pasta(self, ino_dados):
+        self._avisar()
         tam = struct.unpack_from('<I', ino_dados, 4)[0]
         if tam > (64 << 20):
             raise ErroSA('pasta grande demais')

@@ -95,7 +95,8 @@ class HfsImg:
         self.n_pastas += 1
         return i
 
-    def add_file(self, pai, nome, dados, fragmentos=1, sem_overflow=False, comprimido=False, simbolico=False):
+    def add_file(self, pai, nome, dados, fragmentos=1, sem_overflow=False, comprimido=False, simbolico=False,
+                 extents_forcados=None, tamanho_forcado=None):
         i = self.prox_id
         self.prox_id += 1
         n = max(1, -(-len(dados) // BS)) if dados else 0
@@ -107,12 +108,14 @@ class HfsImg:
             self.escritas.append((ini * BS, dados[pos * BS:(pos + q) * BS].ljust(q * BS, b'\0')))
             extents.append((ini, q))
             pos += q
+        if extents_forcados is not None:                           # extents escolhidos a dedo (arquivo hostil), sem gravar dados
+            extents = list(extents_forcados)
         r = bytearray(248)
         struct.pack_into('>hHII', r, 0, 2, 0, 0, i)
         r[12:28] = struct.pack('>IIII', DATA_MAC, DATA_MAC, DATA_MAC, DATA_MAC)
         r[41] = 0x20 if comprimido else 0
         struct.pack_into('>H', r, 42, 0o120755 if simbolico else 0o100644)
-        r[88:168] = _fork(len(dados), extents)
+        r[88:168] = _fork(tamanho_forcado or len(dados), extents)
         self.cat.append((pai, nome, i, False, bytes(r)))
         self.n_arquivos += 1
         if len(extents) > 8 and not sem_overflow:

@@ -18,6 +18,7 @@ RAIZ = 5
 PRIMEIRO_USUARIO = 24
 PERDIDOS = '/[perdidos]'
 MAX_RUNS = 100000
+MAX_CLUSTERS_CONFERIDOS = 1 << 20      # no máximo isto de clusters conferidos no $Bitmap por arquivo
 PEDACO_MFT = 4 << 20                    # bytes da MFT lidos de cada vez
 _ADIAR = object()
 
@@ -183,12 +184,15 @@ class Ntfs(Volume):
         for ini, fim, runs_off in self._bitmap:
             if ini <= pos < fim:
                 pg = (runs_off + pos - ini) // 4096
-                d = self._pg.get(pg)
-                if d is None:
-                    if len(self._pg) > 256:
-                        self._pg.clear()
-                    d = self._pg[pg] = self._ler(pg * 4096, min(4096, self.tamanho - pg * 4096))
-                return bool(d[runs_off + pos - ini - pg * 4096] >> (c % 8) & 1)
+                try:
+                    d = self._pg.get(pg)
+                    if d is None:
+                        if len(self._pg) > 256:
+                            self._pg.clear()
+                        d = self._pg[pg] = self._ler(pg * 4096, min(4096, self.tamanho - pg * 4096))
+                    return bool(d[runs_off + pos - ini - pg * 4096] >> (c % 8) & 1)
+                except (IndexError, ErroSA):                 # $Bitmap aponta para fora do volume: não sabemos
+                    return None
         return None
 
     # ---- varredura ------------------------------------------------------------------------------------------
@@ -275,6 +279,7 @@ class Ntfs(Volume):
                     criado=i['criado'], modificado=i['modif'], acessado=i['acess'], ident=i['n'])
         if not i['dir']:
             self._dados(e, i)
+            self.conferir_tamanho(e)
         return e
 
     def varrer(self):
@@ -353,24 +358,35 @@ class Ntfs(Volume):
             if i['lista']:
                 e.estado, e.nota = 'parcial', 'dados em registro de extensão ($ATTRIBUTE_LIST), não seguido'
             return
-        runs, falta = [], i['tam']
+        runs, falta, validas = [], i['tam'], []
         for lcn, cl in i['runs'] or []:
             if falta <= 0:
                 break
             n = min(cl * self.csize, falta)
-            if lcn is not None and (lcn + cl) > self.nclusters:
+            if lcn is not None and (lcn < 0 or (lcn + cl) > self.nclusters):
                 e.estado, e.nota = 'ruim', 'data run fora do volume'
+                e.runs = []
                 return
             runs.append((None if lcn is None else self.inicio + lcn * self.csize, n))
+            validas.append((lcn, -(-n // self.csize)))       # só os clusters que de fato pertencem ao arquivo
             falta -= n
         e.runs = runs
         if falta > 0:
             e.estado, e.nota = 'parcial', 'data runs não cobrem o tamanho'
             return
         if e.apagado and e.tamanho:
+            usados, restante = False, MAX_CLUSTERS_CONFERIDOS
             try:
-                usados = any(self._bit_ocupado(c) for lcn, cl in i['runs'] if lcn is not None
-                             for c in range(lcn, lcn + cl))
+                for lcn, cl in validas:
+                    if lcn is None:
+                        continue
+                    cl = min(cl, restante)
+                    if any(self._bit_ocupado(c) for c in range(lcn, lcn + cl)):
+                        usados = True
+                        break
+                    restante -= cl
+                    if restante <= 0:
+                        break
             except OSError:
                 usados = False
             if usados:

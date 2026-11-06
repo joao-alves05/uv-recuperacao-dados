@@ -11,6 +11,7 @@ import struct
 from .base import ErroSA, Entrada, Volume, MAX_PROFUNDIDADE, epoch, juntar, limpar_nome
 
 MAX_PASTA = 64 << 20
+MAX_CLUSTERS_CONFERIDOS = 1 << 20      # no máximo isto de clusters conferidos no bitmap por arquivo apagado
 
 
 def _parametros(b):
@@ -126,6 +127,7 @@ class ExFat(Volume):
         return bool(d[off + i // 8 - pg * 4096] >> (i % 8) & 1)
 
     def _ler_pasta(self, primeiro, contiguo, nbytes):
+        self._avisar()
         runs, _ = self._cadeia(primeiro, contiguo, nbytes if contiguo else None)
         partes, total = [], 0
         for o, n in runs:
@@ -202,8 +204,7 @@ class ExFat(Volume):
             elif apag:
                 ent.nota = 'recuperado assumindo clusters contíguos'
                 n = -(-tam // self.csize)
-                usados = [self._ocupado(c) for c in range(cl, cl + n)]
-                if any(usados):
+                if any(self._ocupado(c) for c in range(cl, cl + min(n, MAX_CLUSTERS_CONFERIDOS))):
                     ent.estado, ent.nota = 'parcial', 'clusters já reutilizados por outro arquivo'
                 elif self.bitmap is None:
                     ent.nota += ' (sem bitmap de alocação para conferir)'

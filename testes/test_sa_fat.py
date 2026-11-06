@@ -202,6 +202,41 @@ class TestExFat(Base):
         self.assertEqual((e.apagado, sha(b)), (True, sha(d['filho'])))
 
 
+class TestExFatTetos(Base):
+    def montar(self):
+        f = im.ExFatImg()
+        e, cs = f.add('/', 'apagado grande.bin', conteudo(60 * 1024, 1))
+        f.apagar(e, cs)
+        f.add('/', 'ocupou.bin', conteudo(1024, 2), cluster=cs[1])           # reaproveita o 2º cluster
+        return f.gravar(os.path.join(self.pasta, 'ex.img'))
+
+    def espiao(self, teto=None):
+        import unittest.mock as m
+        from recuperacao.sa import exfat as mod
+        chamadas = []
+        original = mod.ExFat._ocupado
+        patches = [m.patch.object(mod.ExFat, '_ocupado', lambda self_, c: chamadas.append(c) or original(self_, c))]
+        if teto:
+            patches.append(m.patch.object(mod, 'MAX_CLUSTERS_CONFERIDOS', teto))
+        with patches[0]:
+            if teto:
+                with patches[1]:
+                    r = self.varrer(self.montar())
+            else:
+                r = self.varrer(self.montar())
+        return r, chamadas
+
+    def test_confere_o_bitmap_so_ate_achar_o_primeiro_reuso(self):
+        r, chamadas = self.espiao()
+        self.assertEqual(r['/apagado grande.bin'][0].estado, 'parcial')
+        self.assertLessEqual(len(chamadas), 2)
+
+    def test_teto_de_clusters_conferidos(self):
+        r, chamadas = self.espiao(teto=1)
+        self.assertEqual(len(chamadas), 1)
+        self.assertEqual(r['/apagado grande.bin'][0].estado, 'bom')         # além do teto não conferimos
+
+
 class TestRobustez(Base):
     def test_nao_e_fat_nem_exfat(self):
         caminho = os.path.join(self.pasta, 'lixo.img')

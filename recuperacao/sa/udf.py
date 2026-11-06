@@ -14,10 +14,11 @@ metadados (UDF 2.50+, Blu-ray), ICB indireto, fluxos nomeados, ACL e atributos e
 """
 import struct
 
-from .base import ErroSA, Entrada, Volume, MAX_PROFUNDIDADE, epoch, juntar, limpar_nome
+from .base import ErroSA, ErroTeto, Entrada, Volume, MAX_PROFUNDIDADE, epoch, juntar, limpar_nome
 
 SETOR = 2048
 MAX_DIR = 64 << 20
+MAX_TOTAL_PASTAS = 256 << 20            # bytes de pastas lidos numa varredura (pastas que se sobrepõem não viram bomba)
 MAX_ANCORAS = 64
 LIMITACAO = ('UDF: sem partição virtual (VAT), esparsa ou de metadados, sem ICB indireto, fluxos nomeados e ACL.')
 
@@ -290,6 +291,7 @@ class Udf(Volume):
         return bytes(out)
 
     def varrer(self):
+        self._lidos_pastas = 0
         try:
             yield from self._pasta(self._raiz, '/', 0, {self._raiz})
         except OSError as e:
@@ -299,6 +301,10 @@ class Udf(Volume):
         r = self._ler_icb(lbn)
         if r['tipo'] != 4 or r['info'] > MAX_DIR:
             raise ErroSA('A pasta UDF no bloco %d é inválida.' % lbn)
+        self._lidos_pastas += r['info']
+        if self._lidos_pastas > MAX_TOTAL_PASTAS:
+            raise ErroTeto('pastas com mais de %d MiB lidos no total (pastas sobrepostas?)' % (MAX_TOTAL_PASTAS >> 20))
+        self._avisar(min(1.0, self._lidos_pastas / max(1, self.tamanho)))
         dados = self._conteudo(r)
         off = 0
         while off + 38 <= len(dados):
@@ -333,10 +339,13 @@ class Udf(Volume):
                         ent.estado, ent.nota = 'parcial', 'a imagem termina antes do fim do arquivo'
             if ent.apagado:
                 ent.estado, ent.nota = 'parcial', 'marcado como apagado no UDF; o conteúdo pode ter sido reutilizado'
+            self.conferir_tamanho(ent)
             yield ent
             if eh_dir and not ent.apagado and icb_lbn not in vistos and nivel < MAX_PROFUNDIDADE:
                 vistos.add(icb_lbn)
                 try:
                     yield from self._pasta(icb_lbn, ent.caminho, nivel + 1, vistos)
+                except ErroTeto:
+                    raise
                 except (ErroSA, OSError):
                     continue

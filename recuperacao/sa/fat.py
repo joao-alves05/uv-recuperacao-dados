@@ -159,6 +159,7 @@ class Fat(Volume):
 
     # ---- diretórios ------------------------------------------------------------------------------------------
     def _dados_pasta(self, primeiro, apagada):
+        self._avisar()
         if primeiro == 0 and self.tipo != 'FAT32':           # raiz fixa de FAT12/16
             return self._ler((self.reservados + self.nfats * self.fatsz) * self.bps, self.raiz_setores * self.bps)
         if not apagada:

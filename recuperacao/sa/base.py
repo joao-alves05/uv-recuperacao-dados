@@ -19,6 +19,10 @@ class ErroSA(Exception):
     """Estrutura do sistema de arquivos ilegível ou fora do que sabemos ler; a mensagem já vem em português."""
 
 
+class ErroTeto(ErroSA):
+    """Estrutura que passa do teto de trabalho que aceitamos (árvore enorme, laço, disco hostil): o arquivo sai `ruim`."""
+
+
 @dataclass
 class Entrada:
     nome: str
@@ -73,6 +77,7 @@ class Volume:
     tipo = ''
     rotulo = ''
     limitacao = ''
+    ao_ler = None           # callback(fração) que quem lista instala: chamado a cada pasta lida; pode levantar exceção
     ilegiveis = 0           # setores que não deu para ler ao montar a lista (o resto da lista segue sem eles)
 
     def __init__(self, leitor, inicio=0, tamanho=None):
@@ -85,6 +90,21 @@ class Volume:
         if off < 0 or n < 0 or off + n > self.tamanho:
             raise ErroSA('leitura fora do volume (%d+%d)' % (off, n))
         return self.leitor.ler(self.inicio + off, n)
+
+    def conferir_tamanho(self, ent):
+        """Arquivo cujo tamanho, ou cuja soma de faixas, passa do que o volume comporta é estrutura hostil ou danificada:
+        sai `ruim` e sem faixas (ninguém copia isso). Sparse legítimo pode passar do volume, por isso o tamanho lógico só
+        é recusado acima de 4 vezes o volume (como no ext)."""
+        if ent.eh_dir or ent.estado == 'ruim':
+            return
+        reais = sum(n for o, n in ent.runs if o is not None)
+        if ent.tamanho > 4 * self.tamanho or reais > self.tamanho:
+            ent.estado, ent.runs = 'ruim', []
+            ent.nota = 'tamanho incoerente com o volume (estrutura danificada?)'
+
+    def _avisar(self, fracao=0.0):
+        if self.ao_ler:
+            self.ao_ler(fracao)
 
     def varrer(self):
         raise NotImplementedError

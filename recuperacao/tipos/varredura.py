@@ -12,6 +12,7 @@ só serve para impedir duas varreduras da mesma origem ao mesmo tempo.
 """
 import hashlib
 import os
+import struct
 import time
 
 from .. import achados, arquivos_sa, carving, config, leitor
@@ -87,7 +88,8 @@ def _erro_fatia(o, total=None, setor=512):
 
 MOTIVOS = {'sem_conteudo': 'arquivos apagados só com o nome (o sistema de arquivos apagou os ponteiros do conteúdo, '
                            'como ext3 e ext4 fazem; a busca por assinatura pode achar o conteúdo)',
-           'esparso': 'arquivos esparsos (com buracos), que a lista ainda não representa'}
+           'esparso': 'arquivos esparsos (com buracos), que a lista ainda não representa',
+           'invalido': 'arquivos com posição inválida no disco (estrutura danificada)'}
 
 
 def _offsets_com_nome(store, job_id):
@@ -178,7 +180,7 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho, janela=None, res
         gravar()
         ctrl.checkpoint(None, forcar=True)
         return 'cancelado' if ctrl.cancelamento_pedido() else 'pausado'
-    except (arquivos_sa.sa.ErroSA, OSError) as e:
+    except (arquivos_sa.sa.ErroSA, OSError, struct.error, IndexError, ValueError) as e:   # disco hostil/estrutura quebrada
         resultado['incompleta'] = 'a leitura parou no meio (%s)' % e
         ctrl.evento('A lista pelo sistema de arquivos parou: %s' % e)
     ilegiveis = sum(va.volume.ilegiveis for va in lista)

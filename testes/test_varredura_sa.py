@@ -12,6 +12,7 @@ from urllib.parse import quote
 import amostras as A
 import imagens_ext as ie
 import imagens_hfs as ih
+import imagens_iso as ii
 import imagens_ntfs as nt
 import imagens_sa as im
 from auxiliar import sha256_de
@@ -321,11 +322,62 @@ class TestListaIncompleta(Base):
         self.assertIn('o disco sumiu', fim['mensagem'])
         self.assertEqual(len(self.lista(job['id'])), 2)
 
+    def test_excecoes_de_estrutura_quebrada_viram_lista_incompleta_e_nao_job_falhado(self):
+        import struct
+        for exc in (struct.error('unpack requires a buffer'), IndexError('fora'), ValueError('negativo')):
+            chamadas = []
+            original = mod_ntfs.Ntfs._montar
+
+            def quebra(self_, *a, _exc=exc, **k):
+                chamadas.append(1)
+                if len(chamadas) == 3:
+                    raise _exc
+                return original(self_, *a, **k)
+            with mock.patch.object(mod_ntfs.Ntfs, '_montar', quebra):
+                job = self.varrer(self.imagem(), 'sistema', **{})
+                fim = self.esperar_estado(job['id'], 'concluido')
+            self.assertIn('ficou incompleta', fim['mensagem'], repr(exc))
+            os.remove(os.path.join(self.trabalho, 'ntfs.img'))
+            self.assertEqual(len(self.lista(job['id'])), 2, repr(exc))
+
+    def test_offset_negativo_nunca_vira_achado(self):
+        from recuperacao import arquivos_sa
+        from recuperacao.sa.base import Entrada
+        e = Entrada(nome='x.bin', caminho='/x.bin', tamanho=100, runs=[(-4096, 100)])
+        self.assertEqual(arquivos_sa.achado_de(e), (None, 'invalido'))
+        e = Entrada(nome='x.bin', caminho='/x.bin', tamanho=200, runs=[(4096, 100), (-1, 100)])
+        self.assertEqual(arquivos_sa.achado_de(e), (None, 'invalido'))
+        e = Entrada(nome='x.bin', caminho='/x.bin', tamanho=100, runs=[(0, 100)])
+        self.assertIsNotNone(arquivos_sa.achado_de(e)[0])
+
     def test_lista_inteira_continua_dizendo_apenas_concluido(self):
         job = self.varrer(self.imagem(), 'sistema')
         fim = self.esperar_estado(job['id'], 'concluido')
         self.assertEqual((fim['mensagem'], fim['setores_ruins']), ('Concluído.', 0))
         self.assertEqual(len(self.lista(job['id'])), 6)
+
+
+class TestPausaPorPasta(Base):
+    def test_pausa_vista_ao_ler_cada_pasta_do_iso_e_retoma_sem_repetir(self):
+        f = ii.IsoImg(joliet=False)
+        for i in range(4):
+            f.add_dir('/', 'D%d' % i)
+            f.add_file('/D%d' % i, 'arq%d.txt' % i, conteudo(100 + i, i), curto='ARQ%d.TXT;1' % i)
+        caminho = f.gravar(os.path.join(self.trabalho, 'p.iso'))
+        store = self.ctx.store
+        job = store.criar('varredura', caminho, 'varredura#iso', {'modo': 'sistema'})['id']
+        op = {'modo': 'sistema', 'bloco': 1, 'sistema_antes': False}
+        ctrl = mock.Mock(store=store)
+        ctrl.cancelamento_pedido.return_value = False
+        ctrl.pausa_pedida.side_effect = [True]                    # logo na 1ª pasta lida
+        with leitor_mod.abrir(caminho) as l:
+            self.assertEqual(varredura._fase_sistema(ctrl, store, job, l, op, None, l.tamanho), 'pausado')
+            self.assertEqual(self.lista(job), [])
+            cp = store.obter_checkpoint(job)
+            ctrl.pausa_pedida.side_effect = None
+            ctrl.pausa_pedida.return_value = False
+            self.assertIsNone(varredura._fase_sistema(ctrl, store, job, l, op, cp, l.tamanho))
+        self.assertEqual(len(self.lista(job)), 4)
 
 
 class TestRetomada(Base):
@@ -349,7 +401,7 @@ class TestRetomada(Base):
         self.assertEqual(len(esperado), 23)
         parcial = novo_job('b')
         with mock.patch.object(varredura, 'LOTE_SISTEMA', 5), leitor_mod.abrir(caminho) as l:
-            ctrl.pausa_pedida.side_effect = [True]
+            ctrl.pausa_pedida.side_effect = [False, True]            # a 1ª consulta é ao ler a pasta raiz; a 2ª, no fim do 1º lote
             self.assertEqual(varredura._fase_sistema(ctrl, store, parcial, l, op, None, l.tamanho), 'pausado')
             cp = store.obter_checkpoint(parcial)
             self.assertEqual(cp['fase'], 'sistema')

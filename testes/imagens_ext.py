@@ -128,6 +128,28 @@ class ExtImg:
         self.pastas[pai]['ents'].append([ino, nome, 1, False])
         return ino
 
+    def add_file_arvore_hostil(self, pai, nome, tam=10 * BS):
+        """ext4 hostil: árvore de extents de 5 níveis em que cada nó aponta 84 vezes para o mesmo filho (um DAG que, lido
+        como árvore, tem ~84**4 visitas). Só para provar que o leitor tem teto."""
+        assert self.eh_ext4
+        ino = self.prox_ino
+        self.prox_ino += 1
+        dados = self._blocos(1)[0]
+        folha = self._blocos(1)[0]
+        self._escreve_bloco(folha, struct.pack('<HHHHI', 0xF30A, 84, 84, 0, 0) +
+                            b''.join(struct.pack('<IHHI', k, 1, 0, dados) for k in range(84)))
+        filho = folha
+        for nivel in range(1, 5):
+            no = self._blocos(1)[0]
+            self._escreve_bloco(no, struct.pack('<HHHHI', 0xF30A, 84, 84, nivel, 0) +
+                                b''.join(struct.pack('<IIHH', k, filho, 0, 0) for k in range(84)))
+            filho = no
+        raiz = struct.pack('<HHHHI', 0xF30A, 4, 4, 5, 0) + b''.join(struct.pack('<IIHH', k, filho, 0, 0) for k in range(4))
+        self.blocos_de[ino] = [dados]
+        self.inodes[ino] = self._inode(0x8000 | 0o644, tam, 1, 0x80000, raiz)
+        self.pastas[pai]['ents'].append([ino, nome, 1, False])
+        return ino
+
     def mkdir(self, pai, nome):
         ino = self.prox_ino
         self.prox_ino += 1

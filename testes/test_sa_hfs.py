@@ -112,6 +112,40 @@ class TestHfs(Base):
             list(vol.varrer())
             self.assertEqual(fr[-1], 1.0)
 
+    def test_numero_de_registros_absurdo_no_no_vira_erro_do_sa_e_nao_struct_error(self):
+        caminho = self.montar()
+        with open(caminho, 'r+b') as g:
+            g.seek(3 * ih.BS + 1 * ih.NO + 10)                    # numRecords do 1º nó-folha
+            g.write(bytes([0xFF, 0xFF]))
+        with leitor_mod.abrir(caminho) as l:
+            vol = sa.detectar(l)
+            self.assertIsInstance(vol, hfs.Hfs)
+            with self.assertRaises(ErroSA):
+                list(vol.varrer())
+
+    def test_no_ruim_no_meio_entrega_o_que_leu_e_depois_avisa_com_erro(self):
+        caminho = self.montar()
+        with open(caminho, 'r+b') as g:
+            g.seek(3 * ih.BS + 3 * ih.NO + 10)                    # 3º nó-folha
+            g.write(bytes([0xFF, 0xFF]))
+        with leitor_mod.abrir(caminho) as l:
+            vol = sa.detectar(l)
+            lidas = []
+            with self.assertRaises(ErroSA) as r:
+                for e in vol.varrer():
+                    lidas.append(e.caminho)
+            self.assertTrue(lidas, 'o que veio antes do nó ruim precisa sair')
+            self.assertIn('ilegível', str(r.exception))
+
+    def test_extents_sobrepostos_que_somam_mais_que_o_volume_saem_ruins(self):
+        f = ih.HfsImg()
+        # 8 extents de 100 blocos (cada um cabe nos 300 do volume), soma 3,2 MB > 1,2 MB do volume
+        f.add_file(2, 'sobreposto.bin', b'x', extents_forcados=[(10, 100)] * 8, tamanho_forcado=8 * 100 * ih.BS)
+        f.add_file(2, 'normal.bin', conteudo(500, 1))
+        r = self.varrer(f.gravar(os.path.join(self.pasta, 'h.img')))
+        self.assertEqual((r['/sobreposto.bin'][0].estado, r['/sobreposto.bin'][0].runs), ('ruim', []))
+        self.assertEqual(r['/normal.bin'][0].estado, 'bom')
+
     def test_imagem_corrompida_nao_derruba(self):
         base = self.montar()
         with open(base, 'rb') as g:

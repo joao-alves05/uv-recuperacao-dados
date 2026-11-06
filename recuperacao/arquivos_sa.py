@@ -99,12 +99,15 @@ def _data(*candidatas):
 
 def achado_de(e, prefixo=''):
     """Entrada de `sa/` -> (dict do contrato de achados, None) ou (None, motivo) quando não dá para recuperar:
-    `pasta`, `sem_conteudo` (nome sem bytes recuperáveis, p.ex. ext3/ext4 apagado) ou `esparso` (tem buraco)."""
+    `pasta`, `sem_conteudo` (nome sem bytes recuperáveis, p.ex. ext3/ext4 apagado), `esparso` (tem buraco) ou
+    `invalido` (posição negativa)."""
     if e.eh_dir:
         return None, 'pasta'
     runs = [(o, n) for o, n in e.runs if n > 0]
     if any(o is None for o, _ in runs):
         return None, 'esparso'
+    if any(o < 0 for o, _ in runs):
+        return None, 'invalido'                              # offset negativo: estrutura danificada, nada a ler
     cobre = sum(n for _, n in runs)
     if cobre == 0 and (e.tamanho > 0 or e.estado == 'ruim'):
         return None, 'sem_conteudo'

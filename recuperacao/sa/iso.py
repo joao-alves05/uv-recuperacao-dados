@@ -8,10 +8,11 @@ links e permissões; El Torito não é lido; só um volume por imagem; UDF fica 
 """
 import struct
 
-from .base import ErroSA, Entrada, Volume, MAX_PROFUNDIDADE, epoch, juntar, limpar_nome
+from .base import ErroSA, ErroTeto, Entrada, Volume, MAX_PROFUNDIDADE, epoch, juntar, limpar_nome
 
 SETOR = 2048
 MAX_PASTA = 64 << 20
+MAX_TOTAL_PASTAS = 256 << 20            # bytes de pastas lidos numa varredura (pastas que se sobrepõem não viram bomba)
 
 
 def _descritores(leitor, inicio):
@@ -133,6 +134,10 @@ class Iso(Volume):
     def _ler_extent(self, lba, tam):
         if tam > MAX_PASTA:
             raise ErroSA('pasta grande demais')
+        self._lidos_pastas += tam
+        if self._lidos_pastas > MAX_TOTAL_PASTAS:
+            raise ErroTeto('pastas com mais de %d MiB lidos no total (pastas sobrepostas?)' % (MAX_TOTAL_PASTAS >> 20))
+        self._avisar(min(1.0, self._lidos_pastas / max(1, self.tamanho)))
         return self._ler(lba * self.bloco, tam)
 
     def _pasta(self, dados, pai, nivel, vistos):
@@ -156,6 +161,8 @@ class Iso(Volume):
                 ent = pendente
                 ent.tamanho += tam
                 ent.runs.append((self.inicio + lba * self.bloco, tam))
+                if self.inicio + lba * self.bloco + tam > self.inicio + self.tamanho and ent.estado == 'bom':
+                    ent.estado, ent.nota = 'parcial', 'a imagem termina antes do fim do arquivo'
             else:
                 ent = Entrada(nome=nome, caminho=juntar(pai, nome), eh_dir=eh_dir, tamanho=0 if eh_dir else tam,
                               modificado=data, criado=data, ident=lba)
@@ -167,16 +174,20 @@ class Iso(Volume):
                 pendente = ent
                 continue
             pendente = None
+            self.conferir_tamanho(ent)
             yield ent
             if eh_dir and lba not in vistos and nivel < MAX_PROFUNDIDADE:
                 vistos.add(lba)
                 try:
                     sub = self._ler_extent(lba, tam)
+                except ErroTeto:
+                    raise
                 except (OSError, ErroSA):
                     continue
                 yield from self._pasta(sub, ent.caminho, nivel + 1, vistos)
 
     def varrer(self):
+        self._lidos_pastas = 0
         lba = struct.unpack_from('<I', self._raiz, 2)[0]
         tam = struct.unpack_from('<I', self._raiz, 10)[0]
         try:

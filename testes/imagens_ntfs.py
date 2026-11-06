@@ -106,12 +106,17 @@ class NtfsImg:
         self.registros[n] = self._registro(n, 3, [self._si(), self._fn(pai, nome, 0x10000000, 1)])
         return n
 
-    def add_file(self, pai, nome, dados, fragmentos=1, lcn=None, nome_dos=None, flags_dados=0):
+    def add_file(self, pai, nome, dados, fragmentos=1, lcn=None, nome_dos=None, flags_dados=0, runs_forcadas=None):
         n = self._novo_reg()
         attrs = [self._si(), self._fn(pai, nome, 0, 1, len(dados))]
         if nome_dos:                                      # nome 8.3 (namespace DOS) vem DEPOIS no registro e não deve ganhar
             attrs.insert(1, self._fn(pai, nome_dos, 0, 2, len(dados)))
         runs = []
+        if runs_forcadas is not None:                       # data runs escolhidos a dedo (arquivo hostil), sem gravar dados
+            attrs.append(self._attr_nres(0x80, runs_forcadas, len(dados)))
+            self.registros[n] = self._registro(n, 1, attrs)
+            self.runs_de[n] = []
+            return n
         if len(dados) <= 600 and fragmentos == 1 and lcn is None and not flags_dados:
             attrs.append(self._attr_res(0x80, dados))
         else:
@@ -144,7 +149,8 @@ class NtfsImg:
         bm = bytearray((self.nclusters + 7) // 8)
         for c in self.bits:
             bm[c // 8] |= 1 << (c % 8)
-        self.registros[6] = self._registro(6, 1, [self._attr_nres(0x80, [(self.bitmap_cluster, 1)], len(bm))])
+        self.registros[6] = self._registro(6, 1, [] if getattr(self, 'sem_bitmap', False) else
+                                           [self._attr_nres(0x80, [(self.bitmap_cluster, 1)], len(bm))])
         itens.append((self.bitmap_cluster * self.CS, bytes(bm).ljust(self.CS, b'\0')))
         self.registros[0] = self._registro(0, 1, [self._attr_nres(0x80, self.mft_runs, self.nreg * self.REG)])
         pos = 0
