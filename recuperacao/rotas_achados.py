@@ -69,7 +69,7 @@ def registrar(app, ctx):
         antiga = conferidas.get(job['id'])
         if antiga and agora - antiga[0] < TTL_CONFERENCIA:
             return antiga[1]
-        erro = identidade.conferir(job['origem'], guardada)
+        erro = identidade.conferir(job['origem'], guardada, lambda m: store.evento(job['id'], m))
         conferidas[job['id']] = (agora, erro)
         return erro
 

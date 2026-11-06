@@ -270,7 +270,8 @@ class Executor:
                 raise ErroAcao(409, 'Não dá para retomar: o job está %s.' % NOME_ESTADO.get(job['estado'], job['estado']))
             if self._parando:
                 raise ErroAcao(409, 'O serviço está sendo desligado.')
-            mudou = identidade.conferir(job['origem'], identidade.da_origem_do_job(self.store, job))
+            mudou = identidade.conferir(job['origem'], identidade.da_origem_do_job(self.store, job),
+                                        lambda m: self.store.evento(job_id, m))
             if mudou:
                 raise ErroAcao(409, mudou)           # outro disco no mesmo caminho: não retoma por cima
             if not self.store.transicao(job_id, ('pausado', 'interrompido'), 'na_fila', mensagem='Na fila para retomar.',

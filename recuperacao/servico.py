@@ -301,11 +301,14 @@ def criar_app(ctx=None):
         if tipo in ('imagem', 'varredura'):
             impressao = identidade.impressao(origem)          # para saber depois se a origem ainda é esta
             opcoes = dict(opcoes, impressao_origem=impressao) if impressao else {k: v for k, v in opcoes.items() if k != 'impressao_origem'}
+            sem_identidade = not identidade.completa(impressao)
         try:
             job = store.criar(tipo, origem, destino, opcoes)
         except DestinoEmUso:
             return _erro(em_uso, 409)
         store.evento(job['id'], 'Pedido recebido: %s para %s.' % (origem, destino))
+        if tipo in ('imagem', 'varredura') and sem_identidade:
+            store.evento(job['id'], identidade.MSG_SEM_IDENTIDADE)
         aviso = aviso_pasta_de_dados(origem)
         if aviso:
             store.evento(job['id'], aviso)

@@ -10,6 +10,7 @@ from auxiliar import CasoComPasta, criar_origem, esperar
 from test_varredura import BaseVarredura, montar_imagem
 
 from recuperacao import identidade
+from recuperacao import leitor
 from recuperacao import rotas_achados
 
 MIB = 1 << 20
@@ -59,7 +60,58 @@ class TestImpressao(CasoComPasta):
         self.assertIn('conectada', identidade.conferir(os.path.join(self.trabalho, 'nao-existe'), a))
 
 
+def ler_com_inicio_ruim(original):
+    def ler(self, offset, n):
+        if offset == 0:
+            raise OSError('setor ruim no começo')
+        return original(self, offset, n)
+    return ler
+
+
+class TestSetorRuimNaIdentidade(CasoComPasta):
+    def test_ponta_ilegivel_nao_derruba_a_impressao_nem_a_conferencia(self):
+        base = criar_origem(self.trabalho, 3 * MIB)
+        boa = identidade.impressao(base)
+        with mock.patch.object(leitor.Leitor, 'ler', ler_com_inicio_ruim(leitor.Leitor.ler)):
+            ruim = identidade.impressao(base)
+            avisos = []
+            self.assertIsNotNone(ruim)
+            self.assertIsNone(ruim['inicio'])
+            self.assertEqual(ruim['fim'], boa['fim'])
+            self.assertFalse(identidade.completa(ruim))
+            # leitura falhou agora: não bloqueia, avisa
+            self.assertIsNone(identidade.conferir(base, boa, avisos.append))
+            self.assertEqual(avisos, [identidade.MSG_NAO_CONFERIU])
+            # e a outra ponta, lida, ainda pega o disco trocado
+            trocar_conteudo(base, 3 * MIB - 1)
+            self.assertEqual(identidade.conferir(base, boa), identidade.MSG_MUDOU)
+        self.assertTrue(identidade.completa(boa))
+
+    def test_tamanho_diferente_reprova_mesmo_com_ponta_ilegivel(self):
+        base = criar_origem(self.trabalho, 3 * MIB)
+        boa = identidade.impressao(base)
+        with open(base, 'ab') as f:
+            f.write(b'x')
+        with mock.patch.object(leitor.Leitor, 'ler', ler_com_inicio_ruim(leitor.Leitor.ler)):
+            self.assertEqual(identidade.conferir(base, boa), identidade.MSG_MUDOU)
+
+    def test_guardada_sem_ponta_nao_bloqueia(self):
+        base = criar_origem(self.trabalho, 3 * MIB)
+        parcial = dict(identidade.impressao(base), inicio=None)
+        avisos = []
+        self.assertIsNone(identidade.conferir(base, parcial, avisos.append))
+        self.assertEqual(len(avisos), 1)
+
+
 class TestOrigemTrocada(BaseVarredura):
+    def test_criacao_sem_impressao_completa_deixa_evento_visivel(self):
+        origem = criar_origem(self.trabalho, 3 * MIB)
+        with mock.patch.object(leitor.Leitor, 'ler', ler_com_inicio_ruim(leitor.Leitor.ler)):
+            im = self.req('POST', '/api/jobs', {'tipo': 'imagem', 'origem': origem,
+                                                'destino': os.path.join(self.trabalho, 'sr.bin')}).get_json()
+        eventos = self.req('GET', '/api/jobs/' + im['id']).get_json()['eventos']
+        self.assertTrue(any(identidade.MSG_SEM_IDENTIDADE in str(e) for e in eventos), eventos)
+
     def varrer_pronto(self):
         caminho, info, _ = montar_imagem(self.trabalho)
         job = self.varrer(caminho, bloco=65536)
