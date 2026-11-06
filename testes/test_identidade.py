@@ -103,6 +103,81 @@ class TestSetorRuimNaIdentidade(CasoComPasta):
         self.assertEqual(len(avisos), 1)
 
 
+def disco_mbr(caminho, assinatura=b'\x11\x22\x33\x44', tamanho=3 * MIB):
+    """Arquivo que faz o papel de um disco MBR: assinatura em 0x1B8, 0x55AA no fim do setor 0."""
+    boot = bytearray(512)
+    boot[0x1B8:0x1BC] = assinatura
+    boot[510:512] = b'\x55\xAA'
+    with open(caminho, 'wb') as f:
+        f.write(bytes(boot) + os.urandom(tamanho - 512))
+    return caminho
+
+
+class TestDiscoEmUso(CasoComPasta):
+    """Disco/volume montado: o Windows escreve nas pontas sem o disco ser outro."""
+
+    def setUp(self):
+        super().setUp()
+        for alvo, valor in ((leitor, 'eh_dispositivo'), (identidade, '_descritor')):
+            p = mock.patch.object(alvo, valor, (lambda c: True) if valor == 'eh_dispositivo' else (lambda c: 'WD|Blue|SN1'))
+            p.start()
+            self.addCleanup(p.stop)
+        self.disco = disco_mbr(os.path.join(self.trabalho, 'disco.bin'))
+
+    def test_pontas_mudam_com_o_disco_em_uso_e_ainda_e_o_mesmo(self):
+        a = identidade.impressao(self.disco)
+        self.assertEqual(a['tipo'], 'dispositivo')
+        self.assertTrue(identidade.completa(a))
+        trocar_conteudo(self.disco, 0x10)                             # bit de sujo / FSInfo no começo
+        trocar_conteudo(self.disco, 3 * MIB - 1)                      # dados no fim
+        avisos = []
+        self.assertIsNone(identidade.conferir(self.disco, a, avisos.append))
+        self.assertEqual(avisos, [])
+
+    def test_outro_disco_assinatura_ou_descritor_ou_tamanho_reprova(self):
+        a = identidade.impressao(self.disco)
+        trocar_conteudo(self.disco, 0x1B8, b'\x99')
+        self.assertEqual(identidade.conferir(self.disco, a), identidade.MSG_MUDOU)
+        outro = identidade.impressao(self.disco)
+        with mock.patch.object(identidade, '_descritor', lambda c: 'WD|Blue|SN2'):
+            self.assertEqual(identidade.conferir(self.disco, outro), identidade.MSG_MUDOU)
+        with open(self.disco, 'ab') as f:
+            f.write(b'x')
+        self.assertEqual(identidade.conferir(self.disco, outro), identidade.MSG_MUDOU)
+
+    def test_identificador_ilegivel_avisa_e_nao_bloqueia(self):
+        a = identidade.impressao(self.disco)
+        with mock.patch.object(identidade, '_descritor', lambda c: None):
+            avisos = []
+            self.assertIsNone(identidade.conferir(self.disco, a, avisos.append))
+            self.assertEqual(avisos, [identidade.MSG_NAO_CONFERIU])
+
+    def test_volume_ntfs_usa_o_numero_de_serie_do_boot(self):
+        boot = bytearray(512)
+        boot[3:11] = b'NTFS    '
+        boot[0x48:0x50] = b'12345678'
+        with open(self.disco, 'r+b') as f:
+            f.write(bytes(boot))
+        a = identidade.impressao(self.disco)
+        self.assertEqual(a['ids']['serie'], 'ntfs:' + b'12345678'.hex())
+        trocar_conteudo(self.disco, 0x20)                             # escrita do sistema fora do número de série
+        self.assertIsNone(identidade.conferir(self.disco, a))
+        trocar_conteudo(self.disco, 0x48, b'9')
+        self.assertEqual(identidade.conferir(self.disco, a), identidade.MSG_MUDOU)
+
+    def test_trabalho_antigo_com_pontas_confere_so_o_tamanho_e_avisa(self):
+        with mock.patch.object(leitor, 'eh_dispositivo', lambda c: False):
+            antiga = identidade.impressao(self.disco)                  # formato de antes: tamanho + pontas
+        self.assertIn('inicio', antiga)
+        trocar_conteudo(self.disco, 0x10)
+        trocar_conteudo(self.disco, 3 * MIB - 1)
+        avisos = []
+        self.assertIsNone(identidade.conferir(self.disco, antiga, avisos.append))
+        self.assertEqual(avisos, [identidade.MSG_IMPRESSAO_ANTIGA])
+        antiga['tamanho'] += 1
+        self.assertEqual(identidade.conferir(self.disco, antiga), identidade.MSG_MUDOU)
+
+
 class TestOrigemTrocada(BaseVarredura):
     def test_criacao_sem_impressao_completa_deixa_evento_visivel(self):
         origem = criar_origem(self.trabalho, 3 * MIB)

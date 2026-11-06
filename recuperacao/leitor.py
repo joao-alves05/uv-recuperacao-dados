@@ -251,6 +251,27 @@ class ApiWindows:
             raise self._erro()
         return bool(saida[8])                               # DEVICE_SEEK_PENALTY_DESCRIPTOR.IncursSeekPenalty
 
+    def descritor(self, h):
+        """(fabricante, modelo, número de série) do dispositivo: IOCTL_STORAGE_QUERY_PROPERTY (StorageDeviceProperty), só consulta."""
+        import struct
+
+        class Consulta(self.ct.Structure):
+            _fields_ = [('PropertyId', self.wt.DWORD), ('QueryType', self.wt.DWORD), ('Extra', self.ct.c_ubyte * 1)]
+        entrada = Consulta(0, 0)                            # StorageDeviceProperty, PropertyStandardQuery
+        saida = (self.ct.c_ubyte * 1024)()
+        devolvidos = self.wt.DWORD(0)
+        if not self.k.DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, self.ct.byref(entrada), self.ct.sizeof(entrada),
+                                      self.ct.byref(saida), self.ct.sizeof(saida), self.ct.byref(devolvidos), None):
+            raise self._erro()
+        dados = bytes(saida)[:devolvidos.value]
+
+        def texto(pos):
+            desloc = struct.unpack_from('<I', dados, pos)[0]      # 0 = o dispositivo não informa
+            if not desloc or desloc >= len(dados):
+                return ''
+            return dados[desloc:].split(bytes(1), 1)[0].decode('ascii', 'replace').strip()
+        return texto(12), texto(16), texto(24)                  # Vendor, Product, Serial (a revisão de firmware fica de fora)
+
     def ler(self, h, offset, n):
         if not self.k.SetFilePointerEx(h, offset, None, 0):
             raise self._erro()
@@ -313,6 +334,16 @@ def seek_penalty_do_disco(indice, api=None):
     h = api.CreateFileW('\\\\.\\PhysicalDrive%d' % indice, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, 0)
     try:
         return api.seek_penalty(h)
+    finally:
+        api.fechar(h)
+
+
+def descritor_do_disco(indice, api=None):
+    """(fabricante, modelo, série) do disco físico N. Abre com acesso ZERO, só para perguntar."""
+    api = api or ApiWindows()
+    h = api.CreateFileW('\\\\.\\PhysicalDrive%d' % indice, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, 0)
+    try:
+        return api.descritor(h)
     finally:
         api.fechar(h)
 
