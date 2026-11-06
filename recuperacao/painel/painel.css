@@ -116,7 +116,6 @@ body.arrastando-lista{cursor:col-resize;user-select:none}
 .item-sub~.barra{margin-top:8px}
 .dados .origem-nome{font-family:var(--font);font-size:14px;line-height:20px;color:var(--ink)}
 .dados .origem-det{font-family:var(--font);color:var(--muted)}
-.dados .origem-tec{display:block;color:var(--muted);font-size:12px;line-height:16px;overflow:hidden;text-overflow:ellipsis}
 .recuperar .acoes .btn[hidden]{display:none}
 .item-meta{display:flex;justify-content:space-between;gap:8px;margin-top:8px;font-size:12px;line-height:16px;color:var(--muted)}
 .item-meta span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -192,6 +191,7 @@ body.arrastando-lista{cursor:col-resize;user-select:none}
 .aviso-destino[hidden],.rec-opcoes[hidden]{display:none}
 .sel-fixa{position:sticky;bottom:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;background:var(--panel);border:1px solid var(--primary);border-radius:var(--radius-p);box-shadow:0 -4px 16px rgba(0,0,0,.14)}
 .sel-fixa[hidden]{display:none}
+.resultados.com-fixa .res-area{padding-bottom:72px}
 .sel-fixa-txt{min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .formulario .acoes{margin-top:8px}
 

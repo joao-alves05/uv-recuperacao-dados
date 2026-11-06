@@ -1158,8 +1158,8 @@ def main():
         p.espera("document.querySelectorAll('.tabela tbody tr').length>0", 10)
         p.espera("document.getElementById('j-nome').textContent==='Busca em ST1000DM010-2EP102'", 8)
         conferir('origem: o titulo mostra o nome do disco, nao o caminho tecnico', p.ev("document.getElementById('j-nome').textContent")=='Busca em ST1000DM010-2EP102', (p.ev("document.getElementById('j-nome').textContent"), p.ev('JSON.stringify(window.__painel.estado())')))
-        conferir('origem: o campo mostra nome, tamanho e letras; o caminho tecnico fica pequeno',
-                 p.ev("(()=>{const d=document.getElementById('j-origem');return d.querySelector('.origem-nome').textContent==='ST1000DM010-2EP102'&&/931 GB/.test(d.textContent)&&d.textContent.includes('D:, G:')&&d.querySelector('.origem-tec').textContent.endsWith('PhysicalDrive1')&&parseFloat(getComputedStyle(d.querySelector('.origem-tec')).fontSize)<=12})()"))
+        conferir('origem: o campo mostra nome, tamanho e letras, e o caminho tecnico fica so na dica (title)',
+                 p.ev("(()=>{const d=document.getElementById('j-origem');return d.querySelector('.origem-nome').textContent==='ST1000DM010-2EP102'&&/931 GB/.test(d.textContent)&&d.textContent.includes('D:, G:')&&!d.textContent.includes('PhysicalDrive')&&d.title.endsWith('PhysicalDrive1')})()"))
         conferir('origem: nenhum caminho tecnico no titulo nem na lista da esquerda',
                  p.ev("![...document.querySelectorAll('#lista-itens .item-nome,#j-nome')].some(e=>e.textContent.includes('PhysicalDrive'))"))
         itens = p.ev(f"(()=>{{const o={{}};for(const id of ['{va}','{vb}']){{const a=document.querySelector('a.item[href=\"/jobs/'+id+'\"]');o[id]=a?{{sub:a.querySelector('.item-sub').textContent,mot:a.querySelector('.item-motivo').textContent,motOculto:a.querySelector('.item-motivo').hidden}}:null}}return o}})()")
@@ -1196,6 +1196,8 @@ def main():
                  p.espera("!document.getElementById('r-refazer').hidden", 6) and p.ev("document.getElementById('r-refazer').textContent")=='Buscar de novo neste disco' and p.ev("document.getElementById('r-recuperar').hidden"))
         conferir('409: aviso em tom calmo (nao vermelho de perigo), em portugues claro, logo acima do botao',
                  p.ev("(()=>{const a=document.querySelector('.recuperar .alerta');const b=document.getElementById('r-refazer').getBoundingClientRect();const r=a.getBoundingClientRect();return a.dataset.tipo==='aviso'&&!a.classList.contains('alerta-perigo')&&/não está igual/.test(a.textContent)&&r.bottom<=b.top&&b.top-r.bottom<=24})()"))
+        conferir('409: com o disco mudado some o bloco de destino: fica so o aviso e o botao',
+                 p.ev("['.rec-dest','.rec-opcoes','.rec-resumo','.aviso-destino'].every(q=>{const e=document.querySelector('.recuperar '+q);return !e||e.getBoundingClientRect().height===0})"))
         VISIVEL = "(()=>{const f=(id)=>{const r=document.getElementById(id).getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight};return f('r-refazer')&&(()=>{const r=document.querySelector('.recuperar .alerta').getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()})()"
         conferir('409: o aviso e o botao aparecem inteiros na tela, sem precisar rolar', p.espera(VISIVEL, 3), p.ev("JSON.stringify([scrollY,innerHeight,document.getElementById('r-refazer').getBoundingClientRect().bottom])"))
         p.foto('1366-resultados-disco-mudou-claro')
@@ -1252,6 +1254,8 @@ def main():
         time.sleep(.4)
         conferir('barra fixa: com algo marcado mostra "1 selecionado · tamanho" colada no rodape da tela',
                  p.espera("!document.querySelector('.sel-fixa').hidden", 4) and p.ev("document.querySelector('.sel-fixa-txt').textContent").startswith('1 selecionado · ') and p.ev("(()=>{const r=document.querySelector('.sel-fixa').getBoundingClientRect();return r.bottom<=innerHeight+1&&r.bottom>=innerHeight-24})()"), p.ev("document.querySelector('.sel-fixa').outerHTML.length"))
+        conferir('barra fixa: a lista ganha no fim um espaco da altura da barra, para ela nao cobrir a ultima linha',
+                 p.ev("parseFloat(getComputedStyle(document.querySelector('.res-area')).paddingBottom)>=document.querySelector('.sel-fixa').getBoundingClientRect().height"))
         p.foto('1366-resultados-barra-fixa-claro')
         p.clica('#r-ir-recuperar', .8)
         conferir('barra fixa: "Recuperar…" leva ao cartao e a barra some enquanto o cartao esta a vista',
@@ -1266,6 +1270,10 @@ def main():
         p.ev("document.getElementById('r-recuperar').scrollIntoView({block:'center'})"); time.sleep(.5); p.clica('#r-recuperar', .8)
         conferir('destino recusado com sugestao: frase curta em tom calmo e botao "Usar C:\\Recuperados"',
                  p.espera("!document.getElementById('r-usar-sugestao').hidden", 6) and p.ev("document.getElementById('r-usar-sugestao').textContent")=='Usar C:\\Recuperados' and p.ev("document.querySelector('.recuperar .alerta').dataset.tipo")=='aviso')
+        conferir('destino recusado: a frase diz o quanto nao cabe e o que fazer (nao so "nao cabe")',
+                 p.ev("(()=>{const t=document.querySelector('.recuperar .alerta').textContent;return /^Não cabe em F:.*marcados passam do espaço livre[.] Use C:.*marque menos arquivos/.test(t)||/^Faltam/.test(t)})()"), p.ev("document.querySelector('.recuperar .alerta').textContent"))
+        conferir('destino recusado: so o "Usar ..." fica em destaque; "Recuperar selecionados" vira secundario',
+                 p.ev("document.getElementById('r-usar-sugestao').classList.contains('btn-primario')&&!document.getElementById('r-recuperar').classList.contains('btn-primario')"))
         p.foto('1366-resultados-sugestao-claro')
         p.clica('#r-usar-sugestao', .8)
         conferir('"Usar ...": troca o destino e tenta de novo (abre a recuperacao)',
@@ -1275,8 +1283,11 @@ def main():
         p.espera("document.querySelectorAll('.tabela tbody tr').length>0", 10)
         conferir('sem outro disco: o aviso aparece no lugar do campo, com "Procurar de novo"',
                  p.espera("!document.querySelector('.aviso-destino').hidden", 6) and p.ev("document.querySelector('.aviso-destino').textContent.includes('Ligue um pendrive ou HD externo')") and p.ev(CAMPO + ".parentElement.hidden") and p.ev("document.getElementById('r-procurar').textContent")=='Procurar de novo' and p.ev("document.getElementById('r-recuperar').disabled"))
+        p.ev("document.querySelector('.recuperar').scrollIntoView({block:'center'})")
+        time.sleep(.4)
         p.foto('1366-resultados-sem-disco-claro')
         p.tema('dark')
+        time.sleep(.5)
         p.foto('1366-resultados-sem-disco-escuro')
         p.tema('light')
         http(porta, '/_teste/destinos?on=1&sem=0')

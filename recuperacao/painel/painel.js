@@ -524,7 +524,6 @@
       dOrigem.replaceChildren(el('span', 'origem-nome', origemAm));
       const dd = detalheDisco(origemTec);
       if (dd) dOrigem.append(' ', el('span', 'origem-det', '· ' + dd));
-      if (origemAm !== origemTec) dOrigem.append(el('small', 'origem-tec', origemTec));
     }
     dOrigem.title = origemTec;
     $('j-destino').textContent = String(j.destino == null ? '' : j.destino);

@@ -790,6 +790,7 @@
       const q = contagem(), tam = tamanhoSel();
       fixaTxt.textContent = q ? num(q) + (q === 1 ? ' selecionado' : ' selecionados') + (tam ? ' · ' + bytes(tam) : '') : '';
       fixa.hidden = !q || recVisivel || precisaRefazer;
+      raiz.classList.toggle('com-fixa', !!q && !precisaRefazer);
     }
     function opAtual() { return dd.opcoes.find((o) => o.caminho === dest.livre.trim()) || null; }
     function textoNaoCabe(tam, o) {
@@ -863,6 +864,8 @@
       recAlerta.classList.toggle('alerta-perigo', !calmo);
       if (calmo) recAlerta.dataset.tipo = 'aviso'; else delete recAlerta.dataset.tipo;
       recSug.hidden = !sugestaoRec || precisaRefazer;
+      recBt.classList.toggle('btn-primario', !sugestaoRec);
+      recBt.classList.toggle('btn-suave', !!sugestaoRec);
       recSug.textContent = 'Usar ' + sugestaoRec;
       recSug.title = sugestaoRec;
       recSug.disabled = recuperando;
@@ -871,6 +874,8 @@
       recRefazer.textContent = refazendo ? 'Buscando…' : 'Buscar de novo neste disco';
       recBt.hidden = precisaRefazer;
       recBt.disabled = !q || !!problema || recuperando || sel.preparando || !d.caminho || dd.estado === 'carregando';
+      for (const x of [recResumo, recDest, recCaminho, recOpcoes, recSemDisco, recAvisoDest]) if (precisaRefazer) x.hidden = true;
+      if (!precisaRefazer) recResumo.hidden = false;
       atualizarFixa();
       recBt.textContent = recuperando ? 'Iniciando…' : q ? 'Recuperar selecionados (' + num(q) + ')' : 'Recuperar selecionados';
     }
@@ -878,6 +883,7 @@
       if (recuperando) return;
       const d = destinoAtual();
       const corpoPost = sel.modo === 'filtro' ? { ids: 'todos', filtros: filtrosObj(), destino: d.caminho } : { ids: [...sel.ids], destino: d.caminho };
+      const tamPedido = tamanhoSel(), opPedido = opAtual();
       recuperando = true; avisoRec = ''; sugestaoRec = ''; atualizarRec();
       try {
         const j = await api('POST', '/api/jobs/' + encodeURIComponent(opts.jobId) + '/recuperar', corpoPost);
@@ -891,6 +897,10 @@
         } else if (e && e.status === 400 && e.dados && typeof e.dados.sugestao === 'string' && e.dados.sugestao) {
           sugestaoRec = e.dados.sugestao;
           avisoRec = e.message;
+          if (/^Não cabe/.test(e.message) && tamPedido) {            // diz o quanto falta, não só "não cabe"
+            avisoRec = opPedido && tamPedido > opPedido.livre ? textoNaoCabe(tamPedido, opPedido)
+              : 'Não cabe em ' + d.caminho + ': os ' + bytes(tamPedido) + ' marcados passam do espaço livre. Use ' + sugestaoRec + ' ou marque menos arquivos.';
+          }
         } else avisoRec = e.message;
       }
       atualizarRec();
