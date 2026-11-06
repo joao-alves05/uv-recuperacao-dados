@@ -108,7 +108,16 @@ body.arrastando-lista{cursor:col-resize;user-select:none}
 .item[aria-current=page]{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}
 .item[data-estado=interrompido]{border-color:var(--accent);background:var(--accent-soft)}
 .item-topo{display:flex;align-items:center;gap:8px;min-width:0;margin-bottom:8px}
-.item-nome{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-nome{flex:1;min-width:0;font-weight:600;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.item-sub{font-size:12px;line-height:16px;color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-motivo{margin-top:4px;font-size:12px;line-height:16px;color:var(--danger-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-sub[hidden],.item-motivo[hidden]{display:none}
+.item-topo{margin-bottom:4px}
+.item-sub~.barra{margin-top:8px}
+.dados .origem-nome{font-family:var(--font);font-size:14px;line-height:20px;color:var(--ink)}
+.dados .origem-det{font-family:var(--font);color:var(--muted)}
+.dados .origem-tec{display:block;color:var(--muted);font-size:12px;line-height:16px;overflow:hidden;text-overflow:ellipsis}
+.recuperar .acoes .btn[hidden]{display:none}
 .item-meta{display:flex;justify-content:space-between;gap:8px;margin-top:8px;font-size:12px;line-height:16px;color:var(--muted)}
 .item-meta span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .item-meta .dir{flex:none;color:var(--accent-ink);font-weight:600}
@@ -171,7 +180,19 @@ body.arrastando-lista{cursor:col-resize;user-select:none}
 .formulario input:not([type=radio]):focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}
 .formulario input:not([type=radio]):disabled{opacity:.5}
 .formulario .dados{border:0;padding:0;background:none}
-.dica{font-size:12px;line-height:16px;color:var(--muted)}
+.dica,.aviso-disco{font-size:12px;line-height:16px;color:var(--muted)}
+.aviso-disco{margin:0}
+.aviso-disco[hidden]{display:none}
+.rec-opcoes{display:flex;flex-wrap:wrap;gap:8px}
+.rec-opcoes .btn{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rec-opcoes .btn[aria-pressed=true]{border-color:var(--primary);box-shadow:inset 0 0 0 1px var(--primary);background:var(--primary-soft);color:var(--primary-ink);font-weight:600}
+.rec-opcoes .btn[aria-pressed=true]::before{content:'\2713\00a0'}
+.aviso-destino{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:12px 16px;border:1px solid var(--accent);border-radius:var(--radius-p);background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.aviso-destino-txt{flex:1 1 240px;min-width:0}
+.aviso-destino[hidden],.rec-opcoes[hidden]{display:none}
+.sel-fixa{position:sticky;bottom:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;background:var(--panel);border:1px solid var(--primary);border-radius:var(--radius-p);box-shadow:0 -4px 16px rgba(0,0,0,.14)}
+.sel-fixa[hidden]{display:none}
+.sel-fixa-txt{min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .formulario .acoes{margin-top:8px}
 
 /* ---------- escolha do disco ---------- */
@@ -324,7 +345,8 @@ th[aria-sort=ascending] .ord,th[aria-sort=descending] .ord{color:var(--primary-i
 .recuperar{display:flex;flex-direction:column;gap:12px}
 .rec-dest{display:flex;flex-wrap:wrap;gap:8px 12px}
 .rec-dest .campo-filtro:first-child select{min-width:224px}
-.rec-dest input[type=text]{width:216px}
+.rec-dest .campo-filtro:not(:first-child){flex:1 1 240px}
+.rec-dest input[type=text]{width:100%}
 .rec-resumo{font-weight:600}
 .vazio[data-ocupado="1"]{opacity:.6}
 
@@ -400,11 +422,11 @@ button.mini:active{filter:brightness(.95)}
   .filtros input[type=search],.filtros input[type=date],.filtros select{width:100%}
   .campo-filtro{flex:1 1 140px}
   .res-corpo.com-arvore,.res-corpo.com-arvore.arvore-recolhida{grid-template-columns:minmax(0,1fr)}
-  .res-corpo.com-arvore .arvore{max-height:200px;margin-bottom:12px}
+  .res-corpo.com-arvore .arvore{max-height:none;margin-bottom:12px}
+  .tabela-box,.grade{max-height:none}
   .res-corpo.com-arvore .res-area{padding-left:0}
   .alca-arvore{display:none}
   .rec-dest .campo-filtro:first-child select{min-width:0}
-  .rec-dest input[type=text]{width:100%}
   .historico li{grid-template-columns:minmax(0,1fr);gap:0}
 }
 @media (max-width:400px){

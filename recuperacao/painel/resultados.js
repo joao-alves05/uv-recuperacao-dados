@@ -93,8 +93,10 @@
     const tamanhos = new Map();
     const vistos = {};                   // tipos que apareceram, além dos conhecidos
     let assinatura = '';
-    let recuperando = false, avisoRec = '';
-    const dest = { ix: 0, pasta: 'Recuperados', livre: '' };
+    let recuperando = false, avisoRec = '', precisaRefazer = false, refazendo = false;
+    const dest = { ix: 0, pasta: 'Recuperados', livre: '', tocou: false };
+    const dd = { estado: 'nada', sugerido: '', opcoes: [], aviso: '' };   // nada | carregando | ok | sem | antigo (rota ausente)
+    let sugestaoRec = '';
 
     raiz.replaceChildren();
     raiz.classList.add('resultados');
@@ -322,20 +324,51 @@
     inPasta.setAttribute('aria-label', 'Nome da pasta de destino');
     inPasta.addEventListener('input', () => { dest.pasta = inPasta.value; atualizarRec(); });
     const inLivre = el('input');                                 // só quando não há disco na lista: caminho completo
-    inLivre.type = 'text'; inLivre.autocomplete = 'off'; inLivre.spellcheck = false; inLivre.placeholder = 'G:\\Recuperados';
+    inLivre.type = 'text'; inLivre.autocomplete = 'off'; inLivre.spellcheck = false; inLivre.placeholder = 'Ex.: D:\\Recuperados';
     inLivre.setAttribute('aria-label', 'Pasta de destino');
-    inLivre.addEventListener('input', () => { dest.livre = inLivre.value; atualizarRec(); });
+    inLivre.addEventListener('input', () => { dest.livre = inLivre.value; dest.tocou = true; sugestaoRec = ''; atualizarRec(); });
     recDest.append(campo('Salvar em', selVol), campo('Pasta', inPasta), campo('Pasta de destino', inLivre));
     const recCaminho = el('p', 'dica');
     const recAlerta = el('p', 'alerta alerta-perigo');
     recAlerta.setAttribute('role', 'alert');
+    const recOpcoes = el('div', 'rec-opcoes');                 // escolha rápida: um botão por disco
+    recOpcoes.setAttribute('role', 'group');
+    recOpcoes.setAttribute('aria-label', 'Onde salvar');
+    recOpcoes.hidden = true;
+    const fixa = el('div', 'sel-fixa');                         // barra no rodapé da tela: leva ao cartão de recuperar
+    fixa.setAttribute('role', 'region');
+    fixa.setAttribute('aria-label', 'Recuperar o que está marcado');
+    const fixaTxt = el('span', 'sel-fixa-txt');
+    const fixaBt = botao('Recuperar…', 'btn-primario', () => { rec.scrollIntoView({ block: 'end' }); recBt.focus({ preventScroll: true }); });
+    fixaBt.id = 'r-ir-recuperar';
+    fixa.append(fixaTxt, fixaBt);
+    fixa.hidden = true;
+    let recVisivel = false;
+    const recObs = 'IntersectionObserver' in window ? new IntersectionObserver((es) => { recVisivel = es[es.length - 1].isIntersecting; atualizarFixa(); }, { threshold: 0, rootMargin: '0px 0px -72px 0px' }) : null;
+    const recAvisoDest = el('div', 'aviso-destino');           // nenhum outro disco: diz o que fazer
+    recAvisoDest.setAttribute('role', 'status');
+    const recAvisoTxt = el('span', 'aviso-destino-txt');
+    const recProcurar = botao('Procurar de novo', 'btn-suave', () => carregarDestinos());
+    recProcurar.id = 'r-procurar';
+    recAvisoDest.append(recAvisoTxt, recProcurar);
+    recAvisoDest.hidden = true;
+    const recSemDisco = el('p', 'aviso-disco');                       // sem outro disco na lista
+    recSemDisco.textContent = 'Não achei outro disco para salvar. Ligue um pen drive ou HD e clique em Atualizar na tela inicial, ou escreva a pasta abaixo (fora do disco que está sendo recuperado).';
+    recSemDisco.hidden = true;
     const recAcoes = el('div', 'acoes');
     const recBt = botao('Recuperar selecionados', 'btn-primario', () => recuperar());
     recBt.id = 'r-recuperar';
-    recAcoes.append(recBt);
-    rec.append(recResumo, recDest, recCaminho, recAlerta, recAcoes);
+    const recRefazer = botao('Buscar de novo neste disco', 'btn-primario', () => refazer());
+    recRefazer.id = 'r-refazer';
+    recRefazer.hidden = true;
+    const recSug = botao('', 'btn-primario', () => usarSugestao());
+    recSug.id = 'r-usar-sugestao';
+    recSug.hidden = true;
+    recAcoes.append(recBt, recSug, recRefazer);
+    rec.append(recResumo, recSemDisco, recAvisoDest, recOpcoes, recDest, recCaminho, recAlerta, recAcoes);
 
-    raiz.append(abas, filtros, barra, reabrir, corpo, rec);
+    raiz.append(abas, filtros, barra, reabrir, corpo, fixa, rec);
+    if (recObs) recObs.observe(rec);
     aplicarPref();
 
     /* ---- dados ---- */
@@ -635,11 +668,11 @@
       if (a.grupo === 'foto' && a.id != null) {
         const im = el('img');
         im.alt = '';
-        im.loading = 'lazy';
         im.decoding = 'async';
-        im.src = '/api/achados/' + encodeURIComponent(a.id) + '/previa';
+        im.dataset.src = '/api/achados/' + encodeURIComponent(a.id) + '/previa';
         im.addEventListener('error', poe);
         caixa.append(im);
+        if (obsMini) obsMini.observe(im); else { fila.push(im); andarFila(); }
       } else poe();
       return caixa;
     }
@@ -712,8 +745,66 @@
       return d;
     }
 
+    /* ---- miniaturas: só as que aparecem na tela, no máximo MAX_MINI ao mesmo tempo ---- */
+    const MAX_MINI = 4;
+    const fila = [];
+    let carregandoMini = 0;
+    function andarFila() {
+      while (vivo && carregandoMini < MAX_MINI && fila.length) {
+        const im = fila.shift();
+        if (!im.isConnected || im.getAttribute('src')) continue;
+        carregandoMini++;
+        let fim = false;
+        const acabou = () => { if (fim) return; fim = true; carregandoMini--; andarFila(); };
+        im.addEventListener('load', acabou, { once: true });
+        im.addEventListener('error', acabou, { once: true });
+        setTimeout(acabou, 8000);                                 // não deixa a fila presa
+        im.src = im.dataset.src;
+      }
+    }
+    const obsMini = 'IntersectionObserver' in window ? new IntersectionObserver((es) => {
+      for (const e of es) if (e.isIntersecting) { obsMini.unobserve(e.target); fila.push(e.target); }
+      andarFila();
+    }, { rootMargin: '120px' }) : null;
+
     /* ---- recuperar ---- */
+    async function carregarDestinos() {                         // o serviço diz onde salvar; sem a rota, vale a lista da tela
+      if (!job) return;
+      dd.estado = 'carregando'; atualizarRec();
+      try {
+        const d = await api('GET', '/api/destinos?origem=' + encodeURIComponent(String(job.origem == null ? '' : job.origem)));
+        if (!vivo) return;
+        dd.opcoes = (Array.isArray(d && d.opcoes) ? d.opcoes : []).filter((o) => o && typeof o.caminho === 'string' && o.caminho)
+          .map((o) => ({ caminho: o.caminho, rotulo: String(o.rotulo == null ? o.caminho : o.rotulo), livre: Number(o.livre) }));
+        dd.sugerido = d && typeof d.sugerido === 'string' ? d.sugerido : '';
+        dd.aviso = d && typeof d.aviso === 'string' ? d.aviso : '';
+        dd.estado = dd.opcoes.length || dd.sugerido ? 'ok' : 'sem';
+        if (!dest.tocou) dest.livre = dd.sugerido;
+      } catch (e) {
+        if (!vivo) return;
+        dd.estado = 'antigo';
+      }
+      atualizarRec();
+    }
+    function atualizarFixa() {
+      const q = contagem(), tam = tamanhoSel();
+      fixaTxt.textContent = q ? num(q) + (q === 1 ? ' selecionado' : ' selecionados') + (tam ? ' · ' + bytes(tam) : '') : '';
+      fixa.hidden = !q || recVisivel || precisaRefazer;
+    }
+    function opAtual() { return dd.opcoes.find((o) => o.caminho === dest.livre.trim()) || null; }
+    function textoNaoCabe(tam, o) {
+      const outra = dd.opcoes.filter((x) => x !== o && x.livre >= tam).sort((a, b) => b.livre - a.livre)[0];
+      return 'Faltam ' + bytes(tam - o.livre) + '. ' + (outra ? 'Escolha o ' + outra.rotulo + ' ou outro com mais espaço.' : 'Marque menos arquivos ou ligue um disco com mais espaço.');
+    }
+    function mostrarAviso() { recAcoes.scrollIntoView({ block: 'center' }); }
+    function usarSugestao() {
+      if (!sugestaoRec) return;
+      dest.livre = sugestaoRec; dest.tocou = true;
+      sugestaoRec = ''; avisoRec = '';
+      recuperar();
+    }
     function destinoAtual() {
+      if (dd.estado === 'ok' || dd.estado === 'sem' || dd.estado === 'carregando') return { livre: true, caminho: dest.livre.trim(), vol: null };
       const l = opts.destinos ? opts.destinos() : [];
       if (!l.length) return { livre: true, caminho: dest.livre.trim(), vol: null };
       const v = l[Math.min(dest.ix, l.length - 1)];
@@ -721,7 +812,8 @@
       return { livre: false, caminho: v.base + (pasta ? '\\' + pasta : ''), vol: v, pasta };
     }
     function atualizarRec() {
-      const l = opts.destinos ? opts.destinos() : [];
+      const novo = dd.estado === 'ok' || dd.estado === 'sem' || dd.estado === 'carregando';
+      const l = novo ? [] : (opts.destinos ? opts.destinos() : []);
       if (selVol.dataset.n !== String(l.length) + '|' + l.map((v) => v.rotulo).join(',')) {
         selVol.replaceChildren();
         l.forEach((v, i) => { const o = el('option', null, v.rotulo + (v.sugerido ? ' (sugerido)' : '')); o.value = String(i); selVol.append(o); });
@@ -731,7 +823,29 @@
       selVol.value = String(Math.min(dest.ix, Math.max(0, l.length - 1)));
       selVol.parentElement.hidden = !l.length;
       inPasta.parentElement.hidden = !l.length;
-      inLivre.parentElement.hidden = l.length > 0;
+      inLivre.parentElement.hidden = novo ? dd.estado !== 'ok' : l.length > 0;
+      recSemDisco.hidden = novo || l.length > 0;
+      recAvisoDest.hidden = !(dd.estado === 'sem' || dd.estado === 'carregando');
+      recAvisoTxt.textContent = dd.estado === 'carregando' ? 'Procurando onde salvar…' : (dd.aviso || 'Ligue um pendrive ou HD externo para guardar os arquivos.');
+      recProcurar.hidden = dd.estado === 'carregando';
+      recOpcoes.hidden = !(dd.estado === 'ok' && dd.opcoes.length);
+      if (dd.estado === 'ok') {
+        const chaveOp = dd.opcoes.map((o) => o.caminho + o.rotulo + o.livre).join('|');
+        if (recOpcoes.dataset.chave !== chaveOp) {
+          recOpcoes.dataset.chave = chaveOp;
+          recOpcoes.replaceChildren();
+          for (const o of dd.opcoes) {
+            const b = botao(o.rotulo + (Number.isFinite(o.livre) ? ' · ' + bytes(o.livre) + ' livres' : ''), 'btn-suave', () => {
+              dest.livre = o.caminho; dest.tocou = true; avisoRec = ''; sugestaoRec = ''; atualizarRec();
+            });
+            b.dataset.caminho = o.caminho;
+            b.title = o.caminho;
+            recOpcoes.append(b);
+          }
+        }
+        for (const b of recOpcoes.children) b.setAttribute('aria-pressed', String(b.dataset.caminho === dest.livre.trim()));
+        if (inLivre.value !== dest.livre) inLivre.value = dest.livre;
+      }
       const d = destinoAtual();
       const q = contagem(), tam = tamanhoSel();
       recResumo.textContent = q ? num(q) + (q === 1 ? ' arquivo selecionado' : ' arquivos selecionados') + (tam ? ' · ' + bytes(tam) : '') + '.' : 'Marque os arquivos que você quer recuperar.';
@@ -740,25 +854,53 @@
       let problema = '';
       if (d.vol && /[\\/:*?"<>|]/.test(d.pasta || '')) problema = 'O nome da pasta não pode ter \\ / : * ? " < > |';
       else if (d.vol && tam && d.vol.livre != null && tam > d.vol.livre) problema = 'Não cabe: faltam ' + bytes(tam - d.vol.livre) + ' em ' + d.vol.rotulo + '. Escolha outro disco ou marque menos arquivos.';
-      else if (d.livre && q && !d.caminho) problema = 'Escreva a pasta de destino.';
+      else if (dd.estado === 'ok' && tam && opAtual() && opAtual().livre < tam) problema = textoNaoCabe(tam, opAtual());
+      else if (d.livre && q && !d.caminho && (dd.estado === 'ok' || dd.estado === 'antigo' || dd.estado === 'nada')) problema = 'Escreva a pasta de destino.';
       const msg = avisoRec || problema;
       recAlerta.textContent = msg;
       recAlerta.hidden = !msg;
-      recBt.disabled = !q || !!problema || recuperando || sel.preparando || !d.caminho;
+      const calmo = precisaRefazer || !!sugestaoRec;                       // "disco mudou" e "destino recusado" não são erro grave: tom de aviso
+      recAlerta.classList.toggle('alerta-perigo', !calmo);
+      if (calmo) recAlerta.dataset.tipo = 'aviso'; else delete recAlerta.dataset.tipo;
+      recSug.hidden = !sugestaoRec || precisaRefazer;
+      recSug.textContent = 'Usar ' + sugestaoRec;
+      recSug.title = sugestaoRec;
+      recSug.disabled = recuperando;
+      recRefazer.hidden = !precisaRefazer;
+      recRefazer.disabled = refazendo;
+      recRefazer.textContent = refazendo ? 'Buscando…' : 'Buscar de novo neste disco';
+      recBt.hidden = precisaRefazer;
+      recBt.disabled = !q || !!problema || recuperando || sel.preparando || !d.caminho || dd.estado === 'carregando';
+      atualizarFixa();
       recBt.textContent = recuperando ? 'Iniciando…' : q ? 'Recuperar selecionados (' + num(q) + ')' : 'Recuperar selecionados';
     }
     async function recuperar() {
       if (recuperando) return;
       const d = destinoAtual();
       const corpoPost = sel.modo === 'filtro' ? { ids: 'todos', filtros: filtrosObj(), destino: d.caminho } : { ids: [...sel.ids], destino: d.caminho };
-      recuperando = true; avisoRec = ''; atualizarRec();
+      recuperando = true; avisoRec = ''; sugestaoRec = ''; atualizarRec();
       try {
         const j = await api('POST', '/api/jobs/' + encodeURIComponent(opts.jobId) + '/recuperar', corpoPost);
         recuperando = false;
         if (opts.aoRecuperar) opts.aoRecuperar(j && j.job && typeof j.job === 'object' ? j.job : j, j);
       } catch (e) {
-        recuperando = false; avisoRec = e.message;
+        recuperando = false;
+        if (e && e.status === 409) {
+          precisaRefazer = true;
+          avisoRec = 'O disco não está igual a quando a busca foi feita, então esta lista pode estar errada. Busque de novo neste disco para continuar.';
+        } else if (e && e.status === 400 && e.dados && typeof e.dados.sugestao === 'string' && e.dados.sugestao) {
+          sugestaoRec = e.dados.sugestao;
+          avisoRec = e.message;
+        } else avisoRec = e.message;
       }
+      atualizarRec();
+      mostrarAviso();
+    }
+    async function refazer() {
+      if (refazendo || !opts.aoRefazer) return;
+      refazendo = true; atualizarRec();
+      try { await opts.aoRefazer(); } catch (e) { avisoRec = e.message; }
+      refazendo = false;
       atualizarRec();
     }
     for (const c of [inPasta, inLivre]) c.addEventListener('input', () => { avisoRec = ''; });
@@ -768,16 +910,20 @@
     function atualizar(j) {
       job = j;
       if (!j) return;
+      if (dd.estado === 'nada') carregarDestinos();
       const chave = j.estado + '|' + Math.floor((Number(j.progresso) || 0) * 100);
       if (chave === ultChave) return;
       ultChave = chave;
       const agora = Date.now();
       clearTimeout(timerAtraso);
+      if (document.hidden) return;                       // aba escondida: sem consulta; ao voltar, busca de novo
       if (agora - ultimoPedido >= 1500) buscar(true);
       else timerAtraso = setTimeout(() => vivo && buscar(true), 1500 - (agora - ultimoPedido));
       if (estado === 'ok') desenhar();
     }
-    function destruir() { if (dlg.open) dlg.close(); dlg.remove(); vivo = false; clearTimeout(timerBusca); clearTimeout(timerAtraso); seq++; raiz.replaceChildren(); raiz.classList.remove('resultados'); }
+    const aoVoltar = () => { if (!document.hidden && vivo) { ultChave = ''; if (job) atualizar(job); } };
+    document.addEventListener('visibilitychange', aoVoltar);
+    function destruir() { document.removeEventListener('visibilitychange', aoVoltar); if (obsMini) obsMini.disconnect(); if (recObs) recObs.disconnect(); fila.length = 0; if (dlg.open) dlg.close(); dlg.remove(); vivo = false; clearTimeout(timerBusca); clearTimeout(timerAtraso); seq++; raiz.replaceChildren(); raiz.classList.remove('resultados'); }
 
     desenhar();
     buscar();

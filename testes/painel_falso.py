@@ -257,6 +257,11 @@ class Estado:
         s.abriu = None
         s.abrir_falha = False
         s.contador2 = 900
+        s.origem_mudou = False
+        s.destinos_on = False
+        s.destinos_sem = False
+        s.n_previas = 0
+        s.n_fontes = 0
 
     def lista(s):
         return sorted(s.jobs.values(), key=lambda j: j['criado_em'], reverse=True)
@@ -347,7 +352,29 @@ class H(BaseHTTPRequestHandler):
                 return self._json(401, {'erro': 'abra pelo atalho do programa'})
             if p == '/api/marca':
                 return self._json(200, {'app': 'Marca de Teste', 'empresa': 'Empresa de Teste', 'site': '', 'cor': '#7a3fb0'})
+            if p == '/api/destinos':
+                if not E.destinos_on:
+                    return self._json(404, {'erro': 'Não encontrado.'})
+                if E.destinos_sem or E.fontes_vazias:
+                    return self._json(200, {'sugerido': None, 'opcoes': [], 'aviso': 'Ligue um pendrive ou HD externo para guardar os arquivos.'})
+                origem = q.get('origem', [''])[0]
+                letras_origem = set()
+                for d in fontes_falsas():
+                    if d['caminho'] == origem:
+                        letras_origem = {v['letra'] for v in d['volumes']}
+                if len(origem) >= 6 and origem[-1] == ':':
+                    letras_origem = {origem[-2:]}
+                ops = []
+                for d in fontes_falsas():
+                    if d['tipo'] == 'optico':
+                        continue
+                    for v in d['volumes']:
+                        if v['tamanho'] and v['letra'] not in letras_origem:
+                            ops.append({'caminho': v['letra'] + '\\Recuperados', 'rotulo': 'Disco ' + v['letra'] + (' (' + v['rotulo'] + ')' if v['rotulo'] and '<' not in v['rotulo'] else ''), 'livre': 1024 if v['letra'] == 'E:' else v['livre']})
+                ops.sort(key=lambda o: -o['livre'])
+                return self._json(200, {'sugerido': ops[0]['caminho'] if ops else None, 'opcoes': ops, 'aviso': None})
             if p == '/api/fontes':
+                E.n_fontes += 1
                 with E.trava:
                     atraso, quebrado, vazias = E.atraso, E.quebrado, E.fontes_vazias
                 time.sleep(atraso)
@@ -390,6 +417,7 @@ class H(BaseHTTPRequestHandler):
                     return self._json(500, {'erro': 'Não consegui ler os resultados.'})
                 return self._json(200, dado)
             if len(partes) == 5 and partes[2] == 'achados' and partes[4] == 'previa':
+                E.n_previas += 1
                 try:
                     a = ACHADOS[int(partes[3]) - 1]
                 except (ValueError, IndexError):
@@ -453,7 +481,7 @@ class H(BaseHTTPRequestHandler):
                 if not destino:
                     return self._json(400, {'erro': 'Escolha onde salvar os arquivos.'})
                 if destino[:2].upper() == j['origem'][-2:].upper():
-                    return self._json(400, {'erro': 'O destino não pode ficar no mesmo disco da origem.'})
+                    return self._json(400, {'erro': 'O destino não pode ficar no mesmo disco da origem.', 'sugestao': 'C:\\Recuperados'})
                 if corpo.get('ids') == 'todos':
                     alvo = filtrar(visiveis(j), {k: [str(v)] for k, v in (corpo.get('filtros') or {}).items()})
                 else:
@@ -461,9 +489,11 @@ class H(BaseHTTPRequestHandler):
                     alvo = [a for a in visiveis(j) if a['id'] in ids]
                 if not alvo:
                     return self._json(400, {'erro': 'Nenhum arquivo para recuperar.'})
+                if E.origem_mudou:
+                    return self._json(409, {'erro': 'A origem não é mais a mesma de quando este trabalho começou (outro disco no mesmo caminho). Refaça a busca.'})
                 aviso = None
                 if destino[:2].upper() == 'F:':
-                    return self._json(400, {'erro': 'Não cabe: o destino tem 41 GB livres e os arquivos escolhidos precisam de mais.'})
+                    return self._json(400, {'erro': 'Não cabe: o destino tem 41 GB livres e os arquivos escolhidos precisam de mais.', 'sugestao': 'C:\\Recuperados'})
                 if destino[:2].upper() == 'C:':
                     aviso = 'Atenção: o destino tem 120 GB livres e faltam gravar mais; alguns arquivos podem falhar por falta de espaço.'
                 E.contador2 += 1
@@ -551,12 +581,21 @@ class H(BaseHTTPRequestHandler):
                 E.contador2 += 1
                 id_ = f'j-20261104-{E.contador2:04d}'
                 prog = float(q.get('progresso', ['1'])[0])
-                n = novo(id_, q.get('estado', ['concluido'])[0], '\\\\.\\E:', prog, total=int(28.8 * 1024 ** 3), criado_em=agora() + 1)
-                n['tipo'], n['destino'], n['opcoes'] = 'varredura', '', {'modo': 'rapida'}
+                n = novo(id_, q.get('estado', ['concluido'])[0], q.get('origem', ['\\\\.\\E:'])[0], prog, total=int(28.8 * 1024 ** 3), criado_em=agora() + 1, erro=q.get('erro', [''])[0])
+                n['tipo'], n['destino'], n['opcoes'] = 'varredura', '', {'modo': q.get('modo', ['rapida'])[0]}
+                if q.get('criado'):
+                    n['criado_em'] = float(q['criado'][0])
                 E.jobs[id_] = n
                 E.eventos[id_] = []
                 E.mudou(n)
                 return self._json(200, {'id': id_})
+            elif p == '/_teste/contadores':
+                return self._json(200, {'previas': E.n_previas, 'fontes': E.n_fontes, 'consultas': E.consultas})
+            elif p == '/_teste/destinos':
+                E.destinos_on = q.get('on', ['1'])[0] == '1'
+                E.destinos_sem = q.get('sem', ['0'])[0] == '1'
+            elif p == '/_teste/origem_mudou':
+                E.origem_mudou = q.get('on', ['1'])[0] == '1'
             elif p == '/_teste/abrir_falha':
                 E.abrir_falha = q.get('on', ['1'])[0] == '1'
             elif p == '/_teste/ultimo_rec':

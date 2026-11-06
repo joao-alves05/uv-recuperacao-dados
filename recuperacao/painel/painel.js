@@ -20,6 +20,7 @@
   const CONSULTA_MS = 2000;
   const TENTAR_VOLTAR_MS = 10000;
   const HIST_MS = 3000;
+  const FONTES_MS = 30000;               // /api/fontes chama o Windows: não consultar com frequência
 
   /* ---------- estado (só o que a tela precisa; a verdade está no serviço) ---------- */
   const jobs = new Map();
@@ -53,11 +54,50 @@
     const partes = String(caminho == null ? '' : caminho).split(/[\\/]+/).filter(Boolean);
     return partes.length ? partes[partes.length - 1] : String(caminho || 'Sem nome');
   }
+  function alvoDaOrigem(origem) {
+    const c = String(origem == null ? '' : origem);
+    return [...alvos.discos, ...alvos.volumes].find((x) => x.caminho === c && !x.vazio) || null;
+  }
+  function nomeAmigavel(origem) {            // o nome que o painel de discos mostra, casado pelo caminho
+    const c = String(origem == null ? '' : origem);
+    const a = alvoDaOrigem(c);
+    if (a) return a.titulo;
+    const d = /^\\\\[.]\\PhysicalDrive(\d+)$/i.exec(c);
+    if (d) return 'Disco ' + d[1];
+    const v = /^\\\\[.]\\([A-Za-z]:)$/.exec(c);
+    if (v) return 'Disco ' + v[1].toUpperCase();
+    return nomeDe(c);
+  }
+  function detalheDisco(origem) {            // tamanho e letras, para a linha pequena
+    const a = alvoDaOrigem(origem);
+    if (!a) return '';
+    return [bytes(a.tamanho), a.tipo === 'disco' ? (a.letras.length ? a.letras.join(', ') : '') : a.letra].filter(Boolean).join(' · ');
+  }
+  function tipoJobTxt(j) {
+    if (!j) return '';
+    if (j.tipo === 'varredura') return j.opcoes && j.opcoes.modo === 'profunda' ? 'Busca profunda' : 'Busca rápida';
+    if (j.tipo === 'recuperar') return 'Recuperação de arquivos';
+    if (j.tipo === 'particoes') return 'Busca de partições';
+    return 'Cópia do disco';
+  }
+  function dataHora(v) {
+    if (v == null || v === '') return '';
+    const d = new Date(typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : v);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).replace(', ', ' ');
+  }
+  function motivoCurto(j) {
+    if (!j || j.estado !== 'falhou') return '';
+    const t = String(j.erro || j.mensagem || '').replace(/\s+/g, ' ').trim();
+    if (!t) return 'Sem motivo informado.';
+    const m = /^.*?[.!?](\s|$)/.exec(t);
+    return m ? m[0].trim() : t;
+  }
   function tituloJob(j) {
-    if (j && j.tipo === 'varredura') return 'Busca em ' + nomeDe(j.origem);
+    if (j && j.tipo === 'varredura') return 'Busca em ' + nomeAmigavel(j.origem);
     if (j && j.tipo === 'recuperar') return 'Arquivos recuperados';
-    if (j && j.tipo === 'particoes') return 'Partições em ' + nomeDe(j.origem);
-    return nomeDe(j && j.origem);
+    if (j && j.tipo === 'particoes') return 'Partições em ' + nomeAmigavel(j.origem);
+    return nomeAmigavel(j && j.origem);
   }
   function bytes(n) {
     n = Number(n);
@@ -124,6 +164,7 @@
     if (!r.ok) {
       const err = new Error((dados && typeof dados.erro === 'string' && dados.erro) || 'Não foi possível concluir. Tente de novo.');
       err.status = r.status;
+      err.dados = dados;
       throw err;
     }
     return dados;
@@ -174,7 +215,7 @@
     render();
   }
   function agendarHistorico() {
-    if (timerHist) return;
+    if (timerHist || document.hidden) return;
     timerHist = setTimeout(() => { timerHist = null; if (abertoId) carregarDetalhe(abertoId, true); }, HIST_MS);
   }
 
@@ -325,7 +366,7 @@
         return;
       }
     }
-    if (r.tela === 'inicio' && fontesEstado === 'ok' && Date.now() - fontesQuando > 5000) carregarFontes();
+    if (r.tela === 'inicio' && fontesEstado === 'ok' && !document.hidden && Date.now() - fontesQuando > FONTES_MS) carregarFontes();
     render();
   }
 
@@ -366,6 +407,8 @@
     const nome = document.createElement('span'); nome.className = 'item-nome';
     const tag = document.createElement('span'); tag.className = 'tag';
     topo.append(nome, tag);
+    const sub = document.createElement('div'); sub.className = 'item-sub';
+    const motivo = document.createElement('div'); motivo.className = 'item-motivo';
     const barra = document.createElement('div'); barra.className = 'barra';
     const cheia = document.createElement('div'); cheia.className = 'barra-cheia';
     barra.append(cheia);
@@ -373,7 +416,7 @@
     const esq = document.createElement('span'); esq.className = 'esq';
     const dir = document.createElement('span'); dir.className = 'dir';
     meta.append(esq, dir);
-    a.append(topo, barra, meta);
+    a.append(topo, sub, motivo, barra, meta);
     a.addEventListener('click', (e) => {
       if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
@@ -381,12 +424,18 @@
     });
     const li = document.createElement('li');
     li.append(a);
-    return { li, a, nome, tag, barra, cheia, esq, dir };
+    return { li, a, nome, tag, barra, cheia, esq, dir, sub, motivo };
   }
   function atualizarItem(it, j) {
     const n = tituloJob(j);
     it.nome.textContent = n;
     it.a.title = String(j.origem == null ? '' : j.origem);
+    it.sub.textContent = [tipoJobTxt(j), dataHora(j.criado_em)].filter(Boolean).join(' · ');
+    it.sub.title = it.sub.textContent;
+    const mot = motivoCurto(j);
+    it.motivo.textContent = mot;
+    it.motivo.title = mot;
+    it.motivo.hidden = !mot;
     it.tag.textContent = ESTADOS[j.estado] || String(j.estado || '');
     it.tag.dataset.estado = j.estado;
     it.a.dataset.estado = j.estado;
@@ -466,8 +515,18 @@
     $('j-vel').textContent = velocidade(j);
     $('j-resta').textContent = restante(j);
     $('j-ruins').textContent = String(ruins(j));
-    $('j-origem').textContent = String(j.origem == null ? '' : j.origem);
-    $('j-origem').title = $('j-origem').textContent;
+    const origemTec = String(j.origem == null ? '' : j.origem);
+    const origemAm = nomeAmigavel(origemTec);
+    const dOrigem = $('j-origem');
+    const chaveOrigem = origemAm + '|' + detalheDisco(origemTec) + '|' + origemTec;
+    if (dOrigem.dataset.chave !== chaveOrigem) {
+      dOrigem.dataset.chave = chaveOrigem;
+      dOrigem.replaceChildren(el('span', 'origem-nome', origemAm));
+      const dd = detalheDisco(origemTec);
+      if (dd) dOrigem.append(' ', el('span', 'origem-det', '· ' + dd));
+      if (origemAm !== origemTec) dOrigem.append(el('small', 'origem-tec', origemTec));
+    }
+    dOrigem.title = origemTec;
     $('j-destino').textContent = String(j.destino == null ? '' : j.destino);
     $('j-destino').title = $('j-destino').textContent;
     $('j-dt-destino').textContent = tipoJob === 'recuperar' ? 'Salvando em' : tipoJob === 'particoes' ? 'Relatório em' : 'Cópia';
@@ -567,6 +626,12 @@
       $('j-resultados').hidden = false;
       resComp = { id: j.id, obj: window.Resultados.montar($('j-resultados'), {
         jobId: j.id, api, bytes, destinos: () => destinosPara(jobs.get(j.id)),
+        aoRefazer: async () => {
+          const novo = await buscarDeNovo(jobs.get(j.id) || j);
+          if (!novo || !novo.id) return;
+          aplicarJob(novo);
+          ir('/jobs/' + encodeURIComponent(novo.id));
+        },
         aoRecuperar: (novo, resp) => {
           if (!novo || !novo.id) return;
           const av = (resp && typeof resp.aviso === 'string' && resp.aviso) || (typeof novo.aviso === 'string' && novo.aviso) || '';
@@ -581,14 +646,23 @@
   function destinosPara(j) {
     const origem = j ? textoDe(j.origem) : '';
     const a = [...alvos.volumes, ...alvos.discos].find((x) => x.caminho === origem && !x.vazio);
+    const ehDisco = /^\\\\[.]\\PhysicalDrive\d+$/i.test(origem);
     let lista;
     if (a) lista = candidatos(a);
+    else if (ehDisco) lista = [];                                  // não sabemos quais letras são deste disco: melhor perguntar
     else {
-      const l = /^\\\\\.\\([A-Za-z]:)$/.exec(origem);
+      const l = /^(?:\\\\[.]\\)?([A-Za-z]:)/.exec(origem);        // disco da origem (letra), inclusive imagem dentro dele
       lista = alvos.volumes.filter((v) => v.tipo === 'volume' && !v.vazio && v.tipoFonte !== 'optico' && /^[A-Za-z]:$/.test(v.letra) && !(l && v.letra.toUpperCase() === l[1].toUpperCase()));
     }
     const sug = a ? sugerido(a, lista) : lista[0];
     return lista.map((v) => ({ rotulo: v.titulo, base: v.letra, livre: v.livre, sugerido: v === sug }));
+  }
+  async function buscarDeNovo(j) {                                  // mesma busca, no mesmo disco
+    const o = j.opcoes && typeof j.opcoes === 'object' ? j.opcoes : {};
+    const op = { modo: o.modo === 'profunda' ? 'profunda' : 'rapida', sistema_antes: true };
+    if (o.offset != null && Number.isFinite(Number(o.offset))) op.offset = o.offset;
+    if (o.tamanho != null && Number.isFinite(Number(o.tamanho))) op.tamanho = o.tamanho;
+    return jobDe(await api('POST', '/api/jobs', { tipo: 'varredura', origem: j.origem, opcoes: op }));
   }
   $('j-abrir-pasta').addEventListener('click', async () => {
     if (!abertoId) return;
@@ -752,7 +826,7 @@
   let seqFontes = 0;
   let admin = null;                      // true | false | null (o serviço não disse)
 
-  async function carregarFontes() {
+  async function carregarFontes(forcar) {              // forcar: pede ao serviço para reler os discos
     const meu = ++seqFontes;
     fontesAtualizando = true;
     if (!fontes) fontesEstado = 'carregando';
@@ -760,7 +834,7 @@
     try {
       const s = await api('GET', '/api/saude').catch(() => null);
       admin = s && typeof s.admin === 'boolean' ? s.admin : null;
-      const d = await api('GET', '/api/fontes');
+      const d = await api('GET', forcar ? '/api/fontes?novo=1' : '/api/fontes');
       if (meu !== seqFontes) return;
       fontes = Array.isArray(d) ? d : d && Array.isArray(d.fontes) ? d.fontes : [];
       alvos = montarAlvos(fontes);
@@ -862,7 +936,7 @@
     box.hidden = !lista.length || rota.tela === 'avancado';
     if (!lista.length) { buscasChave = ''; return; }
     for (const j of lista) carregarTotal(j);
-    const sig = lista.map((j) => [j.id, j.estado, pct(j), (totaisBusca.get(j.id) || {}).total].join(':')).join('|');
+    const sig = fontesVer + '#' + lista.map((j) => [j.id, j.estado, pct(j), (totaisBusca.get(j.id) || {}).total].join(':')).join('|');
     if (sig === buscasChave) return;
     buscasChave = sig;
     const ul = $('i-buscas-lista');
@@ -873,7 +947,7 @@
       a.href = '/jobs/' + encodeURIComponent(j.id);
       a.dataset.estado = j.estado;
       const topo = el('div', 'item-topo');
-      const nome = el('span', 'item-nome', 'Busca em ' + nomeDe(j.origem));
+      const nome = el('span', 'item-nome', 'Busca em ' + nomeAmigavel(j.origem));
       nome.title = textoDe(j.origem);
       const tag = el('span', 'tag', ESTADOS[j.estado] || textoDe(j.estado));
       tag.dataset.estado = j.estado;
@@ -1472,8 +1546,8 @@
   $('lista-tentar').addEventListener('click', () => { carregarLista().catch(() => {}); });
   for (const b of document.querySelectorAll('[data-voltar]')) b.addEventListener('click', () => ir('/'));
   for (const b of document.querySelectorAll('[data-voltar-lista]')) b.addEventListener('click', () => ir('/#lista'));
-  $('i-atualizar').addEventListener('click', () => carregarFontes());
-  $('i-tentar').addEventListener('click', () => carregarFontes());
+  $('i-atualizar').addEventListener('click', () => carregarFontes(true));
+  $('i-tentar').addEventListener('click', () => carregarFontes(true));
   for (const a of [$('avancado-link'), $('ver-lista')]) {
     a.addEventListener('click', (e) => {
       if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
@@ -1597,11 +1671,28 @@
   carregarMarca();
   carregarFontes();
   conectar();
+  let abaOculta = false;
+  function pausarAba() {                  // aba escondida: nada de consulta ao serviço
+    abaOculta = true;
+    pararTudo();
+    clearTimeout(timerHist); timerHist = null;
+    emConsulta = false;
+  }
+  function voltarAba() {
+    abaOculta = false;
+    if (semAcessoAtivo) return;
+    falhas = 0;
+    definirModo('conectando');
+    carregarLista().catch(() => {});
+    conectar();
+    if (abertoId) carregarDetalhe(abertoId, true);
+    if (rota.tela === 'inicio' && fontesEstado === 'ok' && Date.now() - fontesQuando > FONTES_MS) carregarFontes();
+  }
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && fontesEstado === 'ok' && Date.now() - fontesQuando > 5000) carregarFontes();
+    if (document.hidden) { if (!abaOculta) pausarAba(); } else if (abaOculta) voltarAba();
   });
   window.__painel = { // só para leitura nos testes de tela
-    estado: () => ({ modo, falhas, emConsulta, abertoId, detEstado, avisandoSaida, jobs: jobs.size }),
+    estado: () => ({ fontesEstado, alvos: alvos.discos.length + alvos.volumes.length, modo, falhas, emConsulta, abaOculta, sse: !!es, abertoId, detEstado, avisandoSaida, jobs: jobs.size }),
     resultados: () => (resComp ? resComp.obj.estado() : null),
   };
 })();
