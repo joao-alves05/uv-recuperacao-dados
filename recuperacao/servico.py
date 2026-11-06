@@ -66,6 +66,11 @@ class ServidorExclusivo(ThreadedWSGIServer):
         super().server_bind()
 
 
+FONTES_TTL_S = 5
+PRIORIDADE_ABAIXO_DO_NORMAL = 0x00004000        # BELOW_NORMAL_PRIORITY_CLASS
+PROCESSO_MODO_SEGUNDO_PLANO = 0x00100000        # PROCESS_MODE_BACKGROUND_BEGIN
+
+
 class Contexto:
     """Tudo o que o serviço tem de vivo: banco, executor, token. O app Flask só guarda uma referência."""
 
@@ -78,6 +83,8 @@ class Contexto:
         self.elevador = pedir_elevacao                   # injetável nos testes (ShellExecute falso)
         self.eh_windows = os.name == 'nt'
         self.provedor_fontes = provedor_fontes          # injetável nos testes; None = discos de verdade (só metadados)
+        self._fontes_cache = None                       # (instante, lista): o PowerShell custa caro e o painel pergunta toda hora
+        self._trava_fontes = threading.Lock()
         self.parar = threading.Event()
         self.servidor = None
         self.relogio = time.monotonic          # os testes trocam por um relógio falso
@@ -86,6 +93,16 @@ class Contexto:
         self._sessoes = {}                     # valor do cookie -> quando expira (só em memória: reiniciar o serviço exige reabrir pelo atalho)
         self._trava_desligar = threading.Lock()
         self._desligado = False
+
+    def fontes(self, novo=False):
+        """Lista de fontes com validade de FONTES_TTL_S; `novo` força reler (botão Atualizar)."""
+        with self._trava_fontes:
+            agora = self.relogio()
+            if not novo and self._fontes_cache and agora - self._fontes_cache[0] < FONTES_TTL_S:
+                return self._fontes_cache[1]
+            lista = fontes.listar(self.provedor_fontes)
+            self._fontes_cache = (agora, lista)
+            return lista
 
     def _limpar(self, tabela, agora, limite):
         for k in [k for k, fim in tabela.items() if fim <= agora]:
@@ -259,7 +276,7 @@ def criar_app(ctx=None):
 
     @app.get('/api/fontes')
     def listar_fontes():
-        return jsonify(fontes.listar(ctx.provedor_fontes))
+        return jsonify(ctx.fontes(novo=request.args.get('novo') == '1'))
 
     @app.post('/api/elevar')
     def elevar():
@@ -424,7 +441,25 @@ def criar_app(ctx=None):
 
 
 # --- ciclo de vida -------------------------------------------------------
+def baixar_prioridade():
+    """Windows: o serviço (e os processos filhos, que herdam) trabalha em prioridade baixa de CPU e de disco, para o resto do
+    PC não travar. Falha aqui não impede nada."""
+    if os.name != 'nt':
+        return False
+    try:
+        k = ctypes.windll.kernel32
+        k.GetCurrentProcess.restype = ctypes.c_void_p
+        k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        eu = k.GetCurrentProcess()
+        ok = bool(k.SetPriorityClass(eu, PRIORIDADE_ABAIXO_DO_NORMAL))
+        k.SetPriorityClass(eu, PROCESSO_MODO_SEGUNDO_PLANO)             # E/S e memória em segundo plano; pode falhar sem problema
+        return ok
+    except Exception:
+        return False
+
+
 def principal():
+    baixar_prioridade()
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
     try:
         ctx = Contexto()

@@ -168,6 +168,25 @@ class TestRota(auxiliar.CasoComPasta):
         self.assertEqual([x['id'] for x in r.get_json()], ['disco-0', 'disco-1', 'disco-2', 'disco-3', 'optico-0'])
         self.assertEqual(set(r.get_json()[0]), CHAVES)
 
+    def test_lista_de_fontes_tem_cache_de_poucos_segundos(self):
+        chamadas = []
+
+        def provedor():
+            chamadas.append(1)
+            return fontes.montar_windows(BRUTO_WINDOWS)
+        ctx, c, base = self.cliente(provedor)
+        t = {'v': 100.0}
+        ctx.relogio = lambda: t['v']
+        h = {'X-RecDados-Token': ctx.token}
+        for _ in range(5):
+            self.assertEqual(c.get('/api/fontes', base_url=base, headers=h).status_code, 200)
+        self.assertEqual(len(chamadas), 1)
+        c.get('/api/fontes?novo=1', base_url=base, headers=h)
+        self.assertEqual(len(chamadas), 2)
+        t['v'] += servico.FONTES_TTL_S + 1
+        c.get('/api/fontes', base_url=base, headers=h)
+        self.assertEqual(len(chamadas), 3)
+
     def test_provedor_quebrado_responde_lista_vazia(self):
         def ruim():
             raise OSError('sem acesso')

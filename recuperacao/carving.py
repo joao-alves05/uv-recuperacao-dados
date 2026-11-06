@@ -236,7 +236,7 @@ class Varredor:
             return 0
         if self.modo == 'rapida':
             return 2
-        return max(1, min(MAX_PROCESSOS, (os.cpu_count() or 1) - 1))
+        return max(1, min(MAX_PROCESSOS, (os.cpu_count() or 1) // 2))      # metade dos núcleos: o PC segue usável
 
     # --- leitura -----------------------------------------------------------------------------------------------
     def _ler(self, pos, n, extra=0):

@@ -3,6 +3,7 @@
 import json
 import os
 import unittest
+from unittest import mock
 
 import amostras as A
 import auxiliar
@@ -568,6 +569,15 @@ class TestSegundoPlano(CasoComPasta):
 
     def chaves(self, achados):
         return [(a['offset'], a['tipo'], a['tamanho'], a['estado']) for a in achados]
+
+    def test_busca_usa_no_maximo_metade_dos_nucleos(self):
+        class Falso:
+            caminho, tamanho = 'x', carving.MINIMO_SEGUNDO_PLANO
+        v = carving.Varredor.__new__(carving.Varredor)
+        v.leitor, v.cat, v.modo = Falso(), type('C', (), {'caminho': 'y'})(), 'profunda'
+        for nucleos, esperado in ((1, 1), (2, 1), (4, 2), (8, 3), (16, 3)):
+            with mock.patch.object(carving.os, 'cpu_count', return_value=nucleos):
+                self.assertEqual(v._escolher(None), esperado, nucleos)
 
     def test_threads_e_processos_dao_o_mesmo_resultado_que_sozinho(self):
         caminho = self.imagem()
