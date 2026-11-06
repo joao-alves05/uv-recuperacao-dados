@@ -248,6 +248,175 @@ class TestEstadoParcialERuim(unittest.TestCase):
         self.assertEqual(achados[0]['estado'], 'parcial')
 
 
+class TestCorpoConferido(unittest.TestCase):
+    """Revisão final, item 3: RIFF, BMP e SQLite não são "bom" só porque o cabeçalho tem um tamanho plausível."""
+
+    def um(self, arquivo, depois=3000):
+        achados, _, _ = varrer(com_folga(arquivo, depois=depois))
+        return achados
+
+    def test_riff_com_tamanho_declarado_maior_que_os_pedacos_nao_e_bom(self):
+        import struct
+        wav = bytearray(A.wav(1000))
+        struct.pack_into('<I', wav, 4, len(wav) - 8 + 1500)               # diz ter 1500 bytes a mais (aí vêm zeros)
+        achados = self.um(bytes(wav))
+        self.assertEqual([(a['tipo'], a['estado']) for a in achados], [('WAV', 'parcial')])
+        self.assertLessEqual(achados[0]['tamanho'], len(wav))
+        # o chunk de dados que passa do fim declarado também
+        wav = bytearray(A.wav(1000))
+        struct.pack_into('<I', wav, 40, 5000)
+        self.assertEqual(self.um(bytes(wav))[0]['estado'], 'parcial')
+
+    def test_wav_sem_chunk_de_dados_e_avi_sem_lista_de_filmagem_nao_sao_bons(self):
+        import struct
+        fmt = struct.pack('<4sIHHIIHH', b'fmt ', 16, 1, 1, 8000, 8000, 1, 8)
+        corpo = b'WAVE' + fmt + b'junk' + struct.pack('<I', 8) + bytes(8)
+        sem_data = b'RIFF' + struct.pack('<I', len(corpo)) + corpo
+        self.assertEqual(self.um(sem_data)[0]['estado'], 'parcial')
+        lista = b'LIST' + struct.pack('<I', 12) + b'hdrl' + b'avih' + struct.pack('<I', 0)
+        corpo = b'AVI ' + lista + b'JUNK' + struct.pack('<I', 8) + bytes(8)
+        self.assertEqual(self.um(b'RIFF' + struct.pack('<I', len(corpo)) + corpo)[0]['estado'], 'parcial')
+        self.assertEqual(self.um(A.avi())[0]['estado'], 'bom')
+        self.assertEqual(self.um(A.wav())[0]['estado'], 'bom')
+
+    def test_wav_com_chunk_de_nome_invalido_no_meio_e_parcial_ate_ali(self):
+        wav = bytearray(A.wav(1000))
+        wav[36:40] = b'\x00\x01\x02\x03'                                   # onde ficava o id do chunk "data"
+        achados = self.um(bytes(wav))
+        self.assertEqual(achados[0]['estado'], 'parcial')
+        self.assertLess(achados[0]['tamanho'], len(wav))
+
+    def test_bmp_com_dimensoes_que_nao_cabem_no_tamanho_nao_e_achado(self):
+        import struct
+        bmp = bytearray(A.bmp(2, 2))
+        struct.pack_into('<ii', bmp, 18, 50000, 50000)                    # 2,5 bilhões de pixels em 70 bytes
+        self.assertEqual(self.um(bytes(bmp)), [])
+        bmp = bytearray(A.bmp(2, 2))
+        struct.pack_into('<I', bmp, 2, 60)                                # tamanho menor que o cabeçalho + pixels
+        self.assertEqual(self.um(bytes(bmp)), [])
+        bmp = bytearray(A.bmp(2, 2))
+        struct.pack_into('<I', bmp, 30, 99)                               # compressão que não existe
+        self.assertEqual(self.um(bytes(bmp)), [])
+        self.assertEqual(self.um(A.bmp(40, 30))[0]['estado'], 'bom')
+
+    def test_sqlite_com_esquema_ou_paginas_invalidos(self):
+        banco = bytearray(A.sqlite_bytes())
+        banco[100] = 0x00                                                 # a página do esquema não é uma árvore
+        self.assertEqual(self.um(bytes(banco)), [])
+        banco = bytearray(A.sqlite_bytes())
+        banco[56:60] = b'\x00\x00\x00	'                                 # codificação de texto inexistente
+        self.assertEqual(self.um(bytes(banco)), [])
+        banco = bytearray(A.sqlite_bytes())
+        self.assertEqual(self.um(bytes(banco))[0]['estado'], 'bom')
+
+    def test_sqlite_com_paginas_do_meio_zeradas_e_parcial(self):
+        banco = bytearray(A.sqlite_bytes(2000))
+        paginas = len(banco) // 4096
+        self.assertGreater(paginas, 20)
+        meio = (paginas // 2) * 4096
+        banco[meio:] = bytes(len(banco) - meio)                           # a metade final foi sobrescrita
+        achados = self.um(bytes(banco), depois=0)
+        self.assertEqual(achados[0]['estado'], 'parcial')
+        self.assertLess(achados[0]['tamanho'], len(banco))
+        self.assertGreaterEqual(achados[0]['tamanho'], 4096)
+
+
+class TestDadoMalucoNaoDerrubaAVarredura(unittest.TestCase):
+    """Revisão final, item 4: o que o validador não esperava (data absurda, OSError...) descarta o candidato, não a varredura."""
+
+    def test_mp4_com_data_de_criacao_de_64_bits_absurda(self):
+        import struct
+        for criacao in (2 ** 63, 2 ** 64 - 1, 2 ** 40):
+            mvhd = A._caixa(b'mvhd', b'\x01\x00\x00\x00' + struct.pack('>QQ', criacao, criacao) + bytes(80))
+            mp4 = A._caixa(b'ftyp', b'isom\x00\x00\x02\x00isomiso2mp41') + A._caixa(b'moov', mvhd)                 + A._caixa(b'mdat', A.aleatorio(2000, 4))
+            achados, _, v = varrer(com_folga(mp4))
+            self.assertEqual([(a['tipo'], a['estado'], a['data']) for a in achados], [('MP4', 'bom', None)], criacao)
+            self.assertEqual(v.erros_validador, 0)
+
+    def test_qualquer_excecao_do_validador_vira_candidato_descartado(self):
+        for erro in (OSError(22, 'Invalid argument'), OverflowError('timestamp'), RuntimeError('bug'), ZeroDivisionError()):
+            cat = carving.carregar()
+            for a in cat.assinaturas:
+                if a['tipo'] == 'GIF':
+                    def quebrado(j, off, limite, assin, erro=erro):
+                        raise erro
+                    a['_funcao'] = quebrado
+            achados, _, v = varrer(com_folga(A.gif()) + A.png(), 'profunda', catalogo=cat)
+            self.assertEqual(v.erros_validador, 1, repr(erro))
+            self.assertEqual([a['tipo'] for a in achados], ['PNG'], repr(erro))
+
+    def test_a_retomada_passa_pelo_mesmo_ponto_sem_cair(self):
+        cat = carving.carregar()
+        for a in cat.assinaturas:
+            if a['tipo'] == 'GIF':
+                def quebrado(j, off, limite, assin):
+                    raise OSError(22, 'Invalid argument')
+                a['_funcao'] = quebrado
+        img = bytes(8192) + A.gif() + bytes(8192) + A.png() + bytes(4096)
+        v = carving.Varredor(Memoria(img), cat, 'profunda', 4096)
+        primeiro = []
+        for pos, novos, _ in v.blocos(0):
+            primeiro += novos
+            ponto = pos
+            if pos >= 8192:
+                break
+        v2 = carving.Varredor(Memoria(img), cat, 'profunda', 4096)
+        resto = [a for _, novos, _ in v2.blocos(ponto) for a in novos]
+        self.assertEqual([a['tipo'] for a in primeiro + resto], ['PNG'])
+
+
+def dormir(segundos):
+    import time
+    time.sleep(segundos)
+    return 1
+
+
+class TestEncerrarPool(unittest.TestCase):
+    """Revisão final, item 7: leitura presa não pode travar o encerramento nem deixar processo órfão."""
+
+    def test_mata_o_processo_preso_numa_leitura_dentro_do_prazo(self):
+        import time
+        from concurrent.futures import ProcessPoolExecutor
+        pool = ProcessPoolExecutor(max_workers=2)
+        futuros = [pool.submit(dormir, 600) for _ in range(2)]
+        esperar_ate = time.monotonic() + 30
+        while time.monotonic() < esperar_ate and sum(1 for p in pool._processes.values() if p.is_alive()) < 2:
+            time.sleep(0.05)
+        procs = list(pool._processes.values())
+        self.assertEqual(len(procs), 2)
+        time.sleep(1.0)                                              # os dois já estão dentro do sleep
+        t0 = time.monotonic()
+        presas = carving.encerrar_pool(pool, prazo=1.0)
+        self.assertLess(time.monotonic() - t0, 8.0)
+        self.assertFalse(presas)
+        self.assertTrue(all(not p.is_alive() for p in procs), 'sobrou processo filho')
+        del futuros
+
+    def test_thread_presa_nao_trava_e_avisa_para_nao_fechar_o_descritor(self):
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        solta = threading.Event()
+        pool = ThreadPoolExecutor(max_workers=1)
+        pool.submit(solta.wait, 60)
+        time.sleep(0.2)
+        t0 = time.monotonic()
+        self.assertTrue(carving.encerrar_pool(pool, prazo=0.5))
+        self.assertLess(time.monotonic() - t0, 5.0)
+        solta.set()
+
+    def test_pool_ocioso_encerra_sem_esperar_o_prazo(self):
+        import time
+        from concurrent.futures import ProcessPoolExecutor
+        pool = ProcessPoolExecutor(max_workers=1)
+        self.assertEqual(pool.submit(dormir, 0).result(timeout=60), 1)
+        procs = list(pool._processes.values())
+        t0 = time.monotonic()
+        self.assertFalse(carving.encerrar_pool(pool, prazo=30.0))
+        self.assertLess(time.monotonic() - t0, 10.0)
+        self.assertTrue(all(not p.is_alive() for p in procs))
+
+
 class TestFalsosPositivos(unittest.TestCase):
     def test_bytes_aleatorios_nao_geram_achado_em_nenhum_modo(self):
         lixo = A.aleatorio(1 << 20, 123)

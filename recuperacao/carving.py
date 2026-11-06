@@ -16,8 +16,8 @@ Modos: `rapida` só considera cabeçalhos no começo de um setor (é onde arquiv
 """
 import json
 import os
-import struct
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 from . import leitor as leitor_mod
@@ -152,6 +152,26 @@ def candidatos(dados, pos, n, grupos, rapida, setor):
 _W = threading.local()
 MINIMO_SEGUNDO_PLANO = 64 * 1024 * 1024
 MAX_PROCESSOS = 3
+PRAZO_ENCERRAR = 10.0           # segundos que os trabalhadores têm para largar a leitura antes de serem mortos
+
+
+def encerrar_pool(pool, prazo=PRAZO_ENCERRAR):
+    """Encerra o pool sem travar: cancela o que não começou, espera até `prazo` s e MATA os processos que ainda estiverem
+    numa leitura presa (disco que parou de responder), para não sobrar processo órfão. Threads não se matam: devolve True se
+    alguma ficou presa (quem chamou não deve fechar os descritores que ela usa)."""
+    procs = list((getattr(pool, '_processes', None) or {}).values())      # antes do shutdown, que zera a tabela
+    fios = list(getattr(pool, '_threads', None) or ())
+    pool.shutdown(wait=False, cancel_futures=True)
+    fim = time.monotonic() + prazo
+    for p in procs:
+        p.join(max(0.0, fim - time.monotonic()))
+    for p in procs:
+        if p.is_alive():
+            p.kill()
+            p.join(2.0)
+    for t in fios:
+        t.join(max(0.0, fim - time.monotonic()))
+    return any(t.is_alive() for t in fios)
 
 
 def _iniciar_trabalhador(caminho, cat_caminho, modo, setor, desl, tam, registro):
@@ -232,7 +252,7 @@ class Varredor:
             return None
         try:
             return a['_funcao'](self.janela, inicio, limite, a)
-        except (ValueError, IndexError, OverflowError, MemoryError, TypeError, KeyError, struct.error):
+        except Exception:                      # dado alheio nunca derruba a varredura (nem a retomada, que bateria no mesmo ponto)
             self.erros_validador += 1
             return None
 
@@ -312,7 +332,7 @@ class Varredor:
                     try:
                         cands, ruins = self._do_pool(pool, futs, pos, tam)
                     except Exception:                      # trabalhador morreu, não abriu a origem...: segue sozinho
-                        pool.shutdown(wait=False, cancel_futures=True)
+                        encerrar_pool(pool, 2.0)
                         pool, futs, self.segundo_plano = None, {}, 'nenhum'
                 if cands is None:
                     dados, ruins = self._ler(pos, n, self.cat.sobra)
@@ -340,9 +360,8 @@ class Varredor:
                     pos = -(-pos // self.setor) * self.setor
                 yield min(pos, tam), achados, ruins
         finally:
-            if pool is not None:
-                pool.shutdown(wait=True, cancel_futures=True)
-            for l in abertos:
+            presas = encerrar_pool(pool) if pool is not None else False
+            for l in ([] if presas else abertos):               # thread presa numa leitura ainda usa o descritor: não fecha
                 try:
                     l.fechar()
                 except OSError:

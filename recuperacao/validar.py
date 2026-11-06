@@ -332,7 +332,7 @@ def gif(j, off, limite, a):
 
 # --- BMP ----------------------------------------------------------------------------------------------------------
 def bmp(j, off, limite, a):
-    h = j.ler(off, 30)
+    h = j.ler(off, 34)
     if len(h) < 30 or h[:2] != b'BM' or h[6:10] != b'\x00\x00\x00\x00':
         return None
     tam, ini_pixels, dib = u32(h, 2), u32(h, 10), u32(h, 14)
@@ -344,6 +344,13 @@ def bmp(j, off, limite, a):
         largura, altura, bits = u32(h, 18), abs(struct.unpack_from('<i', h, 22)[0]), u16(h, 28)
     if not 0 < largura <= 65535 or not 0 < altura <= 65535 or bits not in (1, 4, 8, 16, 24, 32):
         return None
+    compressao = u32(h, 30) if dib >= 40 and len(h) >= 34 else 0
+    if compressao not in (0, 3) and dib >= 40 and not (compressao <= 6):
+        return None
+    if compressao in (0, 3):
+        # sem compressão: os pixels têm de caber no tamanho declarado (cabeçalho que mente = falso positivo)
+        if ini_pixels + (largura * bits + 31) // 32 * 4 * altura > tam:
+            return None
     if tam > limite:
         return res(limite, 'parcial', 50, largura=largura, altura=altura)
     return res(tam, 'bom', 100, largura=largura, altura=altura)
@@ -464,7 +471,7 @@ def _data_mvhd(j, pos, tam_caixa):
     versao = corpo[i + 4]
     criacao = u64(corpo, i + 8, False) if versao == 1 and len(corpo) >= i + 16 else u32(corpo, i + 8, False)
     ts = criacao - _EPOCA_1904
-    if ts < 0:
+    if not 0 <= ts <= 4102444800:                  # de 1970 a 2100; fora disso é lixo (gmtime estoura com 64 bits)
         return None
     import time
     t = time.gmtime(ts)
@@ -539,8 +546,33 @@ def riff(j, off, limite, a):
     tam = u32(h, 4) + 8
     if tam < 20 or tam > a['tamanho_max']:
         return None
-    if tam > limite:
-        return res(limite, 'parcial', 50)
+    fim_riff = off + tam
+    alcance = min(fim_riff, off + limite)
+    # confere o corpo: os pedaços (chunks) têm de se encadear até o fim declarado, sem sair dele
+    pos, vistos, inteiro = off + 12, set(), True
+    for _ in range(1000000):
+        if pos >= alcance - 1:
+            break
+        c = j.ler(pos, 12)
+        if len(c) < 8 or not re.fullmatch(rb'[ -~]{4}', c[:4]):
+            inteiro = False
+            break
+        tam_chunk = u32(c, 4)
+        vistos.add(c[:4])
+        if c[:4] == b'LIST' and len(c) >= 12:
+            vistos.add(c[8:12])
+        fim_chunk = pos + 8 + tam_chunk
+        if fim_chunk > fim_riff:
+            inteiro = False
+            break
+        pos = fim_chunk + (tam_chunk & 1)
+    obrigatorios = (b'fmt ', b'data') if forma == b'WAVE' else (b'hdrl', b'movi')
+    if fim_riff > off + limite:
+        return res(limite, 'parcial', 50)                    # a mídia acaba antes do fim declarado
+    if not inteiro:
+        return res(max(20, min(pos, fim_riff) - off), 'parcial', 40)
+    if any(o not in vistos for o in obrigatorios):
+        return res(tam, 'parcial', 40)
     return res(tam, 'bom', 100)
 
 
@@ -912,11 +944,21 @@ def sqlite(j, off, limite, a):
     paginas = u32(h, 28, False)
     if paginas == 0 or u32(h, 24, False) != u32(h, 92, False):
         return None                                     # tamanho em páginas não confiável: sem como saber o fim
+    if u32(h, 56, False) not in (1, 2, 3) or not 1 <= u32(h, 44, False) <= 4:
+        return None                                     # codificação do texto e formato do esquema fora do padrão
     total = paginas * pagina
     if total > a['tamanho_max']:
         return None
+    primeira = j.ler(off + 100, 1)                      # a página do esquema é uma página de árvore (folha ou interna)
+    if not primeira or primeira[0] not in (5, 13):
+        return None
     if total > limite:
         return res(limite // pagina * pagina or pagina, 'parcial', 50)
+    # confere o corpo por amostra: página inteira de zeros no meio do banco = trecho sobrescrito ou perdido
+    passo = max(1, paginas // 64)
+    for n in range(1, paginas, passo):
+        if not any(j.ler(off + n * pagina, min(pagina, 4096))):
+            return res(n * pagina, 'parcial', 40)
     return res(total, 'bom', 100)
 
 
