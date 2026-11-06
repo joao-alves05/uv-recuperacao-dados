@@ -25,7 +25,7 @@ from urllib.parse import urlencode
 from flask import Flask, Response, abort, jsonify, make_response, redirect, request, send_from_directory
 from werkzeug.serving import ThreadedWSGIServer
 
-from . import config, fontes, identidade, leitor
+from . import config, fontes, identidade, leitor, unidade
 from .executor import ErroAcao, Executor
 from .jobs import DestinoEmUso, JobStore
 from .tipos import imagem
@@ -160,6 +160,24 @@ def _evento(nome, dados):
     return 'event: %s\ndata: %s\n\n' % (nome, json.dumps(dados, ensure_ascii=False))
 
 
+AVISO_PASTA_DE_DADOS = ('ATENÇÃO: a pasta de dados deste programa (banco de trabalhos e logs) está no mesmo disco que você vai '
+                        'recuperar. Tudo o que o programa grava ali pode sobrescrever justamente o que você quer salvar. Feche o '
+                        'programa e abra de novo com RECDADOS_DADOS apontando para outro disco, ou recupere só depois de mudar.')
+
+
+def aviso_pasta_de_dados(origem):
+    """Frase de alerta se `origem` é um disco/volume e a pasta de dados do serviço está nesse mesmo disco; senão None.
+    É só aviso: o trabalho segue (quem sabe o que faz pode seguir; a recusa seria pior que o risco para quem não tem outro disco)."""
+    if not leitor.eh_dispositivo(origem):
+        return None
+    try:
+        config.garantir_pastas()
+        mesma = unidade.conferir(origem, config.caminho_db()) == unidade.MSG_MESMO_DISCO
+    except OSError:
+        return None
+    return AVISO_PASTA_DE_DADOS if mesma else None
+
+
 def criar_app(ctx=None):
     ctx = ctx or Contexto()
     app = Flask(__name__, static_folder=None)
@@ -288,8 +306,11 @@ def criar_app(ctx=None):
         except DestinoEmUso:
             return _erro(em_uso, 409)
         store.evento(job['id'], 'Pedido recebido: %s para %s.' % (origem, destino))
+        aviso = aviso_pasta_de_dados(origem)
+        if aviso:
+            store.evento(job['id'], aviso)
         executor.submeter(job['id'])
-        return jsonify(store.obter(job['id'])), 201
+        return jsonify(dict(store.obter(job['id']), **({'aviso': aviso} if aviso else {}))), 201
 
     def job_ou_404(job_id):
         job = store.obter(job_id) if ID_JOB.fullmatch(job_id) else None
