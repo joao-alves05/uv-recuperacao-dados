@@ -88,17 +88,29 @@ def nome_seguro(nome):
     return (base[:MAX_NOME] + ext[:12]).rstrip(' .') or 'arquivo'
 
 
-_REPARSE = 0x400
+_TAGS_ATALHO = (0xA0000003, 0xA000000C)      # IO_REPARSE_TAG_MOUNT_POINT (junção) e IO_REPARSE_TAG_SYMLINK
 
 
 def eh_atalho(caminho):
-    """Link simbólico ou ponto de reanálise (junção, no Windows): a pasta aponta para outro lugar."""
+    """Link simbólico ou junção: a pasta aponta para outro lugar. Placeholder de nuvem (OneDrive), volume montado e
+    deduplicação também são pontos de reanálise, mas não redirecionam a gravação: não entram."""
     try:
         if os.path.islink(caminho):
             return True
-        return bool(getattr(os.lstat(caminho), 'st_file_attributes', 0) & _REPARSE)
+        return getattr(os.lstat(caminho), 'st_reparse_tag', 0) in _TAGS_ATALHO
     except OSError:
         return False
+
+
+def atalho_abaixo(base, pasta):
+    """A primeira pasta, de `base` (exclusive) até `pasta` (inclusive), que é link ou junção; None se nenhuma."""
+    rel = os.path.relpath(pasta, base)
+    atual = base
+    for parte in ([] if rel == '.' else rel.split(os.sep)):
+        atual = os.path.join(atual, parte)
+        if eh_atalho(atual):
+            return atual
+    return None
 
 
 def nome_unico(pasta, nome, usados):
@@ -222,7 +234,7 @@ def executar(job, ctrl):
             tmp = final + '.parte'
             try:
                 os.makedirs(os.path.dirname(final), exist_ok=True)
-                if eh_atalho(os.path.dirname(final)):
+                if atalho_abaixo(destino, os.path.dirname(final)):
                     raise OSError(0, 'a pasta %s é um atalho (link ou junção): recusada' % pasta_rel)
                 r = _copiar(aberto, achado, tmp, ctrl)
                 if isinstance(r, str):
