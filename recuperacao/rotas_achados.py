@@ -60,6 +60,22 @@ def registrar(app, ctx):
     store = ctx.store
     conferidas = {}                 # id da varredura -> (instante, frase de erro ou None)
 
+    def destinos(origem, minimo=0):
+        try:
+            volumes = [v for f in ctx.fontes() for v in f.get('volumes') or []]
+        except Exception:
+            volumes = []
+        return tipo_recuperar.sugerir_destinos(origem, volumes, minimo)
+
+    @app.get('/api/destinos')
+    def sugerir_destino():
+        origem = request.args.get('origem')
+        if not origem or '\x00' in origem:
+            return _erro('Informe a origem.', 400)
+        opcoes = destinos(origem)
+        return jsonify({'sugerido': opcoes[0]['caminho'] if opcoes else None, 'opcoes': opcoes,
+                        'aviso': None if opcoes else tipo_recuperar.MSG_SO_A_ORIGEM})
+
     def origem_mudou(job):
         """Frase de erro se a origem deste job não é mais a de quando a busca começou (conferência com validade curta)."""
         guardada = (job.get('opcoes') or {}).get('impressao_origem')
@@ -138,7 +154,11 @@ def registrar(app, ctx):
         destino = corpo.get('destino')
         msg = tipo_recuperar.validar(job['origem'], destino)
         if msg:
-            return _erro(msg, 400)
+            resp = {'erro': msg}
+            sugestao = destinos(job['origem'])
+            if sugestao:
+                resp['sugestao'] = sugestao[0]['caminho']
+            return jsonify(resp), 400
         conferidas.pop(job_id, None)                      # recuperar sempre confere de novo
         mudou = origem_mudou(job)
         if mudou:
@@ -162,8 +182,12 @@ def registrar(app, ctx):
         total, livre, aviso = achados.tamanho_dos_ids(store, ids), tipo_recuperar.espaco_livre(destino), None
         if livre is not None and livre < total:
             if livre < total // 2:
-                return _erro('Não cabe: os arquivos somam %s e o destino tem só %s livres. Escolha outro disco ou menos arquivos.'
-                             % (tipo_recuperar._tam(total), tipo_recuperar._tam(livre)), 400)
+                resp = {'erro': 'Não cabe: os arquivos somam %s e o destino tem só %s livres. Escolha outro disco ou menos arquivos.'
+                        % (tipo_recuperar._tam(total), tipo_recuperar._tam(livre))}
+                sugestao = destinos(job['origem'], total)
+                if sugestao:
+                    resp['sugestao'] = sugestao[0]['caminho']
+                return jsonify(resp), 400
             aviso = ('Os arquivos somam %s e o destino tem %s livres: pode faltar espaço para alguns.'
                      % (tipo_recuperar._tam(total), tipo_recuperar._tam(livre)))
         try:

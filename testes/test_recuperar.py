@@ -36,6 +36,9 @@ def a(nome, tamanho=100, **kw):
     return d
 
 
+GB = 1 << 30
+
+
 class TestListaDeAchados(BaseVarredura):
     def setUp(self):
         super().setUp()
@@ -702,6 +705,63 @@ class TestRecuperar(BaseVarredura):
             f.write(b'x')
         with self.assertRaises(ErroJob):
             recuperar.executar(job, mock.Mock(store=self.ctx.store))
+
+
+class TestDestinoSugerido(BaseVarredura):
+    """O programa aponta a pasta certa em vez de deixar a pessoa adivinhar."""
+
+    def fontes(self, *volumes):
+        self.ctx.provedor_fontes = lambda: [{'id': 'disco-0', 'caminho': 'X', 'tamanho': 1, 'tipo': 'hd',
+                                             'volumes': [{'letra': l, 'rotulo': r, 'sistema_arquivos': 'NTFS',
+                                                          'tamanho': 10 * GB, 'livre': livre} for l, r, livre in volumes]}]
+        self.ctx._fontes_cache = None
+
+    def test_lista_so_outros_discos_com_espaco_e_sugere_o_mais_livre(self):
+        origem = os.path.join(self.trabalho, 'img.bin')
+        mesma = os.path.splitdrive(origem)[0].upper()
+        outras = [l for l in ('P:', 'Q:', 'R:', 'S:') if l != mesma]
+        self.fontes((mesma, 'Origem', 500 * GB), (outras[0], 'Dados', 120 * GB), (outras[1], '', 300 * GB),
+                    (outras[2], 'Cheio', 0))
+        r = self.req('GET', '/api/destinos', query_string={'origem': origem})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        j = r.get_json()
+        self.assertEqual([o['caminho'] for o in j['opcoes']], [outras[1] + '%sRecuperados' % '\\', outras[0] + '%sRecuperados' % '\\'])
+        self.assertEqual(j['sugerido'], j['opcoes'][0]['caminho'])
+        self.assertIsNone(j['aviso'])
+        self.assertIn('(Dados)', j['opcoes'][1]['rotulo'])
+        self.assertIn('livres', j['opcoes'][1]['rotulo'])
+        self.assertFalse(os.path.exists(outras[0] + '\\'))             # nada é criado
+
+    def test_so_o_disco_da_origem_vem_vazio_com_aviso(self):
+        origem = os.path.join(self.trabalho, 'img.bin')
+        self.fontes((os.path.splitdrive(origem)[0].upper(), 'Origem', 500 * GB))
+        j = self.req('GET', '/api/destinos', query_string={'origem': origem}).get_json()
+        self.assertEqual((j['sugerido'], j['opcoes']), (None, []))
+        self.assertIn('outro disco', j['aviso'])
+        self.assertEqual(self.req('GET', '/api/destinos').status_code, 400)
+
+    def test_nunca_sugere_dentro_da_pasta_do_programa(self):
+        from recuperacao import protecao
+        letra = os.path.splitdrive(protecao.PASTA_DO_PROGRAMA)[0].upper()
+        self.fontes((letra, 'Programa', 50 * GB))
+        origem = 'Q:%sorigem.bin' % '\\' if letra != 'Q:' else 'P:%sorigem.bin' % '\\'
+        for o in self.req('GET', '/api/destinos', query_string={'origem': origem}).get_json()['opcoes']:
+            self.assertNotIn(protecao._norm(protecao.PASTA_DO_PROGRAMA), protecao._norm(o['caminho']))
+
+    def test_recuperar_recusado_traz_sugestao(self):
+        caminho, info, _ = montar_imagem(self.trabalho)
+        job = self.varrer(caminho, bloco=65536)
+        self.esperar_estado(job['id'], 'concluido')
+        mesma = os.path.splitdrive(caminho)[0].upper()
+        outra = 'Q:' if mesma != 'Q:' else 'P:'
+        self.fontes((mesma, 'Origem', 500 * GB), (outra, 'Dados', 80 * GB))
+        r = self.req('POST', '/api/jobs/%s/recuperar' % job['id'], {'ids': 'todos', 'destino': caminho})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.get_json()['sugestao'], outra + '%sRecuperados' % '\\')
+        self.fontes((mesma, 'Origem', 500 * GB))
+        r = self.req('POST', '/api/jobs/%s/recuperar' % job['id'], {'ids': 'todos', 'destino': caminho})
+        self.assertEqual(r.status_code, 400)
+        self.assertNotIn('sugestao', r.get_json())
 
 
 class TestNomeSeguro(unittest.TestCase):

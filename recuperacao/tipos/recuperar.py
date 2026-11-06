@@ -72,6 +72,34 @@ def validar(origem, destino, opcoes=None, retomada=False):
     return None
 
 
+PASTA_SUGERIDA = 'Recuperados'
+MSG_SO_A_ORIGEM = ('Só existe o disco da própria origem: gravar nele pode destruir o que ainda dá para salvar. '
+                   'Ligue outro disco ou pendrive e atualize a lista.')
+
+
+def sugerir_destinos(origem, volumes, minimo=0):
+    """Pastas 'Recuperados' na raiz dos discos com letra que o `validar` aceita (não é o disco da origem, nem pasta
+    protegida) e com espaço livre >= `minimo` (e > 0), do mais livre ao menos. Só sugere: não cria pasta."""
+    letra_origem = os.path.splitdrive(origem)[0].upper() if isinstance(origem, str) else ''
+    opcoes, vistas = [], set()
+    for v in volumes or []:
+        letra = str(v.get('letra') or '').upper()
+        livre = v.get('livre') or 0
+        if not re.fullmatch(r'[A-Z]:', letra) or letra in vistas or letra == letra_origem or livre <= 0 or livre < minimo:
+            continue
+        caminho = letra + '\\' + PASTA_SUGERIDA
+        try:
+            if validar(origem, caminho):
+                continue
+        except Exception:
+            continue
+        vistas.add(letra)
+        rotulo = 'Disco %s%s — %s livres' % (letra, ' (%s)' % v['rotulo'] if v.get('rotulo') else '', _tam(livre))
+        opcoes.append({'caminho': caminho, 'rotulo': rotulo, 'livre': livre})
+    opcoes.sort(key=lambda o: -o['livre'])
+    return opcoes
+
+
 def _reservado(base):
     """Nome de dispositivo do Windows? Compara só até o primeiro ponto, ignora espaços antes do ponto ('NUL .txt') e
     trata COM¹/LPT¹ (sobrescrito) e letras de largura total como os números e letras comuns (NFKC)."""
