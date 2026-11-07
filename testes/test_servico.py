@@ -429,6 +429,28 @@ class TestPrioridadeBaixa(unittest.TestCase):
         BELOW_NORMAL, NORMAL = 0x4000, 0x20
         self.assertEqual((int(antes), ok, int(depois)), (NORMAL, 'True', BELOW_NORMAL))
 
+    @unittest.skipUnless(os.name == 'nt', 'prioridade de E/S do Windows')
+    def test_processo_filho_fica_com_prioridade_de_es_baixa(self):
+        codigo = ('import ctypes\n'
+                  'from recuperacao import servico\n'
+                  'nt = ctypes.windll.ntdll\n'
+                  'k = ctypes.windll.kernel32\n'
+                  'k.GetCurrentProcess.restype = ctypes.c_void_p\n'
+                  'nt.NtQueryInformationProcess.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p]\n'
+                  'def es():\n'
+                  '    v = ctypes.c_ulong(99); n = ctypes.c_ulong(0)\n'
+                  '    st = nt.NtQueryInformationProcess(k.GetCurrentProcess(), 33, ctypes.byref(v), 4, ctypes.byref(n))\n'
+                  '    return st, v.value\n'
+                  'a = es()\n'
+                  'servico.baixar_prioridade()\n'
+                  'print(a[0], a[1], *es())\n')
+        raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        r = subprocess.run([sys.executable, '-c', codigo], cwd=raiz, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st0, antes, st1, depois = (int(x) for x in r.stdout.split())
+        self.assertEqual((st0, st1), (0, 0))
+        self.assertEqual((antes, depois), (2, 1))                  # IoPriorityNormal -> IoPriorityLow
+
 
 class TestIniciar(CasoComPasta):
     def test_trava_de_subida_so_deixa_uma(self):
