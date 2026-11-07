@@ -764,6 +764,45 @@ class TestDestinoSugerido(BaseVarredura):
         self.assertNotIn('sugestao', r.get_json())
 
 
+class TestDestinoSugeridoLinux(unittest.TestCase):
+    """No Linux não há letra: os destinos vêm dos pontos de montagem de /proc/mounts."""
+    MOUNTS = (
+        'sysfs /sys sysfs rw 0 0\nproc /proc proc rw 0 0\ntmpfs /mnt/ram tmpfs rw 0 0\n'
+        '/dev/sda2 / ext4 rw 0 0\n/dev/sdb1 /media/ana/ORIGEM ntfs rw 0 0\n'
+        '/dev/sdc1 /media/ana/Meu\\040Disco ext4 rw 0 0\n/dev/sdd1 /mnt/dados ext4 rw 0 0\n'
+        '/dev/loop0 /snap/core squashfs ro 0 0\noverlay /mnt/over overlay rw 0 0\n'
+        '/dev/sde1 /mnt/cheio ext4 rw 0 0\n')
+    LIVRE = {'/media/ana/Meu Disco': 50 * GB, '/mnt/dados': 200 * GB, '/mnt/cheio': 0, '/media/ana/ORIGEM': 900 * GB}
+
+    def sugerir(self, origem, minimo=0):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            arq = os.path.join(d, 'mounts')
+            with open(arq, 'w', encoding='utf-8') as f:
+                f.write(self.MOUNTS)
+
+            class Uso:
+                def __init__(s, livre):
+                    s.free = livre
+            with mock.patch.object(recuperar, '_linux', lambda: True), mock.patch.object(recuperar, 'PROC_MOUNTS', arq), \
+                    mock.patch.object(recuperar.shutil, 'disk_usage', lambda p: Uso(self.LIVRE[p])), \
+                    mock.patch.object(recuperar, 'validar', lambda o, c, *a, **k: None):
+                return recuperar.sugerir_destinos(origem, [], minimo)
+
+    def test_lista_so_montagens_reais_do_usuario_sem_o_disco_da_origem(self):
+        r = self.sugerir('/dev/sdb')
+        self.assertEqual([o['caminho'] for o in r], ['/mnt/dados/Recuperados', '/media/ana/Meu Disco/Recuperados'])
+        self.assertIn('livres', r[0]['rotulo'])
+
+    def test_origem_em_partição_tambem_exclui_o_disco_inteiro_e_minimo_filtra(self):
+        self.assertNotIn('/media/ana/ORIGEM/Recuperados', [o['caminho'] for o in self.sugerir('/dev/sdb1')])
+        self.assertEqual([o['caminho'] for o in self.sugerir('/dev/sdb', 100 * GB)], ['/mnt/dados/Recuperados'])
+
+    def test_fora_do_linux_nao_le_proc_mounts(self):
+        with mock.patch.object(recuperar, '_linux', lambda: False):
+            self.assertEqual(recuperar.sugerir_destinos('/dev/sdb', []), [])
+
+
 class TestNomeSeguro(unittest.TestCase):
     def test_nomes(self):
         n = recuperar.nome_seguro

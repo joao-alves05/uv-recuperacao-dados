@@ -14,6 +14,7 @@ import io
 import os
 import re
 import shutil
+import sys
 import time
 import unicodedata
 
@@ -96,7 +97,57 @@ def sugerir_destinos(origem, volumes, minimo=0):
         vistas.add(letra)
         rotulo = 'Disco %s%s — %s livres' % (letra, ' (%s)' % v['rotulo'] if v.get('rotulo') else '', _tam(livre))
         opcoes.append({'caminho': caminho, 'rotulo': rotulo, 'livre': livre})
+    if _linux():
+        opcoes += _destinos_linux(origem, minimo)
     opcoes.sort(key=lambda o: -o['livre'])
+    return opcoes
+
+
+PROC_MOUNTS = '/proc/mounts'
+_FS_VIRTUAIS = frozenset(('proc', 'sysfs', 'tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'devpts', 'cgroup', 'cgroup2',
+                          'securityfs', 'debugfs', 'tracefs', 'configfs', 'fusectl', 'pstore', 'bpf', 'mqueue', 'autofs'))
+_MONTAGENS_USUARIO = ('/media/', '/run/media/', '/mnt/')
+
+
+def _linux():
+    return os.name == 'posix' and sys.platform.startswith('linux')
+
+
+def _disco_de(dev):
+    """/dev/sdb1 -> /dev/sdb, /dev/nvme0n1p2 -> /dev/nvme0n1: o disco inteiro da partição (para não gravar no da origem)."""
+    return re.sub(r'(?<=\d)p\d+$|(?<=[a-z])\d+$', '', dev)
+
+
+def _destinos_linux(origem, minimo):
+    """Pontos de montagem de /proc/mounts em /media, /run/media e /mnt (sem sistemas virtuais e sem o disco da origem)."""
+    try:
+        with open(PROC_MOUNTS, encoding='utf-8', errors='replace') as f:
+            linhas = f.read().splitlines()
+    except OSError:
+        return []
+    disco_origem = _disco_de(origem) if isinstance(origem, str) and origem.startswith('/dev/') else None
+    opcoes, vistos = [], set()
+    for linha in linhas:
+        c = linha.split()
+        if len(c) < 3 or c[2] in _FS_VIRTUAIS or not c[0].startswith('/dev/'):
+            continue
+        ponto = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), c[1]).rstrip('/')
+        if ponto in vistos or not ponto.startswith(_MONTAGENS_USUARIO):
+            continue
+        if disco_origem and _disco_de(c[0]) == disco_origem:
+            continue
+        try:
+            livre = shutil.disk_usage(ponto).free
+        except OSError:
+            continue
+        caminho = ponto + '/' + PASTA_SUGERIDA
+        try:
+            if livre <= 0 or livre < minimo or validar(origem, caminho):
+                continue
+        except Exception:
+            continue
+        vistos.add(ponto)
+        opcoes.append({'caminho': caminho, 'rotulo': 'Disco %s — %s livres' % (ponto, _tam(livre)), 'livre': livre})
     return opcoes
 
 
