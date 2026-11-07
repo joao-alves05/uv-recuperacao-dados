@@ -53,6 +53,12 @@ O Windows e o Linux só deixam um programa ler o **disco inteiro** (e não só o
 3. Os arquivos recuperados vão sempre para um destino diferente da origem. Se origem e destino forem o mesmo disco, o programa bloqueia e avisa.
 4. Até a tabela de partições reconstruída só é **proposta**: sai como arquivo (`.json`, `.mbr`, `.gpt`) para o técnico aplicar à mão, se quiser. O programa nunca grava uma tabela no disco.
 
+### O que o programa faz por você
+
+- **Confere se o disco é o mesmo.** Ao criar uma imagem ou busca, o programa guarda a identidade do disco (número de série e assinatura). Antes de recuperar ou retomar, confere: se outro disco assumiu o lugar, ele **recusa** e pede para refazer a busca. Se não consegue ler algum dado de identificação, **avisa e segue**, sem bloquear.
+- **Sugere o destino.** Na hora de recuperar, o programa oferece uma pasta `Recuperados` em outro disco (no Windows, outra letra; no Linux, outro disco montado em `/media`, `/run/media` ou `/mnt`), do mais livre ao menos. Se você escolher uma pasta recusada (por exemplo, no disco da origem), a resposta já traz a sugestão certa. A pasta só é criada quando você recupera.
+- **Não trava o PC.** No Windows o programa roda com prioridade baixa de CPU e de disco; se o computador ficar lento mesmo assim, é o disco sendo lido, não um defeito.
+
 ## Passo a passo por cenário
 
 Regra geral: **tenha um segundo disco com espaço livre** para receber o resultado. Em todos os casos, depois de perceber a perda, **pare de usar a mídia** (não copie, não formate, não instale nada nela): cada gravação nova pode sobrescrever o que você quer salvar.
@@ -74,6 +80,7 @@ Regra geral: **tenha um segundo disco com espaço livre** para receber o resulta
 - **TRIM:** SSD e pen drive com TRIM zeram o que foi apagado; não há como desfazer.
 - **Sobrescrita:** dado sobrescrito se foi para sempre.
 - **Criptografia:** BitLocker, VeraCrypt, FileVault e LUKS precisam da chave; sem ela só se enxerga ruído.
+- **ext2/ext3 com arquivo muito grande:** acima de cerca de 1 Mi blocos (1 GiB com blocos de 1 KiB), o programa entrega só o começo, marca o arquivo como `parcial` e o resto como não lido (ext4 não tem esse limite).
 - **ext3/ext4:** ao apagar, o sistema zera os ponteiros do arquivo; aparece o nome, mas o conteúdo só volta pela busca por assinatura.
 - **NTFS:** arquivos comprimidos pelo NTFS e criptografados com EFS não são lidos; arquivos apagados só se os clusters não foram reutilizados.
 - **HFS+ e APFS:** só são reconhecidos (e achados na busca de partições); os arquivos não são listados.

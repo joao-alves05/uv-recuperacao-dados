@@ -104,3 +104,25 @@ O que mudou (`recuperacao/carving.py`):
 - Cada trabalho grava `logs/jobs/<id>.log` na pasta de dados (`recuperacao/logjob.py`): uma linha por fato, com a hora. Tudo o que vai para os eventos da tela também vai para o log, mais o detalhe que não cabe na tela: **lido** (origem, tamanho, fases, bytes lidos no total), **pulado** (áreas puladas depois de erros seguidos, na imagem) e **falhou** (cada bloco e setor ilegível com a posição, cada arquivo que não gravou com o motivo). Na varredura, uma linha por achado (tipo, posição, tamanho, estado, pontuação); no `recuperar`, uma linha por arquivo (nome no destino, resultado, bytes, extents na origem, SHA-256). **Nunca conteúdo de arquivo.**
 - Retomar acrescenta no mesmo arquivo. Máximo de 100000 linhas por execução (depois vem um aviso e o resto é descartado). Falha ao escrever o log (disco cheio, sem permissão) nunca derruba o trabalho. O arquivo é criado só para o dono (0600; no Windows herda a pasta). Tem caminhos e nomes de arquivo, como o banco: apague junto com ele.
 - O job `imagem` agora também gera, ao concluir, `<destino>.relatorio.html` e `<destino>.relatorio.csv` (nunca por cima de um arquivo existente: se já houver, sai `<destino>.relatorio-<id do job>.*`). Trazem origem, imagem, tamanho, quanto foi lido, as faixas ilegíveis (início, fim, bytes, setores), a conferência SHA-256 (quando não há trecho ilegível) e a duração. Os nomes ficam no checkpoint do job (`relatorio`). Este relatório ainda não tem rota no serviço (a rota `/relatorio` é do `recuperar`).
+
+## Identidade da origem (`identidade.py`)
+
+- Arquivo: tamanho + SHA-256 do primeiro e do último MiB. Disco físico ou volume (as pontas mudam com o uso normal): tamanho + `ids` estáveis (fabricante/modelo/série pelo IOCTL, assinatura MBR ou GUID GPT, número de série do volume), `tipo: "dispositivo"`.
+- Gravada ao criar imagem ou varredura; conferida antes de recuperar, de mostrar prévia e de retomar (`identidade.conferir`).
+- Reprova (`MSG_MUDOU`) só tamanho diferente ou parte lida nas duas vezes e diferente. Parte ilegível (`None` de um lado) não bloqueia: chama o `aviso` (evento do job) e segue. Impressão antiga (pontas) num dispositivo só confere o tamanho e avisa. `completa()` diz se serial e descritor foram lidos.
+
+## Destino sugerido
+
+- `GET /api/destinos?origem=...` devolve `{sugerido, opcoes[{caminho, rotulo, livre}], aviso}`; `aviso` vem quando só existe o disco da origem. Código em `tipos/recuperar.sugerir_destinos`; só sugere, não cria pasta.
+- Windows: volumes com letra das fontes, menos a letra da origem. Linux: `/proc/mounts` (`PROC_MOUNTS`), só `/dev/*` montado em `/media`, `/run/media` ou `/mnt`, sem sistemas virtuais (proc, sysfs, tmpfs, overlay, squashfs...) e sem o disco da origem (partição inclusive). Todo candidato passa por `recuperar.validar` e pelo `minimo` de espaço livre.
+- `POST /api/jobs/<id>/recuperar` com destino recusado devolve 400 com `sugestao` (o melhor destino) quando existe outro disco; sem outro disco, sem `sugestao`.
+
+## Prioridade baixa (`servico.baixar_prioridade`)
+
+- Windows: `SetPriorityClass(BELOW_NORMAL)` no serviço (os filhos herdam) e prioridade de E/S baixa por `NtSetInformationProcess(ProcessIoPriority=33, 1)`. Não use `PROCESS_MODE_BACKGROUND_BEGIN`: ele leva a CPU para IDLE. Falhas são ignoradas. No Linux não faz nada.
+- `testes/test_servico.TestPrioridadeBaixa` (só Windows) lê a classe de CPU e a prioridade de E/S (`NtQueryInformationProcess`) num processo filho.
+
+## ext2/ext3 grande e tetos contra disco corrompido
+
+- Arquivo com mapa de blocos acima de `MAX_BLOCOS_MAPA` (1 Mi blocos): lê só até o teto, `estado = parcial`, runs só do trecho lido, nota diz que o resto não foi lido. Em `achados`, `tamanho` é o que foi coberto. Ext4 (extents) não usa esse teto.
+- Estruturas que passam do teto deixam o item `ruim` (ou a varredura recusa), nunca travam ou esgotam memória: ext `MAX_NOS_EXTENTS` 256 e `MAX_EXTENTS` 100000; NTFS `MAX_RUNS` 100000 e `MAX_CLUSTERS_CONFERIDOS` 1 Mi; exFAT/FAT `MAX_PASTA` 64 MiB (FAT `MAX_PAGINAS` 256); ISO e UDF `MAX_TOTAL_PASTAS` 256 MiB lidos por varredura (pastas sobrepostas) e UDF `MAX_ANCORAS` 64; profundidade de pastas `MAX_PROFUNDIDADE` 64; partições `MAX_LOGICAS` 128, `MAX_ENTRADAS_GPT` 4096, `MAX_BYTES_GPT` 4 MiB.
