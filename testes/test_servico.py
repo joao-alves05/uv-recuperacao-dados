@@ -410,6 +410,26 @@ class TestSegundaCopia(CasoComPasta):
         self.assertEqual(a.pedir('GET', '/api/saude', token=False)[1]['pid'], a.proc.pid)
 
 
+class TestPrioridadeBaixa(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'prioridade de processo do Windows')
+    def test_processo_filho_fica_em_abaixo_do_normal(self):
+        import ctypes
+        codigo = ('import ctypes, sys\n'
+                  'from recuperacao import servico\n'
+                  'k = ctypes.windll.kernel32\n'
+                  'k.GetCurrentProcess.restype = ctypes.c_void_p\n'
+                  'k.GetPriorityClass.argtypes = [ctypes.c_void_p]\n'
+                  'antes = k.GetPriorityClass(k.GetCurrentProcess())\n'
+                  'ok = servico.baixar_prioridade()\n'
+                  'print(antes, ok, k.GetPriorityClass(k.GetCurrentProcess()))\n')
+        raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        r = subprocess.run([sys.executable, '-c', codigo], cwd=raiz, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        antes, ok, depois = r.stdout.split()
+        BELOW_NORMAL, NORMAL = 0x4000, 0x20
+        self.assertEqual((int(antes), ok, int(depois)), (NORMAL, 'True', BELOW_NORMAL))
+
+
 class TestIniciar(CasoComPasta):
     def test_trava_de_subida_so_deixa_uma(self):
         trava = os.path.join(self.dados, 'servico.lock')

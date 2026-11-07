@@ -68,7 +68,8 @@ class ServidorExclusivo(ThreadedWSGIServer):
 
 FONTES_TTL_S = 5
 PRIORIDADE_ABAIXO_DO_NORMAL = 0x00004000        # BELOW_NORMAL_PRIORITY_CLASS
-PROCESSO_MODO_SEGUNDO_PLANO = 0x00100000        # PROCESS_MODE_BACKGROUND_BEGIN
+PROCESSO_IO_PRIORIDADE = 33                     # ProcessIoPriority (NtSetInformationProcess); 1 = baixa. O modo segundo plano
+# (PROCESS_MODE_BACKGROUND_BEGIN) derrubava a CPU para ociosa (IDLE), não para abaixo do normal.
 
 
 class Contexto:
@@ -452,7 +453,13 @@ def baixar_prioridade():
         k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
         eu = k.GetCurrentProcess()
         ok = bool(k.SetPriorityClass(eu, PRIORIDADE_ABAIXO_DO_NORMAL))
-        k.SetPriorityClass(eu, PROCESSO_MODO_SEGUNDO_PLANO)             # E/S e memória em segundo plano; pode falhar sem problema
+        try:                                                            # E/S de disco em prioridade baixa; pode falhar sem problema
+            baixa = ctypes.c_ulong(1)
+            nt = ctypes.windll.ntdll
+            nt.NtSetInformationProcess.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong]
+            nt.NtSetInformationProcess(eu, PROCESSO_IO_PRIORIDADE, ctypes.byref(baixa), ctypes.sizeof(baixa))
+        except Exception:
+            pass
         return ok
     except Exception:
         return False
