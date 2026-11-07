@@ -1234,6 +1234,65 @@ def main():
         conferir('409: o botao cria a mesma busca (mesmo disco, mesmo modo) e abre a nova',
                  p.espera(f"/^\\/jobs\\/j-/.test(location.pathname)&&location.pathname!=='/jobs/{va}'", 8) and http(porta, '/_teste/ultimo_rec')['opcoes'].get('modo')=='rapida', http(porta, '/_teste/ultimo_rec'))
 
+        # ---- estado com tres selos, larguras 1280/1500/1920 e celular escuro com barra fixa
+        id3 = http(porta, '/_teste/tres_selos?on=1')['id']
+        CONTRASTE = """(()=>{const lum=(c)=>{const f=(v)=>{v/=255;return v<=.03928?v/12.92:Math.pow((v+.055)/1.055,2.4)};return .2126*f(c[0])+.7152*f(c[1])+.0722*f(c[2])};
+          const cor=(s)=>s.match(/[0-9.]+/g).map(Number);
+          const fundo=(e)=>{for(;e;e=e.parentElement){const c=cor(getComputedStyle(e).backgroundColor);if(c.length<4||c[3]>.95)return c}return [255,255,255]};
+          const cr=(e)=>{const a=lum(cor(getComputedStyle(e).color)),b=lum(fundo(e));return (Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
+          return Math.min(...SEL.map(q=>cr(document.querySelector(q))))})()"""
+        NOME_TEMA = {'light': 'claro', 'dark': 'escuro'}
+        NAO_COBRE = "(()=>{const b=document.getElementById('r-recuperar').getBoundingClientRect();const f=document.querySelector('.sel-fixa');if(f.hidden)return true;const r=f.getBoundingClientRect();return r.height===0||r.top>=b.bottom||r.bottom<=b.top||r.left>=b.right||r.right<=b.left})()"
+        for (w, h, tema) in ((1280, 720, 'light'), (1280, 720, 'dark'), (1500, 900, 'light'), (1500, 900, 'dark'), (1920, 1080, 'light'), (1920, 1080, 'dark')):
+            nome = f'{w}x{h} {tema}'
+            p.tema(tema)
+            p.tamanho(w, h)
+            p.ir(base + f'/jobs/{va}', 1)
+            p.espera("document.querySelectorAll('.tabela tbody tr').length>0", 10)
+            p.clica(f'.tabela tbody tr[data-linha="{id3}"] input[type=checkbox]')
+            p.espera("!document.querySelector('.sel-fixa').hidden", 4)
+            time.sleep(.4)
+            alt = p.ev("[...document.querySelectorAll('.tabela tbody tr')].map(t=>Math.round(t.getBoundingClientRect().height))")
+            conferir(f'{nome}: todas as linhas da lista tem a mesma altura', max(alt) - min(alt) <= 1, sorted(set(alt)))
+            conferir(f'{nome}: a linha com tres selos (Ruim, Apagado, Recuperado) mostra os tres numa linha so',
+                     p.ev(f"(()=>{{const t=[...document.querySelectorAll('.tabela tbody tr[data-linha=\"{id3}\"] .estados > *')];const td=document.querySelector('.tabela tbody tr[data-linha=\"{id3}\"] .col-estado').getBoundingClientRect();return t.length===3&&new Set(t.map(e=>{{const r=e.getBoundingClientRect();return Math.round(r.top+r.height/2)}})).size===1&&t.every(e=>e.getBoundingClientRect().right<=td.right+0.5)}})()"))
+            conferir(f'{nome}: nada passa da largura da janela e nao ha rolagem horizontal',
+                     p.ev("(()=>{const W=document.documentElement.clientWidth;const f=[...document.querySelectorAll('body *')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&(r.right>W+1||r.left<-1)&&!e.closest('.tabela-box,.abas,.sr-only')});return document.documentElement.scrollWidth<=W&&document.body.scrollWidth<=W&&f.length===0})()"), p.ev("document.documentElement.scrollWidth+' de '+document.documentElement.clientWidth"))
+            conferir(f'{nome}: a tabela cabe sem rolagem horizontal',
+                     p.ev("(()=>{const t=document.querySelector('.tabela-box');return t.scrollWidth<=t.clientWidth+1})()"))
+            conferir(f'{nome}: botoes, selos e cabecalhos nao tem texto cortado',
+                     p.ev("[...document.querySelectorAll('.btn,.tag,.recuperado,.tabela th,.sel-fixa .btn')].filter(e=>e.getBoundingClientRect().width>0&&e.scrollWidth>e.clientWidth+1&&getComputedStyle(e).textOverflow!=='ellipsis').map(e=>e.textContent.trim()).join('|')")=='')
+            conferir(f'{nome}: colunas da tabela sem espremer (nome >=140, tamanho >=70, data >=80)',
+                     p.ev("(()=>{const r=(q)=>document.querySelector('.tabela tbody tr '+q).getBoundingClientRect().width;return r('.col-nome')>=140&&r('.col-tamanho')>=70&&r('.col-data')>=80})()"))
+            p.foto(f'{w}x{h}-resultados-barra-fixa-{NOME_TEMA[tema]}')
+            p.ev("document.getElementById('r-recuperar').scrollIntoView({block:'center'})"); time.sleep(.5)
+            conferir(f'{nome}: com o cartao a vista a barra fixa nao cobre o botao Recuperar', p.ev(NAO_COBRE))
+            p.foto(f'{w}x{h}-resultados-cartao-{NOME_TEMA[tema]}')
+        for tema in ('light', 'dark'):
+            p.tema(tema)
+            p.tamanho(390, 844)
+            p.ir(base + f'/jobs/{va}', 1)
+            p.espera("document.querySelectorAll('.tabela tbody tr').length>0", 10)
+            p.clica(f'.tabela tbody tr[data-linha="{id3}"] input[type=checkbox]')
+            p.espera("!document.querySelector('.sel-fixa').hidden", 4)
+            time.sleep(.4)
+            alt = p.ev("[...document.querySelectorAll('.tabela tbody tr')].map(t=>Math.round(t.getBoundingClientRect().height))")
+            conferir(f'390 {tema}: todas as linhas da lista tem a mesma altura', max(alt) - min(alt) <= 1, sorted(set(alt)))
+            conferir(f'390 {tema}: nada passa da largura da janela', p.ev("document.documentElement.scrollWidth<=document.documentElement.clientWidth"))
+            c = p.ev(CONTRASTE.replace('SEL', "['.sel-fixa-txt','.sel-fixa .btn-primario']"))
+            conferir(f'390 {tema}: texto e botao da barra fixa tem contraste >= 4,5', c >= 4.5, c)
+            p.foto(f'390-resultados-barra-fixa-{NOME_TEMA[tema]}-3selos')
+            p.clica('#r-ir-recuperar', .8)
+            p.ev("document.getElementById('r-recuperar').scrollIntoView({block:'center'})"); time.sleep(.5)
+            conferir(f'390 {tema}: a barra fixa nao cobre o botao Recuperar do cartao', p.ev(NAO_COBRE))
+            c = p.ev(CONTRASTE.replace('SEL', "['#r-recuperar']"))
+            conferir(f'390 {tema}: o botao Recuperar esta inteiro na tela e o texto dele tem contraste >= 4,5',
+                     p.ev("(()=>{const b=document.getElementById('r-recuperar').getBoundingClientRect();return b.top>=0&&b.bottom<=innerHeight})()") and c >= 4.5, c)
+            p.foto(f'390-resultados-cartao-{NOME_TEMA[tema]}')
+        http(porta, '/_teste/tres_selos?on=0')
+        p.tema('light')
+        p.tamanho(1366, 768)
+
         # destino vindo do servico (/api/destinos): ja preenchido, botoes de escolha rapida, aviso e sugestao
         CAMPO = "document.querySelector('input[aria-label=\"Pasta de destino\"]')"
         http(porta, '/_teste/destinos?on=1')

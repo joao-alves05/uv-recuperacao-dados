@@ -600,6 +600,14 @@ class H(BaseHTTPRequestHandler):
                 E.abrir_falha = q.get('on', ['1'])[0] == '1'
             elif p == '/_teste/ultimo_rec':
                 return self._json(200, {'rec': E.ultimo_rec, 'abriu': E.abriu, 'opcoes': E.ultimo_opcoes})
+            elif p == '/_teste/tres_selos':
+                a = ACHADOS[2]
+                if q.get('on', ['1'])[0] == '1':
+                    E.antes_tres = (a['estado'], a.get('apagado'), a['recuperado_em'])
+                    a['estado'], a['apagado'], a['recuperado_em'] = 'ruim', True, agora()
+                else:
+                    a['estado'], a['apagado'], a['recuperado_em'] = getattr(E, 'antes_tres', (a['estado'], None, None))
+                return self._json(200, {'id': a['id']})
             elif p == '/_teste/zerar_recuperados':
                 for a in ACHADOS:
                     a['recuperado_em'] = None

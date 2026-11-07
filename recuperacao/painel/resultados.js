@@ -712,7 +712,12 @@
       const est = el('div', 'estados');
       est.append(etiquetaQual(a));
       if (a.apagado === true) est.append(selosApagado());
-      if (a.recuperado_em) est.append(el('span', 'recuperado', 'Recuperado'));
+      if (a.recuperado_em) {
+        const rc = el('span', 'recuperado rec-ico', '✓');
+        rc.title = 'Recuperado';
+        rc.setAttribute('aria-label', 'Recuperado');
+        est.append(rc);
+      }
       tdE.append(est);
       tr.append(tdC, tdM, tdN, tdT, tdS, tdD, tdE);
       tr.addEventListener('click', (e) => {
