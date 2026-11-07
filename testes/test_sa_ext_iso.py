@@ -227,7 +227,7 @@ class TestIso(Base):
 
 
 class TestTetosDeTrabalho(Base):
-    def test_ext2_arquivo_com_mapa_de_blocos_grande_demais_sai_ruim(self):
+    def test_ext2_arquivo_com_mapa_de_blocos_grande_demais_sai_parcial_com_o_comeco(self):
         import unittest.mock as m
         from recuperacao.sa import ext as mod_ext
         f = ie.ExtImg('ext2')
@@ -236,7 +236,14 @@ class TestTetosDeTrabalho(Base):
         caminho = f.gravar(os.path.join(self.pasta, 'g.img'))
         with m.patch.object(mod_ext, 'MAX_BLOCOS_MAPA', 64), leitor_mod.abrir(caminho) as l:
             r = {e.nome: e for e in sa.detectar(l).varrer()}
-        self.assertEqual((r['grande.bin'].estado, r['grande.bin'].runs), ('ruim', []))
+        g = r['grande.bin']
+        self.assertEqual(g.estado, 'parcial')
+        self.assertEqual(g.tamanho, 100 * 1024)
+        n = sum(q for _, q in g.runs)
+        self.assertEqual(n, 64 * 1024)                                            # só até o teto; o resto não lido
+        self.assertIn('não foi lido', g.nota)
+        with leitor_mod.abrir(caminho) as l:
+            self.assertEqual(b''.join(l.ler(o, q) for o, q in g.runs), conteudo(100 * 1024, 1)[:n])
         self.assertEqual(r['pequeno.bin'].estado, 'bom')
 
     def test_iso_pastas_sobrepostas_estouram_o_teto_total_de_leitura(self):

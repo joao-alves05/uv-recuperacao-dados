@@ -166,9 +166,7 @@ class Ext(Volume):
             return fis
         ptrs = list(struct.unpack('<15I', iblock))
         lista = ptrs[:12]
-        if nb > MAX_BLOCOS_MAPA:
-            raise ErroTeto('arquivo com mais de %d blocos mapeados' % MAX_BLOCOS_MAPA)
-        topo = nb
+        topo = min(nb, MAX_BLOCOS_MAPA)          # acima do teto devolve só o começo; _dados marca o resto como não lido
         for nivel, p in enumerate(ptrs[12:], 1):
             if len(lista) >= topo:
                 break
@@ -230,6 +228,8 @@ class Ext(Volume):
         ent.runs = runs
         if falta > 0:
             ent.estado, ent.nota = 'parcial', 'ponteiros não cobrem o tamanho'
+            if not flags & F_EXTENTS and -(-tam // self.bs) > MAX_BLOCOS_MAPA:
+                ent.nota = 'arquivo grande: lidos só os primeiros %d blocos; o resto não foi lido' % MAX_BLOCOS_MAPA
         elif apagado:
             ent.nota = 'ext2: ponteiros preservados'
             if any(self._bloco_ocupado(b) for p, n in fis if p for b in range(p, p + n)):
