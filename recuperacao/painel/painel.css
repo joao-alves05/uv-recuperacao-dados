@@ -403,6 +403,9 @@ button.mini:active{filter:brightness(.95)}
   .tabela .col-tamanho{width:88px}
   .tabela .col-data{width:92px}
   .tabela .col-estado{width:144px}
+  .filtros{flex-wrap:nowrap;gap:8px}
+  .filtros input[type=search]{width:140px}
+  .filtros input[type=date]{width:128px}
 }
 
 /* ---------- telas pequenas: uma coluna ---------- */
@@ -438,6 +441,22 @@ button.mini:active{filter:brightness(.95)}
   .tabela-box,.grade{max-height:none}
   .res-corpo.com-arvore .res-area{padding-left:0}
   .alca-arvore{display:none}
+  /* lista de resultados no celular: cada achado vira um cartão em linha, sem rolagem de lado */
+  .tabela{min-width:0;display:block}
+  .tabela thead,.tabela tbody{display:block}
+  .tabela thead tr{display:flex;flex-wrap:wrap;align-items:center;gap:0 4px;padding:0 8px;border-bottom:1px solid var(--line)}
+  .tabela thead th{display:flex;align-items:center;width:auto;height:40px;padding:0 4px;border:0;position:static;box-shadow:none}
+  .tabela thead th.col-mini,.tabela thead th.col-estado{display:none}
+  .tabela thead th.col-marca{width:32px;padding:0;justify-content:center}
+  .tabela tbody tr{display:flex;flex-wrap:wrap;align-items:center;padding:8px;border-bottom:1px solid var(--line-soft)}
+  .tabela tbody td{display:block;width:auto;height:auto;padding:0;border:0}
+  .tabela tbody td.col-marca{flex:none;width:32px}
+  .tabela tbody td.col-mini{flex:none;width:48px}
+  .tabela tbody td.col-nome{flex:0 0 calc(100% - 80px);min-width:0;min-height:36px;display:flex;flex-direction:column;justify-content:center}
+  .tabela tbody td.col-tipo{flex:none;width:auto;margin-left:80px;font-size:12px;line-height:16px;color:var(--muted);padding-top:4px}
+  .tabela tbody td.col-tamanho,.tabela tbody td.col-data{flex:none;width:auto;font-size:12px;line-height:16px;color:var(--muted);padding-top:4px}
+  .tabela tbody td.col-tamanho::before,.tabela tbody td.col-data::before{content:'\b7';margin:0 4px}
+  .tabela tbody td.col-estado{flex:0 0 100%;box-sizing:border-box;padding:4px 0 0 80px}
   .rec-dest .campo-filtro:first-child select{min-width:0}
   .historico li{grid-template-columns:minmax(0,1fr);gap:0}
 }

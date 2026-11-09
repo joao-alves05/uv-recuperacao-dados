@@ -1243,10 +1243,11 @@ def main():
           return Math.min(...SEL.map(q=>cr(document.querySelector(q))))})()"""
         NOME_TEMA = {'light': 'claro', 'dark': 'escuro'}
         NAO_COBRE = "(()=>{const b=document.getElementById('r-recuperar').getBoundingClientRect();const f=document.querySelector('.sel-fixa');if(f.hidden)return true;const r=f.getBoundingClientRect();return r.height===0||r.top>=b.bottom||r.bottom<=b.top||r.left>=b.right||r.right<=b.left})()"
-        for (w, h, tema) in ((1280, 720, 'light'), (1280, 720, 'dark'), (1500, 900, 'light'), (1500, 900, 'dark'), (1920, 1080, 'light'), (1920, 1080, 'dark')):
+        for (w, h, tema) in ((1280, 720, 'light'), (1280, 720, 'dark'), (1366, 768, 'light'), (1500, 900, 'light'), (1500, 900, 'dark'), (1920, 1080, 'light'), (1920, 1080, 'dark')):
             nome = f'{w}x{h} {tema}'
             p.tema(tema)
             p.tamanho(w, h)
+            p.ev("localStorage.removeItem('painel.arvore')")
             p.ir(base + f'/jobs/{va}', 1)
             p.espera("document.querySelectorAll('.tabela tbody tr').length>0", 10)
             p.clica(f'.tabela tbody tr[data-linha="{id3}"] input[type=checkbox]')
@@ -1258,12 +1259,15 @@ def main():
                      p.ev(f"(()=>{{const t=[...document.querySelectorAll('.tabela tbody tr[data-linha=\"{id3}\"] .estados > *')];const td=document.querySelector('.tabela tbody tr[data-linha=\"{id3}\"] .col-estado').getBoundingClientRect();return t.length===3&&new Set(t.map(e=>{{const r=e.getBoundingClientRect();return Math.round(r.top+r.height/2)}})).size===1&&t.every(e=>e.getBoundingClientRect().right<=td.right+0.5)}})()"))
             conferir(f'{nome}: nada passa da largura da janela e nao ha rolagem horizontal',
                      p.ev("(()=>{const W=document.documentElement.clientWidth;const f=[...document.querySelectorAll('body *')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&(r.right>W+1||r.left<-1)&&!e.closest('.tabela-box,.abas,.sr-only')});return document.documentElement.scrollWidth<=W&&document.body.scrollWidth<=W&&f.length===0})()"), p.ev("document.documentElement.scrollWidth+' de '+document.documentElement.clientWidth"))
+            if w >= 1280:
+                conferir(f'{nome}: todos os filtros ficam na mesma linha e dentro da area',
+                         p.ev("(()=>{const c=[...document.querySelectorAll('.filtros .campo-filtro')];const a=document.querySelector('.filtros').getBoundingClientRect();return c.length>=6&&new Set(c.map(e=>Math.round(e.getBoundingClientRect().top))).size===1&&c.every(e=>e.getBoundingClientRect().right<=a.right+0.5)})()"))
             conferir(f'{nome}: a tabela cabe sem rolagem horizontal',
                      p.ev("(()=>{const t=document.querySelector('.tabela-box');return t.scrollWidth<=t.clientWidth+1})()"))
             conferir(f'{nome}: botoes, selos e cabecalhos nao tem texto cortado',
                      p.ev("[...document.querySelectorAll('.btn,.tag,.recuperado,.tabela th,.sel-fixa .btn')].filter(e=>e.getBoundingClientRect().width>0&&e.scrollWidth>e.clientWidth+1&&getComputedStyle(e).textOverflow!=='ellipsis').map(e=>e.textContent.trim()).join('|')")=='')
-            conferir(f'{nome}: colunas da tabela sem espremer (nome >=140, tamanho >=70, data >=80)',
-                     p.ev("(()=>{const r=(q)=>document.querySelector('.tabela tbody tr '+q).getBoundingClientRect().width;return r('.col-nome')>=140&&r('.col-tamanho')>=70&&r('.col-data')>=80})()"))
+            conferir(f'{nome}: colunas da tabela sem espremer (nome >=220, tamanho >=70, data >=80)',
+                     p.ev("(()=>{const r=(q)=>document.querySelector('.tabela tbody tr '+q).getBoundingClientRect().width;return r('.col-nome')>=220&&r('.col-tamanho')>=70&&r('.col-data')>=80})()"))
             p.foto(f'{w}x{h}-resultados-barra-fixa-{NOME_TEMA[tema]}')
             p.ev("document.getElementById('r-recuperar').scrollIntoView({block:'center'})"); time.sleep(.5)
             conferir(f'{nome}: com o cartao a vista a barra fixa nao cobre o botao Recuperar', p.ev(NAO_COBRE))
@@ -1279,6 +1283,10 @@ def main():
             alt = p.ev("[...document.querySelectorAll('.tabela tbody tr')].map(t=>Math.round(t.getBoundingClientRect().height))")
             conferir(f'390 {tema}: todas as linhas da lista tem a mesma altura', max(alt) - min(alt) <= 1, sorted(set(alt)))
             conferir(f'390 {tema}: nada passa da largura da janela', p.ev("document.documentElement.scrollWidth<=document.documentElement.clientWidth"))
+            conferir(f'390 {tema}: a lista de achados nao rola de lado (cada achado e um cartao em linha)',
+                     p.ev("(()=>{const t=document.querySelector('.tabela-box');return t.scrollWidth<=t.clientWidth+1&&[...document.querySelectorAll('.tabela tbody tr')].every(r=>{const b=r.getBoundingClientRect();return b.width>=300&&[...r.children].every(c=>c.getBoundingClientRect().right<=b.right+1)})})()"), p.ev("document.querySelector('.tabela-box').scrollWidth+' de '+document.querySelector('.tabela-box').clientWidth"))
+            conferir(f'390 {tema}: o cartao mostra caixa, nome, tipo, tamanho, data e estado, com nome >= 160 px',
+                     p.ev("(()=>{const r=document.querySelector('.tabela tbody tr');const g=(q)=>r.querySelector(q).getBoundingClientRect();return g('.col-nome').width>=160&&g('.col-tipo').width>0&&g('.col-tamanho').width>0&&g('.col-data').width>0&&g('.col-estado').width>0&&g('.col-marca').width>0})()"))
             c = p.ev(CONTRASTE.replace('SEL', "['.sel-fixa-txt','.sel-fixa .btn-primario']"))
             conferir(f'390 {tema}: texto e botao da barra fixa tem contraste >= 4,5', c >= 4.5, c)
             p.foto(f'390-resultados-barra-fixa-{NOME_TEMA[tema]}-3selos')

@@ -185,7 +185,7 @@
     const arvLista = el('ul', 'arvore-lista');
     arvLista.setAttribute('role', 'tree');
     arvore.append(arvCab, arvLista);
-    const pref = { l: 240, c: !!(window.matchMedia && window.matchMedia('(max-width:760px)').matches) };
+    const pref = { l: (window.matchMedia && window.matchMedia('(max-width:1400px)').matches ? 160 : 240), c: !!(window.matchMedia && window.matchMedia('(max-width:760px)').matches) };
     try { const o = JSON.parse(localStorage.getItem('painel.arvore') || 'null'); if (o && typeof o.l === 'number') { pref.l = Math.max(160, Math.min(480, o.l)); pref.c = !!o.c; } } catch (e) { /* padrão */ }
     function guardarPref() { try { localStorage.setItem('painel.arvore', JSON.stringify(pref)); } catch (e) { /* tudo bem */ } }
     function aplicarPref() {
