@@ -259,6 +259,22 @@ class TestTetosDeTrabalho(Base):
             with self.assertRaises(ErroSA):
                 list(sa.detectar(l).varrer())
 
+    def test_udf_pastas_estouram_o_teto_total_de_leitura(self):
+        import unittest.mock as m
+        import imagens_udf as iu
+        from recuperacao.sa import udf as mod_udf
+        arq = {'D%d/a.txt' % i: conteudo(100, i) for i in range(4)}
+        caminho = os.path.join(self.pasta, 'p.udf')
+        with open(caminho, 'wb') as g:
+            g.write(iu.disco_udf([iu.Sessao(arq, 0, alt_fim=1199)], 1200))
+        with leitor_mod.abrir(caminho) as l:
+            self.assertEqual(sum(not e.eh_dir for e in sa.detectar(l).varrer()), 4)    # sem teto apertado, lista tudo
+        with m.patch.object(mod_udf, 'MAX_TOTAL_PASTAS', 100), leitor_mod.abrir(caminho) as l:
+            vol = sa.detectar(l)
+            self.assertIsNotNone(vol)
+            with self.assertRaises(ErroSA):
+                list(vol.varrer())
+
     def test_iso_multiextent_cuja_continuacao_passa_do_fim_da_imagem_nao_sai_bom(self):
         f = ii.IsoImg(joliet=False)
         f.add_file('/', 'dois.bin', conteudo(5000, 1), curto='DOIS.BIN;1', multi=True)
