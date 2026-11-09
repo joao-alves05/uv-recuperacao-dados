@@ -406,9 +406,14 @@ _tam = relatorio.tam
 
 def linhas_do_relatorio(store, job):
     sql = ('SELECT r.ordem, r.arquivo, r.resultado, r.bytes, r.sha256, r.motivo, a.nome, a.caminho, a.grupo, a.tipo, a.estado, '
-           'a.pontuacao, a.tamanho, a.data FROM recuperacoes r LEFT JOIN achados a ON a.id=r.achado_id '
+           'a.pontuacao, a.tamanho, a.tamanho_total, a.data FROM recuperacoes r LEFT JOIN achados a ON a.id=r.achado_id '
            'WHERE r.job_id=? ORDER BY r.ordem')
-    return [dict(l) for l in store._con().execute(sql, (job['id'],))]
+    linhas = [dict(l) for l in store._con().execute(sql, (job['id'],))]
+    for l in linhas:
+        t = l.get('tamanho_total')
+        if t and l['tamanho'] is not None and t > l['tamanho'] and not l['motivo']:
+            l['motivo'] = 'não lido: só os primeiros %d de %d bytes do arquivo foram lidos (faltam %d)' % (l['tamanho'], t, t - l['tamanho'])
+    return linhas
 
 
 def _criar_exclusivo(destino, base, ext, job_id):

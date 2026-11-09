@@ -10,7 +10,7 @@ Extensível sem mexer no código. Cada tipo: `{"tipo", "grupo" (foto, video, aud
 
 - Varre a origem (disco, volume, imagem ou arquivo) em blocos grandes, alinhado ao setor, procurando cabeçalhos; para cada achado, descobre o fim pelo melhor método do tipo (tamanho no cabeçalho > estrutura interna > rodapé > tamanho máximo).
 - Arquivos contíguos (o caso comum em pen drive e cartão). Fragmentação: só a heurística simples do PhotoRec para JPG (se a validação falha, tentar pular blocos do sistema de arquivos) se der tempo; senão, marcar "parcial".
-- Cada achado vai para a tabela `achados` assim que é descoberto: `job_id, nome (gerado: f0001234.jpg), tipo, grupo, tamanho, offset, estado (bom | parcial | ruim), data (EXIF/metadados quando houver), largura/altura para foto, pontuacao`.
+- Cada achado vai para a tabela `achados` assim que é descoberto: `job_id, nome (gerado: f0001234.jpg), tipo, grupo, tamanho, offset, estado (bom | parcial | ruim), data (EXIF/metadados quando houver), largura/altura para foto, pontuacao`. Opcional: `tamanho_total` (maior que `tamanho`) quando só parte do arquivo foi lida; o relatório cita o trecho não lido no `motivo`.
 - Validação pós-achado (`recuperacao/validar.py`): JPG decodifica marcadores até EOI; PNG confere CRC dos chunks; ZIP/Office abre o diretório central; PDF tem `%%EOF` e xref; MP4 caixas coerentes. Estado e pontuação saem daí.
 - Job novo `varredura` (rápida = só cabeçalhos alinhados ao setor; profunda = todo byte) com checkpoint (offset já varrido) e retomada, como a imagem.
 - Prévia: `GET /api/achados/<id>/previa` devolve miniatura de foto (sem dependência nova: só JPG/PNG/GIF/BMP servidos como estão, até 2 MB, e o painel reduz; o resto devolve ícone pelo grupo). Lê da origem só leitura.

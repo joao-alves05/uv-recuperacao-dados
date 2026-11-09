@@ -16,9 +16,9 @@ SETOR_NOME = 512                      # o número no nome gerado (f0001234.jpg) 
 # coluna -> tipo SQL das colunas que a fase 5 acrescentou à tabela `achados` da fase 1 (migração em JobStore)
 COLUNAS_NOVAS = (('nome', 'TEXT'), ('grupo', 'TEXT'), ('extensao', 'TEXT'), ('apagado', 'INTEGER'),
                  ('extents', 'TEXT'), ('pontuacao', 'INTEGER'), ('largura', 'INTEGER'), ('altura', 'INTEGER'),
-                 ('recuperado_em', 'REAL'))
+                 ('recuperado_em', 'REAL'), ('tamanho_total', 'INTEGER'))
 COLUNAS_GRAVAVEIS = ('job_id', 'nome', 'caminho', 'apagado', 'grupo', 'tipo', 'extensao', 'tamanho', 'offset',
-                     'extents', 'estado', 'pontuacao', 'data', 'largura', 'altura')
+                     'extents', 'estado', 'pontuacao', 'data', 'largura', 'altura', 'tamanho_total')
 _DATA = re.compile(r'\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?')
 
 
@@ -85,7 +85,8 @@ def normalizar(job_id, a):
         apagado = 1 if apagado else 0
     return (job_id, nome, caminho, apagado, grupo, tipo, extensao, tamanho, offset, extents, estado,
             _int(a.get('pontuacao'), 'pontuacao', 0, 100, True), data,
-            _int(a.get('largura'), 'largura', 0, opcional=True), _int(a.get('altura'), 'altura', 0, opcional=True))
+            _int(a.get('largura'), 'largura', 0, opcional=True), _int(a.get('altura'), 'altura', 0, opcional=True),
+            _int(a.get('tamanho_total'), 'tamanho_total', tamanho + 1, opcional=True))
 
 
 def como_dict(linha):

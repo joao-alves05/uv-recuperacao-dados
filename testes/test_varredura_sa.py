@@ -357,6 +357,41 @@ class TestListaIncompleta(Base):
         self.assertEqual(len(self.lista(job['id'])), 6)
 
 
+class TestExtGrandeParcialDePontaAPonta(Base):
+    def test_arquivo_ext3_acima_do_teto_vira_parcial_e_sai_com_os_bytes_cobertos(self):
+        import csv
+        from recuperacao.sa import ext as mod_ext
+        dados = conteudo(100 * 1024, 7)
+        f = ie.ExtImg('ext3')
+        f.add_file(2, 'video.bin', dados)
+        f.add_file(2, 'pequeno.bin', conteudo(3000, 8))
+        caminho = f.gravar(os.path.join(self.trabalho, 'e3.img'))
+        antes = (sha256_de(caminho), os.stat(caminho).st_mtime_ns)
+        with mock.patch.object(mod_ext, 'MAX_BLOCOS_MAPA', 64):
+            job = self.varrer(caminho, 'sistema')
+            self.esperar_estado(job['id'], 'concluido')
+        cobre = 64 * 1024
+        a = self.por_caminho(job['id'])['/video.bin']
+        self.assertEqual((a['estado'], a['tamanho']), ('parcial', cobre))
+        lista = self.req('GET', '/api/jobs/%s/achados' % job['id'], query_string={'estado': 'parcial'}).get_json()
+        self.assertEqual([x['nome'] for x in lista['itens']], ['video.bin'])
+        self.destino = os.path.join(self.pasta, 'saida')
+        r = self.req('POST', '/api/jobs/%s/recuperar' % job['id'], {'ids': 'todos', 'destino': self.destino})
+        self.assertEqual(r.status_code, 201, r.get_json())
+        self.esperar_estado(r.get_json()['id'], 'concluido')
+        achado = [os.path.join(b, n) for b, _, ns in os.walk(self.destino) for n in ns if n == 'video.bin']
+        self.assertEqual(len(achado), 1)
+        with open(achado[0], 'rb') as g:
+            self.assertEqual(g.read(), dados[:cobre])
+        with open(os.path.join(self.destino, 'relatorio.csv'), encoding='utf-8-sig', newline='') as g:
+            linhas = {l['nome']: l for l in csv.DictReader(g)}
+        v = linhas['video.bin']
+        self.assertEqual((v['estado'], v['bytes_gravados']), ('parcial', str(cobre)))
+        self.assertIn('não lido', v['motivo'])                      # o relatório diz que o resto do arquivo não foi lido
+        self.assertEqual(linhas['pequeno.bin']['estado'], 'bom')
+        self.assertEqual((sha256_de(caminho), os.stat(caminho).st_mtime_ns), antes)
+
+
 class TestPausaPorPasta(Base):
     def test_pausa_vista_ao_ler_cada_pasta_do_iso_e_retoma_sem_repetir(self):
         f = ii.IsoImg(joliet=False)
@@ -378,6 +413,59 @@ class TestPausaPorPasta(Base):
             ctrl.pausa_pedida.return_value = False
             self.assertIsNone(varredura._fase_sistema(ctrl, store, job, l, op, cp, l.tamanho))
         self.assertEqual(len(self.lista(job)), 4)
+
+    def imagens_com_pastas(self):
+        """FAT32, exFAT e ext2 com 4 pastas, cada uma com 1 arquivo."""
+        f = im.FatImg('FAT32')
+        x = im.ExFatImg()
+        e = ie.ExtImg('ext2')
+        for i in range(4):
+            d = conteudo(100 + i, i)
+            f.mkdir('/', 'D%d' % i)
+            f.add('/D%d' % i, 'arq%d.txt' % i, d)
+            x.add(x.mkdir('/', 'D%d' % i), 'arq%d.txt' % i, d)
+            e.add_file(e.mkdir(2, 'D%d' % i), 'arq%d.txt' % i, d)
+        return {'FAT32': f.gravar(os.path.join(self.trabalho, 'f.img')), 'exFAT': x.gravar(os.path.join(self.trabalho, 'x.img')),
+                'ext2': e.gravar(os.path.join(self.trabalho, 'e.img'))}
+
+    def test_ao_ler_e_chamado_a_cada_pasta_e_pode_interromper_em_fat_exfat_e_ext(self):
+        from recuperacao import sa
+
+        class Pare(Exception):
+            pass
+        for nome, caminho in self.imagens_com_pastas().items():
+            with self.subTest(nome), leitor_mod.abrir(caminho) as l:
+                vol = sa.detectar(l)
+                chamadas = []
+                vol.ao_ler = chamadas.append
+                self.assertEqual(len(list(vol.varrer())), 8)
+                self.assertGreaterEqual(len(chamadas), 5)                     # a raiz e as 4 pastas
+
+                def para(_):
+                    raise Pare()
+                vol.ao_ler = para
+                with self.assertRaises(Pare):
+                    list(vol.varrer())
+
+    def test_pausa_e_cancelamento_sao_vistos_a_cada_pasta_em_fat_exfat_e_ext(self):
+        for nome, caminho in self.imagens_com_pastas().items():
+            for pedido in ('pausa', 'cancelamento'):
+                with self.subTest(nome + ' ' + pedido):
+                    store = self.ctx.store
+                    job = store.criar('varredura', caminho, 'varredura#%s%s' % (nome, pedido), {'modo': 'sistema'})['id']
+                    op = {'modo': 'sistema', 'bloco': 1, 'sistema_antes': False}
+                    ctrl = mock.Mock(store=store)
+                    ctrl.cancelamento_pedido.return_value = pedido == 'cancelamento'
+                    ctrl.pausa_pedida.return_value = pedido == 'pausa'
+                    with leitor_mod.abrir(caminho) as l:
+                        esperado = 'pausado' if pedido == 'pausa' else 'cancelado'
+                        self.assertEqual(varredura._fase_sistema(ctrl, store, job, l, op, None, l.tamanho), esperado)
+                        self.assertEqual(self.lista(job), [])                 # parou na 1ª pasta, antes de listar tudo
+                        if pedido == 'pausa':
+                            cp = store.obter_checkpoint(job)
+                            ctrl.pausa_pedida.return_value = False
+                            self.assertIsNone(varredura._fase_sistema(ctrl, store, job, l, op, cp, l.tamanho))
+                            self.assertEqual(len(self.lista(job)), 4)         # retoma e termina sem repetir
 
 
 class TestRetomada(Base):

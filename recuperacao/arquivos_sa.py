@@ -122,6 +122,8 @@ def achado_de(e, prefixo=''):
     if ext:
         a['extensao'] = ext
         a['tipo'] = ext.upper()
+    if cobre < e.tamanho:
+        a['tamanho_total'] = e.tamanho                       # o resto não foi lido: o relatório diz quanto faltou
     if len(runs) <= 1:
         a['offset'] = runs[0][0] if runs else 0
     else:
