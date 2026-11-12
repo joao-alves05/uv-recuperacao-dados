@@ -26,6 +26,9 @@ IOCTL_DISK_GET_DRIVE_GEOMETRY = 0x00070000
 IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0
 BLKSSZGET = 0x1268
 BLKGETSIZE64 = 0x80081272
+CDROMREADTOCHDR = 0x5305
+CDROMREADTOCENTRY = 0x5306
+CDROM_LBA = 0x01
 
 MAX_LEITURA = 1 << 30           # teto de bytes por chamada ao sistema (o Leitor repete até completar o pedido)
 MSG_ADMIN = 'Para ler o disco inteiro, abra o programa como administrador'
@@ -116,8 +119,25 @@ class Leitor:
         self.fechar()
 
 
+def toc_linux(fd):
+    """[(controle, setor inicial)] das faixas do CD/DVD pelo TOC (CDROMREADTOCHDR/CDROMREADTOCENTRY, só consulta).
+    Os testes trocam por uma falsa; em quem não é óptico o ioctl falha com OSError."""
+    import fcntl
+    import struct
+    primeira, ultima = struct.unpack('BB', fcntl.ioctl(fd, CDROMREADTOCHDR, bytes(2)))
+    faixas = []
+    for n in range(primeira, ultima + 1):
+        e = fcntl.ioctl(fd, CDROMREADTOCENTRY, struct.pack('BBBxIBxxx', n, 0, CDROM_LBA, 0, 0))
+        _, adr_ctrl, _, lba, _ = struct.unpack('BBBxIBxxx', e)
+        faixas.append((adr_ctrl >> 4, lba))
+    return faixas
+
+
 class LeitorPosix(Leitor):
-    def __init__(self, caminho):
+    def __init__(self, caminho, toc=None):
+        if toc is not None or _OPTICO_LINUX.fullmatch(caminho):
+            self._toc = toc or toc_linux
+            self.sessoes = self._sessoes               # só unidade óptica (ou TOC injetado): em arquivo, o UDF segue sem sessões
         try:
             self.fd = os.open(caminho, os.O_RDONLY | O_BINARY)
         except PermissionError:
@@ -142,6 +162,10 @@ class LeitorPosix(Leitor):
         except BaseException:
             os.close(self.fd)
             raise
+
+    def _sessoes(self):
+        """Setores iniciais das faixas de dados do TOC (uma por sessão, no caso comum); OSError se a unidade não responde."""
+        return sorted({lba for ctrl, lba in self._toc(self.fd) if ctrl & 4})
 
     def _bruto(self, offset, n):
         os.lseek(self.fd, offset, os.SEEK_SET)
@@ -348,13 +372,13 @@ def descritor_do_disco(indice, api=None):
         api.fechar(h)
 
 
-def abrir(caminho, api=None):
+def abrir(caminho, api=None, toc=None):
     """Abre a origem só para leitura. Caminho de disco do Windows usa a API do Windows; o resto, os.open."""
     if os.name == 'nt' and (api is not None or _DISCO_WINDOWS.fullmatch(caminho) or _OPTICO_WINDOWS.fullmatch(caminho)):
         aberto = LeitorWindows(caminho, api)
     elif api is not None:
         aberto = LeitorWindows(caminho, api)
     else:
-        aberto = LeitorPosix(caminho)
+        aberto = LeitorPosix(caminho, toc)
     aberto.caminho = caminho if api is None else None      # quem quiser reabrir a origem (outro descritor) usa este
     return aberto
