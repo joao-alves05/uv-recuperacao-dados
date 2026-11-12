@@ -29,6 +29,8 @@ BLKGETSIZE64 = 0x80081272
 CDROMREADTOCHDR = 0x5305
 CDROMREADTOCENTRY = 0x5306
 CDROM_LBA = 0x01
+IOCTL_CDROM_READ_TOC_EX = 0x00024054
+DRIVE_CDROM = 5
 
 MAX_LEITURA = 1 << 30           # teto de bytes por chamada ao sistema (o Leitor repete até completar o pedido)
 MSG_ADMIN = 'Para ler o disco inteiro, abra o programa como administrador'
@@ -36,6 +38,7 @@ SETOR_ARQUIVO = 512
 SETOR_OPTICO = 2048
 _DISCO_WINDOWS = re.compile(r'\\\\\.\\(?:PhysicalDrive\d+|[A-Za-z]:)', re.I)
 _OPTICO_WINDOWS = re.compile(r'\\\\\.\\CdRom\d+', re.I)
+_LETRA_WINDOWS = re.compile(r'\\\\\.\\([A-Za-z]):', re.I)
 _DISPOSITIVO_LINUX = re.compile(r'/dev/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*')
 _OPTICO_LINUX = re.compile(r'/dev/(?:sr|scd)\d+')
 O_BINARY = getattr(os, 'O_BINARY', 0)
@@ -177,6 +180,20 @@ class LeitorPosix(Leitor):
             self.fd = None
 
 
+def faixas_do_toc(dados):
+    """[(controle, setor inicial)] de um CDROM_TOC (tamanho big-endian, faixa inicial e final, 8 bytes por faixa); a faixa 0xAA (fim) fica de fora."""
+    import struct
+    if len(dados) < 4:
+        raise OSError('TOC vazio')
+    tam = struct.unpack('>H', dados[:2])[0] + 2
+    faixas = []
+    for pos in range(4, min(tam, len(dados)) - 7, 8):
+        _, adr_ctrl, numero, _, lba = struct.unpack('>BBBBI', dados[pos:pos + 8])
+        if numero != 0xAA:
+            faixas.append((adr_ctrl >> 4, lba))
+    return faixas
+
+
 class ApiWindows:
     """As únicas chamadas ao Windows: abrir só para leitura, medir, ler e fechar. Os testes trocam por uma falsa."""
 
@@ -296,6 +313,22 @@ class ApiWindows:
             return dados[desloc:].split(bytes(1), 1)[0].decode('ascii', 'replace').strip()
         return texto(12), texto(16), texto(24)                  # Vendor, Product, Serial (a revisão de firmware fica de fora)
 
+    def tipo_unidade(self, letra):
+        """GetDriveType da raiz da letra (DRIVE_CDROM = 5)."""
+        self.k.GetDriveTypeW.argtypes = [self.wt.LPCWSTR]
+        self.k.GetDriveTypeW.restype = self.wt.UINT
+        return self.k.GetDriveTypeW(letra.upper() + ':' + chr(92))
+
+    def toc(self, h):
+        """[(controle, setor inicial)] das faixas do CD/DVD: IOCTL_CDROM_READ_TOC_EX, formato TOC, endereço em LBA (só consulta)."""
+        entrada = (self.ct.c_ubyte * 4)()                   # Format = 0 (TOC), Msf = 0 (LBA), SessionTrack = 0
+        saida = (self.ct.c_ubyte * (4 + 8 * 100))()
+        devolvidos = self.wt.DWORD(0)
+        if not self.k.DeviceIoControl(h, IOCTL_CDROM_READ_TOC_EX, self.ct.byref(entrada), self.ct.sizeof(entrada),
+                                      self.ct.byref(saida), self.ct.sizeof(saida), self.ct.byref(devolvidos), None):
+            raise self._erro()
+        return faixas_do_toc(bytes(saida)[:devolvidos.value])
+
     def ler(self, h, offset, n):
         if not self.k.SetFilePointerEx(h, offset, None, 0):
             raise self._erro()
@@ -313,7 +346,7 @@ class ApiWindows:
 class LeitorWindows(Leitor):
     alinhar = True
 
-    def __init__(self, caminho, api=None):
+    def __init__(self, caminho, api=None, toc=None):
         self.api = api or ApiWindows()
         try:
             self.h = self.api.CreateFileW(caminho, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, 0)
@@ -337,11 +370,29 @@ class LeitorWindows(Leitor):
             except OSError:
                 setor = SETOR_OPTICO if optico else SETOR_ARQUIVO
             super().__init__(tamanho, setor)
+            toc = toc or (getattr(self.api, 'toc', None) if self._eh_cdrom(caminho) else None)
+            if toc:
+                self._toc = toc
+                self.sessoes = self._sessoes               # só unidade de CD/DVD (ou TOC injetado): em arquivo, o UDF segue sem sessões
         except BaseException as e:
             self.api.fechar(self.h)
             if isinstance(e, OSError):
                 raise ErroLeitor('Não consegui medir o disco (erro %s).' % (getattr(e, 'winerror', None) or e.errno)) from None
             raise
+
+    def _eh_cdrom(self, caminho):
+        if _OPTICO_WINDOWS.fullmatch(caminho):
+            return True
+        letra = _LETRA_WINDOWS.fullmatch(caminho)
+        try:
+            return bool(letra) and self.api.tipo_unidade(letra.group(1)) == DRIVE_CDROM
+        except (OSError, AttributeError):
+            return False
+
+    def _sessoes(self):
+        """Setores iniciais das faixas de dados do TOC (uma por sessão, no caso comum); OSError se a unidade não responde.
+        O formato TOC lista faixas, não sessões."""
+        return sorted({lba for ctrl, lba in self._toc(self.h) if ctrl & 4})
 
     def _bruto(self, offset, n):
         return self.api.ler(self.h, offset, n)
@@ -375,9 +426,9 @@ def descritor_do_disco(indice, api=None):
 def abrir(caminho, api=None, toc=None):
     """Abre a origem só para leitura. Caminho de disco do Windows usa a API do Windows; o resto, os.open."""
     if os.name == 'nt' and (api is not None or _DISCO_WINDOWS.fullmatch(caminho) or _OPTICO_WINDOWS.fullmatch(caminho)):
-        aberto = LeitorWindows(caminho, api)
+        aberto = LeitorWindows(caminho, api, toc)
     elif api is not None:
-        aberto = LeitorWindows(caminho, api)
+        aberto = LeitorWindows(caminho, api, toc)
     else:
         aberto = LeitorPosix(caminho, toc)
     aberto.caminho = caminho if api is None else None      # quem quiser reabrir a origem (outro descritor) usa este
