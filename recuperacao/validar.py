@@ -16,6 +16,7 @@ Devolve None (não é um arquivo desse tipo) ou um dict com `tamanho`, `estado` 
 
 Tudo aqui lê bytes alheios: nenhum campo é confiável, todo tamanho é conferido contra `limite` antes de ser usado.
 """
+import bisect
 import re
 import struct
 import zlib
@@ -180,6 +181,58 @@ def _fim_da_varredura_jpeg(j, pos, fim):
     return fim, 'fim'
 
 
+_JPG_MARCADOR_INVALIDO = re.compile(rb'\xff[^\x00\xd0-\xd7\xd9\xff]')
+_JPG_BLOCOS = (4096, 2048, 1024)        # tamanhos de bloco do sistema de arquivos que a heurística tenta
+_JPG_RECUOS = 3                          # quantos blocos antes do ponto da quebra o lixo pode ter começado
+_JPG_SALTO_MAX = 1 << 20                 # o lixo entre os pedaços pode ter até 1 MiB
+_JPG_JANELA = 3 << 20                    # quanto se lê à frente para achar o resto (salto + continuação)
+_JPG_RESTO_MIN = 16                      # o pedaço retomado tem de ter alguns bytes de dados antes do EOI
+
+
+def _jpg_retomar(j, ini, quebra, fim):
+    """Heurística do PhotoRec: os dados do JPEG pararam em `quebra` (lixo no meio). Procura, em posições múltiplas de
+    um bloco, onde o resto da varredura continua limpo até o EOI (FFD9). Devolve (fim do 1o pedaço, início do 2o,
+    fim do EOI) ou None. Só aceita retomada que chega a um EOI sem marcador inválido nem corrida de zeros."""
+    e_min = max(ini + 1, (quebra // 512 - _JPG_RECUOS * 8) * 512)
+    base = e_min
+    w = j.ler(base, min(_JPG_JANELA, fim - base))
+    if not w:
+        return None
+    invalidos = [m.start() for m in _JPG_MARCADOR_INVALIDO.finditer(w)]
+    eois = []
+    k = w.find(b'\xff\xd9')
+    while k >= 0:
+        eois.append(k)
+        k = w.find(b'\xff\xd9', k + 1)
+    if not eois:
+        return None
+    cands = []                                # (q, bloco, recuo, e): vale o primeiro q limpo (adiante dele já é o meio do resto); empate, o bloco maior
+    for ib, bs in enumerate(_JPG_BLOCOS):
+        for recuo in range(_JPG_RECUOS):
+            e = (quebra // bs - recuo) * bs
+            if e <= ini or e < base:
+                continue
+            for q in range(e + bs, min(e + _JPG_SALTO_MAX, base + len(w)) + 1, bs):
+                cands.append((q, ib, recuo, e))
+    for q, _, _, e in sorted(cands):
+        r = q - base
+        i = bisect.bisect_left(eois, r)
+        if i >= len(eois):
+            continue
+        z = eois[i]
+        if z - r < _JPG_RESTO_MIN:
+            continue
+        v = bisect.bisect_left(invalidos, r)
+        if v < len(invalidos) and invalidos[v] < z:
+            continue
+        if bytes(ZEROS) in w[r:z]:
+            continue
+        pos, motivo = _fim_da_varredura_jpeg(j, q, fim)         # confirma com o mesmo critério da varredura normal
+        if motivo == 'marcador' and pos == base + z:
+            return e, q, pos + 2
+    return None
+
+
 def jpg(j, off, limite, a):
     if j.ler(off, 3) != b'\xff\xd8\xff':
         return None
@@ -228,6 +281,13 @@ def jpg(j, off, limite, a):
                 break
     if not viu_sos:
         return None if largura is None else res(min(pos, fim) - off, 'ruim', 10, largura=largura, altura=altura, data=data)
+    if a.get('fragmentado') and pos < fim:
+        # dados interrompidos por lixo (arquivo fragmentado em 2 pedaços): tenta retomar depois dele
+        r = _jpg_retomar(j, off, pos, fim)
+        if r is not None:
+            e, q, f = r
+            return res((e - off) + (f - q), 'bom', 70, largura=largura, altura=altura, data=data,
+                       extents=[[off, e - off], [q, f - q]])
     return res(min(pos, fim) - off, 'parcial', 50, largura=largura, altura=altura, data=data)
 
 
