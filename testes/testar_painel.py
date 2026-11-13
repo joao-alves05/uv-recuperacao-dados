@@ -549,6 +549,26 @@ def main():
         conferir('criar: abre o novo job na URL', p.espera("/^\\/jobs\\/j-20261104-01\\d\\d$/.test(location.pathname)") and p.espera("document.getElementById('j-nome').textContent==='a.img'"), p.ev('location.pathname'))
         conferir('criar: job entra no topo da lista', p.ev("document.querySelector('.item .item-nome').textContent")=='a.img')
         conferir('formulario limpo depois de criar', p.ev("document.getElementById('f-origem').value")=='')
+        conferir('tentativas em branco: o POST nao leva tentativas (o servico escolhe o padrao)', http(porta, '/_teste/ultimo_rec')['opcoes'] == {}, http(porta, '/_teste/ultimo_rec'))
+
+        # avancado: tentativas
+        p.ir(base + '/#avancado', .8)
+        conferir('formulario tem a caixa de tentativas, com rotulo e mesmo estilo dos outros campos',
+                 p.espera("!document.getElementById('v-nova').hidden && !!document.getElementById('f-tentativas')") and
+                 p.ev("(()=>{const t=document.getElementById('f-tentativas'),o=document.getElementById('f-origem');const a=getComputedStyle(t),b=getComputedStyle(o);const l=document.querySelector('label[for=f-tentativas]');return !!l&&l.textContent.length>0&&a.height===b.height&&a.borderRadius===b.borderRadius&&a.borderTopColor===b.borderTopColor&&a.fontSize===b.fontSize&&Math.round(t.getBoundingClientRect().left)===Math.round(o.getBoundingClientRect().left)&&Math.round(t.getBoundingClientRect().width)===Math.round(o.getBoundingClientRect().width)})()"))
+        p.foto('1366-avancado-tentativas')
+        p.ev("document.getElementById('f-origem').value='C:\\\\b.img';document.getElementById('f-destino').value='D:\\\\b-copia.img';document.getElementById('f-tentativas').value='25'")
+        p.clica('#f-enviar')
+        conferir('tentativas fora da faixa: mostra a mensagem do servico e o POST leva o valor',
+                 p.espera("!document.getElementById('f-erro').hidden") and p.ev("document.getElementById('f-erro').textContent")=='As tentativas precisam ser um número inteiro de 0 a 20.' and p.ev("location.hash")=='#avancado')
+        p.ev("document.getElementById('f-tentativas').value='a'")
+        p.clica('#f-enviar')
+        conferir('tentativas com letra: o servico recusa e a mensagem aparece', p.espera("document.getElementById('f-erro').textContent.includes('de 0 a 20')") and p.ev("document.getElementById('f-tentativas').value")=='a')
+        p.ev("document.getElementById('f-tentativas').value='5'")
+        p.clica('#f-enviar')
+        conferir('tentativas 5: o POST leva tentativas=5 (numero)', p.espera("/^\\/jobs\\/j-/.test(location.pathname)") and http(porta, '/_teste/ultimo_rec')['opcoes'] == {'tentativas': 5}, http(porta, '/_teste/ultimo_rec'))
+        p.ir(base + '/#avancado', .8)
+        conferir('depois de criar, a caixa volta vazia', p.espera("!!document.getElementById('f-tentativas')") and p.ev("document.getElementById('f-tentativas').value")=='')
 
         # ---- largura da lista
         p.ir(base + '/', .8)

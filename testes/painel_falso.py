@@ -458,6 +458,9 @@ class H(BaseHTTPRequestHandler):
                     return self._json(400, {'erro': '<b onmouseover="window.__xss=4">A origem</b> não existe.'})
                 if o == d:
                     return self._json(400, {'erro': 'O destino não pode ser a própria origem.'})
+                t = (corpo.get('opcoes') or {}).get('tentativas', 1)      # mesma regra e mensagem do imagem.py
+                if type(t) is not int or not 0 <= t <= 20:
+                    return self._json(400, {'erro': 'As tentativas precisam ser um número inteiro de 0 a 20.'})
                 E.contador += 1
                 E.ultimo = {'tipo': corpo.get('tipo'), 'origem': o, 'destino': d}
                 E.ultimo_opcoes = corpo.get('opcoes')

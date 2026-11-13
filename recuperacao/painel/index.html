@@ -117,6 +117,9 @@
         <label for="f-destino">Onde guardar a cópia</label>
         <input type="text" id="f-destino" name="destino" autocomplete="off" spellcheck="false" placeholder="D:\Copias\arquivo-copia.img">
         <p class="dica">Guarde a cópia em outro disco, nunca dentro do que está sendo copiado.</p>
+        <label for="f-tentativas">Tentativas nos trechos ruins</label>
+        <input type="text" id="f-tentativas" name="tentativas" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="1" aria-describedby="f-tentativas-dica">
+        <p class="dica" id="f-tentativas-dica">Quantas vezes tentar ler de novo cada trecho com defeito (de 0 a 20). Em branco, o programa escolhe: 1, ou 3 em CD e DVD.</p>
         <p class="alerta alerta-perigo" id="f-erro" role="alert" hidden></p>
         <div class="acoes">
           <button type="submit" class="btn btn-primario" id="f-enviar">Iniciar</button>

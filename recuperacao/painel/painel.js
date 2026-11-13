@@ -1576,7 +1576,9 @@
     botao.disabled = true;
     botao.textContent = 'Iniciando…';
     try {
-      const j = jobDe(await api('POST', '/api/jobs', { tipo: 'imagem', origem, destino, opcoes: {} }));
+      const tent = $('f-tentativas').value.trim();     // em branco: o serviço escolhe o padrão (1, ou 3 em CD/DVD)
+      const opcoes = tent ? { tentativas: /^-?\d+$/.test(tent) ? Number(tent) : tent } : {};   // o que não for número vai como está e o serviço recusa com a mensagem dele
+      const j = jobDe(await api('POST', '/api/jobs', { tipo: 'imagem', origem, destino, opcoes }));
       aplicarJob(j);
       $('f-nova').reset();
       if (j && j.id) ir('/jobs/' + encodeURIComponent(j.id));
