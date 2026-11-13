@@ -88,7 +88,6 @@ def _erro_fatia(o, total=None, setor=512):
 
 MOTIVOS = {'sem_conteudo': 'arquivos apagados só com o nome (o sistema de arquivos apagou os ponteiros do conteúdo, '
                            'como ext3 e ext4 fazem; a busca por assinatura pode achar o conteúdo)',
-           'esparso': 'arquivos esparsos (com buracos), que a lista ainda não representa',
            'invalido': 'arquivos com posição inválida no disco (estrutura danificada)'}
 
 

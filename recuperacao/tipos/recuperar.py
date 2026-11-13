@@ -219,6 +219,12 @@ def _copiar(aberto, achado, tmp, ctrl):
                 if ctrl.pausa_pedida():
                     return 'pausado'
                 pedaco = min(BLOCO, n, falta)
+                if off is None:                              # buraco de arquivo esparso: zeros, não é falha de leitura
+                    dados = bytes(pedaco)
+                    saida.write(dados)
+                    h.update(dados)
+                    n, falta, feitos = n - pedaco, falta - pedaco, feitos + pedaco
+                    continue
                 try:
                     dados = aberto.ler(off, pedaco)
                     if len(dados) < pedaco:
@@ -361,7 +367,8 @@ def executar(job, ctrl):
                 except OSError:
                     ctrl.evento('Não consegui gravar lacunas.csv no destino.')
             ctrl.log('%s: %s, %d bytes, achado %d (bytes %s da origem), sha256 %s.' % (
-                rel, resultado, n, achado_id, ' + '.join('%d..%d' % (o, o + c) for o, c in achados.extents_de(achado)[:20]), sha))
+                rel, resultado, n, achado_id, ' + '.join('buraco de %d' % c if o is None else '%d..%d' % (o, o + c)
+                                  for o, c in achados.extents_de(achado)[:20]), sha))
             feitos += n
             ruins_total += sum(-(-c // setor) for _, c in aberto.lacunas_do_arquivo)
             ctrl.progresso(feitos, total, 'Recuperando: %d de %d' % (ordem + 1, len(ids)), ruins_total)

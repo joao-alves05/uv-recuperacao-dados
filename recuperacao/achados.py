@@ -43,12 +43,13 @@ def normalizar(job_id, a):
     offset = a.get('offset')
     if extents is not None:
         if (not isinstance(extents, (list, tuple)) or not extents or len(extents) > 100000
-                or not all(isinstance(e, (list, tuple)) and len(e) == 2 and type(e[0]) is int and type(e[1]) is int
-                           and e[0] >= 0 and e[1] > 0 for e in extents)):
-            raise ValueError('achado: "extents" precisa ser uma lista de [offset, comprimento]')
+                or not all(isinstance(e, (list, tuple)) and len(e) == 2
+                           and (e[0] is None or (type(e[0]) is int and e[0] >= 0)) and type(e[1]) is int and e[1] > 0
+                           for e in extents)):
+            raise ValueError('achado: "extents" precisa ser uma lista de [offset, comprimento] (offset nulo = zeros)')
         if sum(e[1] for e in extents) != tamanho:
             raise ValueError('achado: a soma dos extents não bate com o tamanho')
-        offset = extents[0][0]
+        offset = next((e[0] for e in extents if e[0] is not None), 0)     # buraco (nulo) no começo: não é posição
         extents = json.dumps([list(e) for e in extents])
     else:
         offset = _int(offset, 'offset')
@@ -117,9 +118,9 @@ def contar_por_grupo(store, job_id):
 
 
 def extents_de(achado):
-    """[(offset, comprimento), ...] dos bytes do achado na origem."""
+    """[(offset, comprimento), ...] dos bytes do achado na origem. Offset None = buraco de arquivo esparso (zeros)."""
     if achado.get('extents'):
-        return [(int(o), int(n)) for o, n in achado['extents']]
+        return [(None if o is None else int(o), int(n)) for o, n in achado['extents']]
     return [(int(achado['offset']), int(achado['tamanho']))]
 
 
@@ -129,6 +130,10 @@ def ler_achado(leitor, achado, maximo=None, bloco=1 << 20):
     for off, n in extents_de(achado):
         while n > 0 and falta > 0:
             pedaco = min(bloco, n, falta)
+            if off is None:
+                yield bytes(pedaco)
+                n, falta = n - pedaco, falta - pedaco
+                continue
             dados = leitor.ler(off, pedaco)
             if len(dados) < pedaco:
                 raise OSError('leitura curta em %d' % off)

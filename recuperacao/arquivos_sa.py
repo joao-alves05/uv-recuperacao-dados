@@ -99,14 +99,12 @@ def _data(*candidatas):
 
 def achado_de(e, prefixo=''):
     """Entrada de `sa/` -> (dict do contrato de achados, None) ou (None, motivo) quando não dá para recuperar:
-    `pasta`, `sem_conteudo` (nome sem bytes recuperáveis, p.ex. ext3/ext4 apagado), `esparso` (tem buraco) ou
-    `invalido` (posição negativa)."""
+    `pasta`, `sem_conteudo` (nome sem bytes recuperáveis, p.ex. ext3/ext4 apagado) ou `invalido` (posição negativa).
+    Arquivo esparso entra: o buraco vira o extent `[None, n]` (n bytes de zeros)."""
     if e.eh_dir:
         return None, 'pasta'
     runs = [(o, n) for o, n in e.runs if n > 0]
-    if any(o is None for o, _ in runs):
-        return None, 'esparso'
-    if any(o < 0 for o, _ in runs):
+    if any(o is not None and o < 0 for o, _ in runs):
         return None, 'invalido'                              # offset negativo: estrutura danificada, nada a ler
     cobre = sum(n for _, n in runs)
     if cobre == 0 and (e.tamanho > 0 or e.estado == 'ruim'):
@@ -124,7 +122,7 @@ def achado_de(e, prefixo=''):
         a['tipo'] = ext.upper()
     if cobre < e.tamanho:
         a['tamanho_total'] = e.tamanho                       # o resto não foi lido: o relatório diz quanto faltou
-    if len(runs) <= 1:
+    if len(runs) <= 1 and (not runs or runs[0][0] is not None):
         a['offset'] = runs[0][0] if runs else 0
     else:
         a['extents'] = [[o, n] for o, n in runs]
