@@ -152,6 +152,18 @@ def det_exfat(b):
     return {'sistema': 'exfat', 'bps': bps, 'setores': tam, 'tamanho': tam * bps, 'inicio_decl': desloc, 'fat_off': fat}
 
 
+def _fat_sem_rotulo(b, bps, spc, res, nf, raiz, f16, clusters, sistema):
+    """Sem o rótulo "FAT12/16" o setor tem de provar que é FAT pelos números, senão qualquer setor com 55AA e um
+    EB/E9 no início passaria: salto no padrão (EB xx 90 ou E9), raiz que ocupa setores inteiros, número de clusters
+    abaixo do limite de FAT16 e uma FAT grande o bastante para endereçar todos os clusters."""
+    if b[0] == 0xEB and b[2] != 0x90:
+        return False
+    if (raiz * 32) % bps or clusters >= 65525 or res + nf * f16 >= 65536:
+        return False
+    entradas = f16 * bps * 2 // 3 if sistema == 'fat12' else f16 * bps // 2
+    return entradas >= clusters + 2
+
+
 def det_fat(b):
     if len(b) < 512 or b[510:512] != b'\x55\xaa' or b[0] not in (0xEB, 0xE9):
         return None
@@ -170,12 +182,16 @@ def det_fat(b):
             return None
         sistema, fat_set, bk = 'fat32', f32, _u16(b, 50)
     else:
-        if b[54:57] != b'FAT' or f16 == 0:
+        if f16 == 0 or raiz == 0:
             return None
         dados = total - (res + nf * f16 + (raiz * 32 + bps - 1) // bps)
-        if dados // spc <= 0:
+        clusters = dados // spc
+        if clusters <= 0:
             return None
-        sistema, fat_set, bk = ('fat12' if dados // spc < 4085 else 'fat16'), f16, 0
+        sistema, fat_set, bk = ('fat12' if clusters < 4085 else 'fat16'), f16, 0
+        if b[54:57] != b'FAT':                                       # rótulo em branco ou com lixo: só vale a estrutura
+            if not _fat_sem_rotulo(b, bps, spc, res, nf, raiz, f16, clusters, sistema):
+                return None
     return {'sistema': sistema, 'bps': bps, 'setores': total, 'tamanho': total * bps, 'oculto': _u32(b, 28), 'bk': bk,
             'reservado': res, 'media': media, 'fat_setores': fat_set}
 
