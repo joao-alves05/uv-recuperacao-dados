@@ -277,10 +277,20 @@ class Varredor:
 
     def _achado(self, inicio, a, r):
         ext = r.get('extensao') or a['extensao']
+        extents = r.get('extents')
+        if extents:        # arquivo fragmentado: offsets absolutos na origem (buraco [None, n] fica como está)
+            extents = [[None if o is None else o + self.deslocamento, n] for o, n in extents]
         return {'nome': nome_gerado(inicio + self.deslocamento, ext), 'tipo': r.get('tipo') or a['tipo'], 'grupo': r.get('grupo') or a['grupo'],
                 'extensao': ext, 'tamanho': r['tamanho'], 'offset': inicio + self.deslocamento, 'estado': r['estado'],
                 'pontuacao': r['pontuacao'], 'data': r.get('data'), 'largura': r.get('largura'),
-                'altura': r.get('altura'), 'apagado': None}
+                'altura': r.get('altura'), 'apagado': None, **({'extents': extents} if extents else {})}
+
+    @staticmethod
+    def _fim(inicio, r):
+        """Onde o achado termina: `inicio + tamanho`, ou o fim do último extent quando o arquivo é fragmentado."""
+        if r.get('extents'):
+            return max([o + n for o, n in r['extents'] if o is not None] or [inicio + r['tamanho']])
+        return inicio + r['tamanho']
 
     # --- segundo plano -------------------------------------------------------------------------------------------
     def _abrir_pool(self, abertos):
@@ -351,7 +361,7 @@ class Varredor:
                         if r['estado'] == 'ruim':
                             self.livre = inicio_arq + 1
                         else:
-                            self.livre = inicio_arq + r['tamanho']
+                            self.livre = self._fim(inicio_arq, r)
                             if self.modo == 'rapida':
                                 self.livre = -(-self.livre // self.setor) * self.setor
                         break
