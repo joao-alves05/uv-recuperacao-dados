@@ -777,9 +777,9 @@ def _zip_caminhar(j, off, fim):
 
 
 def _zip_fechar(j, off, ini_cd, fim):
-    """Lê o diretório central a partir de ini_cd e confere o registro final. Devolve (fim_do_zip, nomes, data) ou None."""
+    """Lê o diretório central a partir de ini_cd e confere o registro final. Devolve (fim_do_zip, nomes, data, entradas) ou None."""
     p = ini_cd
-    nomes, data, n = [], None, 0
+    nomes, data, n, entradas = [], None, 0, []
     while p + 46 <= fim:
         e = j.ler(p, 46)
         if len(e) < 46 or e[:4] != _PK_CENTRAL:
@@ -792,6 +792,7 @@ def _zip_fechar(j, off, ini_cd, fim):
         lo = u32(e, 42)
         if lo != 0xFFFFFFFF and j.ler(off + lo, 4) != _PK_LOCAL:
             return None
+        entradas.append((lo, u16(e, 8), u16(e, 10), u32(e, 16), u32(e, 20), u32(e, 24)))
         p += 46 + nlen + xlen + clen
         n += 1
     if j.ler(p, 4) == b'PK\x05\x05':                      # assinatura digital: pula
@@ -802,7 +803,48 @@ def _zip_fechar(j, off, ini_cd, fim):
     total, tam_cd, deslocamento, clen = u16(f, 10), u32(f, 12), u32(f, 16), u16(f, 20)
     if total != n or off + deslocamento != ini_cd or tam_cd != p - ini_cd or p + 22 + clen > fim:
         return None
-    return p + 22 + clen, nomes, data
+    return p + 22 + clen, nomes, data, entradas
+
+
+_ZIP_BLOCO = 1 << 20                    # a conferência dos dados lê em blocos de 1 MiB (nunca a entrada inteira)
+_ZIP_CONFERIR_MAX = 256 << 20           # teto de bytes lidos (compactados) para conferir CRC; o que passa disso não é conferido
+
+
+def _zip_dados_ok(j, off, entradas):
+    """Confere o CRC-32 de cada entrada (armazenada ou deflate) (dados que acabam em zeros antes do tamanho
+    declarado não batem). False = achou dano. Entrada cifrada, zip64 ou de outro método não é conferida; passado o teto, para."""
+    lido = 0
+    for lo, flags, metodo, crc, csize, usize in entradas:
+        if flags & 1 or metodo not in (0, 8) or 0xFFFFFFFF in (lo, csize, usize):
+            continue
+        if lido + csize > _ZIP_CONFERIR_MAX:
+            break
+        h = j.ler(off + lo, 30)
+        if len(h) < 30 or h[:4] != _PK_LOCAL:
+            return False
+        pos = off + lo + 30 + u16(h, 26) + u16(h, 28)
+        fim_e = pos + csize
+        d = zlib.decompressobj(-15) if metodo == 8 else None
+        soma, total = 0, 0
+        while pos < fim_e:
+            c = j.ler(pos, min(_ZIP_BLOCO, fim_e - pos))
+            if not c:
+                return False
+            pos += len(c)
+            if d is not None:
+                try:
+                    c = d.decompress(c)
+                except zlib.error:
+                    return False
+            soma = zlib.crc32(c, soma)
+            total += len(c)
+        if d is not None:
+            if not d.eof:
+                return False
+        lido += csize
+        if total != usize or soma != crc:
+            return False
+    return True
 
 
 def _tipo_zip(j, off, nomes):
@@ -845,8 +887,11 @@ def zip_(j, off, limite, a):
         if achou is None:
             return None
     if achou is not None:
-        total, nomes_cd, data = achou
+        total, nomes_cd, data, entradas = achou
         tipo, grupo = _tipo_zip(j, off, nomes_cd)
+        if not _zip_dados_ok(j, off, entradas):
+            # a estrutura fecha, mas os dados de alguma entrada não batem com o CRC (resto zerado ou sobrescrito)
+            return res(total - off, 'parcial', 45, tipo=tipo, extensao=tipo.lower(), grupo=grupo, data=data)
         return res(total - off, 'bom', 100, tipo=tipo, extensao=tipo.lower(), grupo=grupo, data=data)
     if not nomes:
         return None

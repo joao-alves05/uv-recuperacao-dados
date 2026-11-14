@@ -71,7 +71,8 @@ Estado e pontuação: `bom` = estrutura inteira e coerente (100, ou 90 nos tipos
 - Cada bloco entrega seus achados, gravados na hora (o painel os vê enquanto a varredura anda) junto com o checkpoint `{pos, tamanho, modo, ruins}`. Pausar, cair o serviço e retomar continua do último checkpoint, sem perder nem repetir achado.
 - Depois de um achado `bom` ou `parcial` a varredura pula para o fim dele (não acha o que está embutido, como um JPG dentro de um ZIP guardado). Um `parcial` termina onde começa outro arquivo que valida inteiro (ele não engole o vizinho).
 - Setor ilegível vira zeros e é contado em `setores_ruins`. Nada é escrito na origem.
-- Limitações: arquivo fragmentado sai `parcial` ou `ruim` (a heurística do PhotoRec para JPG não foi feita); ZIP cortado cujo resto foi sobrescrito por zeros não é detectado (os tamanhos do cabeçalho local parecem coerentes); ZIP64 só é achado se tiver diretório central comum ou descritor de dados; cabeçalhos de OLE2 com mais de 109 setores de FAT usam a cadeia DIFAT, mas não foi testado com arquivo grande; MP4 com `moov` perdido sai `parcial`.
+- ZIP com diretório central íntegro tem o CRC-32 de cada entrada conferido (armazenada ou deflate, em blocos de 1 MiB, sem ler a entrada inteira na memória); CRC ou tamanho que não bate (resto zerado, byte trocado) vira `parcial`. Teto: 256 MiB compactados conferidos por arquivo; o que passa disso, entradas cifradas, zip64 e outros métodos de compressão não são conferidos.
+- Limitações: arquivo fragmentado sai `parcial` ou `ruim` (a heurística do PhotoRec para JPG não foi feita); ZIP64 só é achado se tiver diretório central comum ou descritor de dados; cabeçalhos de OLE2 com mais de 109 setores de FAT usam a cadeia DIFAT, mas não foi testado com arquivo grande; MP4 com `moov` perdido sai `parcial`.
 - Fase 4: o modo "pelo sistema de arquivos" entra como novo valor de `modo` neste mesmo job, gravando em `adicionar_achados`.
 
 ## Prévia
