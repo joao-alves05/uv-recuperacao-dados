@@ -22,7 +22,9 @@ F_INLINE = 0x10000000
 INC_FILETYPE, INC_EXTENTS, INC_64BIT, INC_FLEX = 0x2, 0x40, 0x80, 0x200
 MAX_NOS_EXTENTS = 256                 # nós da árvore de extents visitados por arquivo
 MAX_EXTENTS = 100000                 # extents (e entradas de índice) vistos por arquivo
-MAX_BLOCOS_MAPA = 1 << 20         # arquivo com mapa de blocos (ext2/3) acima disto (1 GiB com blocos de 1 KiB) sai ruim
+MAX_BLOCOS_MAPA = 1 << 32         # blocos lógicos lidos no mapa de blocos (ext2/3); o mapa é de runs, não de blocos
+MAX_RUNS_MAPA = 1 << 20           # runs (início, quantidade) por arquivo: acima disto o mapa para e o arquivo sai parcial
+MAX_INDIRETOS = 1 << 20           # blocos de ponteiros lidos por arquivo (barra imagem corrompida/ponteiros em loop)
 
 
 def _super(b):
@@ -131,23 +133,54 @@ class Ext(Volume):
                 out += self._extents(self._bloco((hi << 32) | lo), prof + 1, cont)
         return out
 
-    def _ponteiros(self, bloco, nivel, saida, limite):
-        """Percorre blocos indiretos; `saida` recebe o bloco físico de cada bloco lógico (0 = buraco)."""
-        if len(saida) >= limite:
+    @staticmethod
+    def _somar(runs, p, n):
+        """Acrescenta n blocos a partir de p (0 = buraco) ao fim de `runs`, juntando com o run anterior se contíguo."""
+        p = p or None
+        if runs and ((p is None and runs[-1][0] is None) or (p is not None and runs[-1][0] is not None
+                                                             and runs[-1][0] + runs[-1][1] == p)):
+            runs[-1][1] += n
+        else:
+            runs.append([p, n])
+
+    def _ponteiros(self, bloco, nivel, st, pilha=()):
+        """Percorre blocos indiretos acrescentando runs a `st['runs']`. Para (e põe o motivo em `st['aviso']`) se achar
+        ponteiro em loop, bloco fora do volume, ou passar de MAX_BLOCOS_MAPA, MAX_RUNS_MAPA ou MAX_INDIRETOS."""
+        runs = st['runs']
+        falta = st['topo'] - st['n']
+        if falta <= 0 or st['aviso']:
             return
         if bloco == 0:
-            saida.extend([0] * min((self.bs // 4) ** nivel, limite - len(saida)))
+            q = min((self.bs // 4) ** nivel, falta)
+            self._somar(runs, 0, q)
+            st['n'] += q
             return
-        for p in struct.unpack('<%dI' % (self.bs // 4), self._bloco(bloco)):
-            if len(saida) >= limite:
+        if bloco in pilha:
+            st['aviso'] = 'ponteiros em loop (inode danificado?); o resto não foi lido'
+            return
+        st['ind'] += 1
+        if st['ind'] > MAX_INDIRETOS:
+            st['aviso'] = 'blocos indiretos demais (inode danificado?); o resto não foi lido'
+            return
+        try:
+            ptrs = struct.unpack('<%dI' % (self.bs // 4), self._bloco(bloco))
+        except ErroSA:
+            st['aviso'] = 'bloco indireto fora do volume (inode danificado?); o resto não foi lido'
+            return
+        for p in ptrs:
+            if st['n'] >= st['topo'] or st['aviso']:
                 return
             if nivel == 1:
-                saida.append(p)
+                self._somar(runs, p, 1)
+                st['n'] += 1
+                if len(runs) > MAX_RUNS_MAPA:
+                    st['aviso'] = 'fragmentos demais (mais de %d trechos); o resto não foi lido' % MAX_RUNS_MAPA
             else:
-                self._ponteiros(p, nivel - 1, saida, limite)
+                self._ponteiros(p, nivel - 1, st, pilha + (bloco,))
 
-    def _mapa(self, ino_dados, tam):
-        """Lista [(físico ou None, quantidade de blocos)] cobrindo `tam` bytes."""
+    def _mapa(self, ino_dados, tam, avisos=None):
+        """Lista [(físico ou None, quantidade de blocos)] cobrindo `tam` bytes. Se a leitura parou por segurança,
+        a lista fica curta e o motivo vai para `avisos` (lista do chamador)."""
         flags = struct.unpack_from('<I', ino_dados, 32)[0]
         iblock = ino_dados[40:100]
         nb = -(-tam // self.bs)
@@ -165,21 +198,18 @@ class Ext(Volume):
                 fis.append((None, nb - atual))
             return fis
         ptrs = list(struct.unpack('<15I', iblock))
-        lista = ptrs[:12]
-        topo = min(nb, MAX_BLOCOS_MAPA)          # acima do teto devolve só o começo; _dados marca o resto como não lido
+        st = {'runs': [], 'n': 0, 'ind': 0, 'aviso': None, 'topo': min(nb, MAX_BLOCOS_MAPA)}
+        for p in ptrs[:12]:
+            if st['n'] < st['topo']:
+                self._somar(st['runs'], p, 1)
+                st['n'] += 1
         for nivel, p in enumerate(ptrs[12:], 1):
-            if len(lista) >= topo:
-                break
-            self._ponteiros(p, nivel, lista, topo)
-        lista = lista[:topo] + [0] * max(0, topo - len(lista))
-        fis = []
-        for p in lista:
-            if fis and ((p == 0 and fis[-1][0] is None) or (p and fis[-1][0] is not None
-                                                           and fis[-1][0] + fis[-1][1] == p)):
-                fis[-1] = (fis[-1][0], fis[-1][1] + 1)
-            else:
-                fis.append((p or None, 1))
-        return fis
+            self._ponteiros(p, nivel, st)
+        if not st['aviso'] and st['n'] < st['topo']:
+            self._somar(st['runs'], 0, st['topo'] - st['n'])      # ponteiros acabaram antes do tamanho: resto é buraco
+        if st['aviso'] and avisos is not None:
+            avisos.append(st['aviso'])
+        return [(p, n) for p, n in st['runs']]
 
     # ---- entradas --------------------------------------------------------------------------------------------
     def _dados(self, ent, ino_dados, apagado):
@@ -202,8 +232,9 @@ class Ext(Volume):
             return
         if tam == 0 and not apagado:
             return
+        avisos = []
         try:
-            fis = self._mapa(ino_dados, tam)
+            fis = self._mapa(ino_dados, tam, avisos)
         except ErroTeto as e:
             ent.estado, ent.nota, ent.runs = 'ruim', 'estrutura grande demais para ler (%s); inode danificado?' % e, []
             return
@@ -228,7 +259,9 @@ class Ext(Volume):
         ent.runs = runs
         if falta > 0:
             ent.estado, ent.nota = 'parcial', 'ponteiros não cobrem o tamanho'
-            if not flags & F_EXTENTS and -(-tam // self.bs) > MAX_BLOCOS_MAPA:
+            if avisos:
+                ent.nota = avisos[0]
+            elif not flags & F_EXTENTS and -(-tam // self.bs) > MAX_BLOCOS_MAPA:
                 ent.nota = 'arquivo grande: lidos só os primeiros %d blocos; o resto não foi lido' % MAX_BLOCOS_MAPA
         elif apagado:
             ent.nota = 'ext2: ponteiros preservados'
