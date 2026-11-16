@@ -6,6 +6,7 @@ de um arquivo `.json` em OUTRO disco:
 
     <destino>             a tabela atual, os candidatos (com confiança) e a tabela proposta
     <nome>.mbr            setor 0 de um MBR com a proposta (se couber), para o técnico aplicar à mão
+    <nome>.mbr-ebrs       (só com mais de 4 partições) os EBRs das lógicas, 512 bytes cada, que vão junto com o .mbr
     <nome>.gpt            setores 0.. de um GPT (MBR protetor, cabeçalho e entradas), idem
     <nome>.gpt-fim        entradas e cabeçalho reservas do GPT, para gravar no fim do disco
     <destino>.busca.json  checkpoint da varredura (some quando termina)
@@ -33,7 +34,7 @@ def caminho_busca(destino):
 
 def _nomes(destino):
     base = destino[:-5]
-    return {'mbr': base + '.mbr', 'gpt': base + '.gpt', 'gpt_fim': base + '.gpt-fim'}
+    return {'mbr': base + '.mbr', 'mbr_ebrs': base + '.mbr-ebrs', 'gpt': base + '.gpt', 'gpt_fim': base + '.gpt-fim'}
 
 
 def bloco_de(opcoes):
@@ -120,6 +121,16 @@ def montar_resultado(origem, l, setor, atual, candidatos, proposta, ruins, nomes
         binarios['mbr'] = mbr
         aplicacao['mbr'] = {'arquivo': os.path.basename(nomes['mbr']), 'gravar_em_byte': 0, 'bytes': len(mbr),
                             'avisos': av_mbr + ['Sem código de boot: serve para disco de dados.']}
+        ebrs = particoes.montar_ebrs(proposta, l.tamanho, setor)
+        if ebrs:
+            binarios['mbr_ebrs'] = b''.join(e for _, e in ebrs)
+            aplicacao['mbr']['avisos'].append('A 4ª entrada é uma estendida: grave também o %s (EBRs das lógicas), '
+                                              'senão o disco fica com uma estendida vazia.' % os.path.basename(nomes['mbr_ebrs']))
+            aplicacao['mbr']['junto_com'] = 'mbr_ebrs'
+            aplicacao['mbr_ebrs'] = {'arquivo': os.path.basename(nomes['mbr_ebrs']), 'bytes': len(binarios['mbr_ebrs']),
+                                     'junto_com': 'mbr',
+                                     'gravar': [{'gravar_em_byte': byte, 'deslocamento_no_arquivo': 512 * k, 'bytes': 512}
+                                                for k, (byte, _) in enumerate(ebrs)]}
     else:
         aplicacao['mbr'] = {'arquivo': None, 'avisos': av_mbr}
     ini, fim, av_gpt = particoes.montar_gpt(proposta, l.tamanho, setor, semente=origem)

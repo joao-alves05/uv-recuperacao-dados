@@ -867,8 +867,10 @@ def _chs(lba):
     return bytes([h, ((c >> 2) & 0xC0) | s, c & 0xFF])
 
 
-def montar_mbr(proposta, tamanho, setor=512):
-    """Setor 0 de um MBR com a tabela proposta (sem código de boot). Devolve (512 bytes ou None, avisos)."""
+def _plano_mbr(proposta, setor):
+    """Reparte a proposta em (primárias, lógicas, avisos). Com até 4 partições, tudo primária e na ordem dada.
+    Com mais, as 3 primeiras (por início) ficam primárias e as demais vão numa estendida, cada lógica com o seu EBR
+    no setor imediatamente antes dela (a lógica que não tem esse setor livre fica de fora)."""
     avisos, ents = [], []
     for p in proposta:
         t = TIPO_MBR_POR_SISTEMA.get(p.get('sistema'))
@@ -879,16 +881,60 @@ def montar_mbr(proposta, tamanho, setor=512):
             avisos.append('A partição em %d passa de 2 TiB: não cabe em MBR.' % p['inicio'])
         else:
             ents.append((t, ini, n))
-    if len(ents) > 4:
-        avisos.append('MBR só tem 4 entradas primárias: as %d partições seguintes ficaram de fora.' % (len(ents) - 4))
-        ents = ents[:4]
-    if not ents:
+    if len(ents) <= 4:
+        return ents, [], avisos
+    ents.sort(key=lambda e: e[1])
+    prim, resto, logicas = ents[:3], ents[3:], []
+    avisos.append('MBR só tem 4 entradas primárias: 3 ficaram primárias e as %d seguintes foram para uma partição '
+                  'estendida, como lógicas (cada uma com o seu EBR).' % len(resto))
+    fim_ant = prim[-1][1] + prim[-1][2]
+    for t, ini, n in resto:
+        if ini - 1 < max(fim_ant, 1):
+            avisos.append('A partição em %d não tem um setor livre antes dela para o EBR: ficou de fora.' % (ini * setor))
+            continue
+        logicas.append((t, ini, n))
+        fim_ant = ini + n
+    return prim, logicas, avisos
+
+
+def _tipo_estendida(fim_lba):
+    return 0x05 if fim_lba <= 1024 * 255 * 63 else 0x0F
+
+
+def montar_mbr(proposta, tamanho, setor=512):
+    """Setor 0 de um MBR com a tabela proposta (sem código de boot). Devolve (512 bytes ou None, avisos).
+    Com mais de 4 partições a 4ª entrada é a estendida; os EBRs das lógicas saem de `montar_ebrs`."""
+    prim, logicas, avisos = _plano_mbr(proposta, setor)
+    if not prim:
         return None, avisos + ['Nenhuma partição cabe num MBR.']
     b = bytearray(512)
-    for k, (t, ini, n) in enumerate(ents):
+    for k, (t, ini, n) in enumerate(prim):
         struct.pack_into('<B3sB3sII', b, 446 + 16 * k, 0, _chs(ini), t, _chs(ini + n - 1), ini, n)
+    if logicas:
+        e_ini, e_fim = logicas[0][1] - 1, logicas[-1][1] + logicas[-1][2]
+        struct.pack_into('<B3sB3sII', b, 446 + 16 * 3, 0, _chs(e_ini), _tipo_estendida(e_fim), _chs(e_fim - 1),
+                         e_ini, e_fim - e_ini)
     b[510:512] = b'\x55\xaa'
     return bytes(b), avisos
+
+
+def montar_ebrs(proposta, tamanho, setor=512):
+    """Os EBRs da estendida de `montar_mbr`: lista de (byte onde gravar, 512 bytes). Vazia com até 4 partições.
+    O endereço da lógica é relativo ao seu EBR; o do próximo EBR é relativo ao início da estendida."""
+    _, logicas, _ = _plano_mbr(proposta, setor)
+    if not logicas:
+        return []
+    ext = logicas[0][1] - 1
+    out = []
+    for k, (t, ini, n) in enumerate(logicas):
+        b = bytearray(512)
+        struct.pack_into('<B3sB3sII', b, 446, 0, _chs(ini), t, _chs(ini + n - 1), 1, n)
+        if k + 1 < len(logicas):
+            prox, pfim = logicas[k + 1][1] - 1, logicas[k + 1][1] + logicas[k + 1][2]
+            struct.pack_into('<B3sB3sII', b, 462, 0, _chs(prox), _tipo_estendida(pfim), _chs(pfim - 1), prox - ext, pfim - prox)
+        b[510:512] = b'\x55\xaa'
+        out.append(((ini - 1) * setor, bytes(b)))
+    return out
 
 
 def _guid_estavel(*partes):
