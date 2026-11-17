@@ -15,6 +15,7 @@
     {"tipo": "PDF", "grupo": "documento", "extensao": "pdf", "cabecalho": "25504446", "rodape": "2525454F46", "tamanho_max": 1073741824, "validar": "pdf"},
     {"tipo": "ZIP", "grupo": "compactado", "extensao": "zip", "cabecalho": "504B0304", "rodape": "504B0506", "tamanho_max": 4294967296, "validar": "zip"},
     {"tipo": "RAR", "grupo": "compactado", "extensao": "rar", "cabecalho": "526172211A07", "tamanho_max": 4294967296, "validar": "rar"},
+    {"tipo": "MKV", "grupo": "video", "extensao": "mkv", "cabecalho": "1A45DFA3", "tamanho_max": 17179869184, "validar": "mkv"},
     {"tipo": "7Z", "grupo": "compactado", "extensao": "7z", "cabecalho": "377ABCAF271C", "tamanho_max": 4294967296, "validar": "7z"},
     {"tipo": "SQLITE", "grupo": "banco", "extensao": "sqlite", "cabecalho": "53514C69746520666F726D6174203300", "tamanho_max": 4294967296, "validar": "sqlite"},
     {"tipo": "DOC", "grupo": "documento", "extensao": "doc", "cabecalho": "D0CF11E0A1B11AE1", "tamanho_max": 268435456, "validar": "ole2"},

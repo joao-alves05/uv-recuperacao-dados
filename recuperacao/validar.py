@@ -1015,6 +1015,101 @@ def rar(j, off, limite, a):
     return None
 
 
+# --- MKV / WebM (EBML) -------------------------------------------------------------------------------------------------
+_EBML_NIVEL1 = {0x114D9B74, 0x1549A966, 0x1654AE6B, 0x1F43B675, 0x1C53BB6B, 0x1254C367, 0x1043A770, 0x1941A469,
+                0xEC, 0xBF}              # SeekHead, Info, Tracks, Cluster, Cues, Tags, Chapters, Attachments, Void, CRC-32
+_EBML_CLUSTER = 0x1F43B675
+
+
+def _ebml_vint(b, o, ident=False):
+    """(valor, comprimento, desconhecido) do VINT em b[o:]; ident=True mantém o bit de marca (é um ID). None se inválido."""
+    if o >= len(b) or not b[o]:
+        return None
+    n = 9 - b[o].bit_length()
+    if n > (4 if ident else 8) or o + n > len(b):
+        return None
+    v = b[o] if ident else b[o] & ((1 << (8 - n)) - 1)
+    for x in b[o + 1:o + n]:
+        v = v << 8 | x
+    return v, n, (not ident and v == (1 << (7 * n)) - 1)
+
+
+def mkv(j, off, limite, a):
+    h = j.ler(off, 300)
+    if len(h) < 12 or h[:4] != bytes.fromhex('1A45DFA3'):
+        return None
+    t = _ebml_vint(h, 4)
+    if not t or t[2] or not 4 <= t[0] <= 250:
+        return None
+    ini_cab, fim_cab = 4 + t[1], 4 + t[1] + t[0]
+    doctype, p = None, ini_cab
+    while p < fim_cab:                                          # filhos do cabeçalho: só o DocType (42 82) interessa
+        i = _ebml_vint(h, p, True)
+        z = _ebml_vint(h, p + i[1]) if i else None
+        if not i or not z or z[2] or p + i[1] + z[1] + z[0] > fim_cab:
+            return None
+        if i[0] == 0x4282:
+            doctype = h[p + i[1] + z[1]:p + i[1] + z[1] + z[0]]
+        p += i[1] + z[1] + z[0]
+    if doctype not in (b'matroska', b'webm'):
+        return None
+    pos = off + fim_cab
+    s = j.ler(pos, 16)
+    i = _ebml_vint(s, 0, True)
+    z = _ebml_vint(s, i[1]) if i else None
+    if not i or i[0] != 0x18538067 or not z:
+        return None
+    pos += i[1] + z[1]
+    fim = off + limite
+    if not z[2]:
+        if z[0] > a['tamanho_max']:
+            return None
+        fim_seg = pos + z[0]
+        cortado = fim_seg > fim
+        fim_seg = min(fim_seg, fim)
+    else:
+        fim_seg, cortado = fim, False
+    primeiro = _ebml_vint(j.ler(pos, 4), 0, True)
+    if not primeiro or primeiro[0] not in _EBML_NIVEL1:
+        return None
+    clusters, dentro, parcial = 0, False, cortado
+    for _ in range(5000000):                                    # percorre os elementos de nível 1 (Cluster a Cluster)
+        if pos >= fim_seg:
+            break
+        e = j.ler(pos, 12)
+        i = _ebml_vint(e, 0, True)
+        z = _ebml_vint(e, i[1]) if i else None
+        nivel1 = bool(i) and i[0] in _EBML_NIVEL1
+        if not i or not z or not (nivel1 or dentro):
+            if (not i or not z) and len(e) < 12 and pos + len(e) >= fim_seg:
+                parcial, pos = True, fim_seg          # a mídia acaba no meio do cabeçalho do elemento
+            break
+        if nivel1:
+            dentro = False
+            clusters += i[0] == _EBML_CLUSTER
+        if z[2]:
+            if i[0] != _EBML_CLUSTER or not nivel1:
+                break
+            dentro = True                                       # Cluster de tamanho desconhecido (ao vivo): entra nele
+            pos += i[1] + z[1]
+            continue
+        prox = pos + i[1] + z[1] + z[0]
+        if prox > fim_seg:
+            parcial, pos = True, fim_seg                        # o elemento passa do fim: acabou no meio
+            break
+        pos = prox
+    else:
+        parcial = True
+    pos = min(pos, fim_seg)
+    web = doctype == b'webm'
+    extra = {'tipo': 'WEBM' if web else 'MKV', 'extensao': 'webm' if web else 'mkv', 'grupo': 'video'}
+    if parcial:
+        return res(pos - off, 'parcial', 40, **extra)
+    if not clusters:
+        return res(pos - off, 'parcial', 30, **extra)
+    return res(pos - off, 'bom', 100, **extra)
+
+
 # --- 7z ---------------------------------------------------------------------------------------------------------------
 def sete_z(j, off, limite, a):
     h = j.ler(off, 32)
@@ -1180,5 +1275,5 @@ def generico(j, off, limite, a):
 
 
 VALIDADORES = {'jpg': jpg, 'png': png, 'gif': gif, 'bmp': bmp, 'tiff': tiff, 'iso': iso, 'riff': riff, 'mp3': mp3,
-               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'ole2': ole2, 'rtf': rtf,
+               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ole2': ole2, 'rtf': rtf,
                'generico': generico}
