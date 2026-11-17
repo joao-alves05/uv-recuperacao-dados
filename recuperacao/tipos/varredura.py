@@ -2,6 +2,7 @@
 """Tipo `varredura`: procura arquivos numa origem (arquivo, imagem, disco ou volume) pelo conteúdo (carving).
 
     POST /api/jobs {"tipo": "varredura", "origem": "...", "opcoes": {"modo": "rapida" | "profunda"}}
+(`opcoes.todas_sessoes`: bool, vale na lista pelo sistema de arquivos; ver docs/FASE6.md)
 
 Não escreve nada: cada achado vai para a tabela `achados` assim que o bloco em que foi descoberto termina, e o ponto
 de retomada (`checkpoints`) é gravado na mesma transação. Pausar, cair o serviço e retomar continua do último ponto,
@@ -36,7 +37,8 @@ def destino_de(origem, destino=None):
 def opcoes_de(opcoes):
     o = opcoes or {}
     return {'modo': o.get('modo', MODO_PADRAO), 'bloco': o.get('bloco', carving.BLOCO_PADRAO),
-            'sistema_antes': o.get('sistema_antes', False), 'offset': o.get('offset', 0), 'tamanho': o.get('tamanho')}
+            'sistema_antes': o.get('sistema_antes', False), 'offset': o.get('offset', 0), 'tamanho': o.get('tamanho'),
+            'todas_sessoes': o.get('todas_sessoes', False)}
 
 
 def validar(origem, destino, opcoes, retomada=False):
@@ -50,6 +52,8 @@ def validar(origem, destino, opcoes, retomada=False):
         return 'O modo precisa ser "sistema", "rapida" ou "profunda".'
     if type(o['sistema_antes']) is not bool:
         return 'A opção "sistema_antes" precisa ser verdadeiro ou falso.'
+    if type(o['todas_sessoes']) is not bool:
+        return 'A opção todas_sessoes aceita só verdadeiro ou falso.'
     if type(o['bloco']) is not int or not imagem.BLOCO_MIN <= o['bloco'] <= imagem.BLOCO_MAX:
         return 'O tamanho do bloco precisa ser um número entre %d e %d bytes.' % (imagem.BLOCO_MIN, imagem.BLOCO_MAX)
     if leitor.eh_dispositivo(origem):
@@ -114,7 +118,8 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho, janela=None, res
     pulados = dict(cp.get('pulados') or {}) if retomando else {}
     try:
         # janela = (offset, tamanho) de uma partição já escolhida: só o sistema de arquivos dela, sem ler a tabela do disco
-        lista = arquivos_sa.volumes(aberto, *janela) if janela else arquivos_sa.volumes(aberto)
+        lista = (arquivos_sa.volumes(aberto, *janela, todas_sessoes=op.get('todas_sessoes', False)) if janela
+                 else arquivos_sa.volumes(aberto, todas_sessoes=op.get('todas_sessoes', False)))
     except OSError as e:
         raise ErroJob('Não consegui ler a origem para reconhecer o sistema de arquivos: %s' % e) from None
     if not lista:

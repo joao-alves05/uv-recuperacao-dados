@@ -41,13 +41,13 @@ class VolumeAchado:
         return '%s%s' % (v.tipo, (' "%s"' % v.rotulo) if v.rotulo else '')
 
 
-def volumes(leitor, inicio=None, tamanho=None):
+def volumes(leitor, inicio=None, tamanho=None, todas_sessoes=False):
     """Sistemas de arquivos que a origem tem: um por partição reconhecida, ou o disco inteiro se não há tabela.
     Com `inicio` (e `tamanho`), olha só o sistema de arquivos que começa ali (uma partição já escolhida), sem ler a
-    tabela de partições; os offsets continuam absolutos na origem."""
+    tabela de partições; os offsets continuam absolutos na origem. `todas_sessoes` vai para o reconhecimento do UDF."""
     if inicio is not None:
         try:
-            vol = sa.detectar(leitor, inicio, tamanho)
+            vol = sa.detectar(leitor, inicio, tamanho, todas_sessoes)
         except (sa.ErroSA, OSError, ValueError):
             vol = None
         return [VolumeAchado(vol, '', 1)] if vol is not None else []
@@ -61,7 +61,7 @@ def volumes(leitor, inicio=None, tamanho=None):
     achados = []
     for p in cands:
         try:
-            vol = sa.detectar(leitor, p['inicio'], p.get('tamanho'))
+            vol = sa.detectar(leitor, p['inicio'], p.get('tamanho'), todas_sessoes)
         except (sa.ErroSA, OSError, ValueError):
             vol = None
         if vol is not None:
@@ -122,7 +122,9 @@ def achado_de(e, prefixo=''):
         a['tipo'] = ext.upper()
     if cobre < e.tamanho:
         a['tamanho_total'] = e.tamanho                       # o resto não foi lido: o relatório diz quanto faltou
-    if len(runs) <= 1 and (not runs or runs[0][0] is not None):
+    if getattr(e, 'extents_lznt1', None):                    # NTFS comprimido: extents de 3 valores (ver achados.partes_de)
+        a['extents'] = e.extents_lznt1
+    elif len(runs) <= 1 and (not runs or runs[0][0] is not None):
         a['offset'] = runs[0][0] if runs else 0
     else:
         a['extents'] = [[o, n] for o, n in runs]
