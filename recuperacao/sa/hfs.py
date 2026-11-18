@@ -10,8 +10,10 @@ O que NÃO dá para fazer, e por quê:
     Não há como recuperar pela estrutura: deixe para a busca por assinatura (carving).
   * Resource fork, atributos estendidos e arquivo comprimido (decmpfs): os bytes não estão no fork de dados. Arquivo
     comprimido sai `ruim` com a explicação.
-  * Hard links (o registro do link aponta para um inode escondido na pasta "HFS+ Private Data") e links simbólicos
-    não são listados; a pasta escondida também não.
+  * Links simbólicos não são listados; a pasta escondida "HFS+ Private Data" também não.
+  * Hard link de ARQUIVO é listado com o nome e o caminho do link e os dados do inode real ("iNode<n>" na pasta
+    escondida). Se o inode não está no catálogo, o link sai `ruim` com a explicação. Hard link de PASTA (Time Machine,
+    ".HFS+ Private Directory Data") NÃO é listado: o conteúdo não aparece pelo caminho do link.
   * Volume com journal sujo: o catálogo no disco pode estar atrasado em relação ao journal, que não é reaplicado.
   * HFS+ embrulhado em HFS clássico (assinatura "BD") não é reconhecido.
 """
@@ -26,6 +28,7 @@ ID_EXTENTS, ID_CATALOGO = 3, 4
 PERDIDOS = '/[perdidos]'
 _ADIAR = object()
 UF_COMPRESSED = 0x20
+NUL4 = chr(0) * 4
 
 
 def _data(v):
@@ -236,6 +239,9 @@ class Hfs(Volume):
         return e
 
     def _dados(self, e, r):
+        if r['fork'] is None:
+            e.estado, e.nota = 'ruim', 'hard link sem inode'
+            return
         if r['comprimido']:
             e.estado, e.nota = 'ruim', 'comprimido (decmpfs): os bytes não estão no fork de dados'
             return
@@ -291,7 +297,11 @@ class Hfs(Volume):
             modo = struct.unpack_from('>H', rec, d + 42)[0] & 0o170000
             flags_dono = rec[d + 41]
             tipo_arq = rec[d + 48:d + 52]
-            if modo in (0o120000, 0o060000, 0o020000, 0o010000, 0o140000) or tipo_arq == b'hlnk':
+            if tipo_arq == b'hlnk' and rec[d + 52:d + 56] == b'hfs+':       # hard link de arquivo: aponta para iNode<n>
+                return dict(id=fid, pai=pai, nome=nome, dir=False, criado=_data(criado), modif=_data(modif),
+                            acess=_data(acess), fork=None, comprimido=False,
+                            hlnk=struct.unpack_from('>I', rec, d + 44)[0])
+            if modo in (0o120000, 0o060000, 0o020000, 0o010000, 0o140000) or tipo_arq in (b'hlnk', b'fdrp'):   # hlnk sem 'hfs+' e hard link de pasta
                 return None
             return dict(id=fid, pai=pai, nome=nome, dir=False, criado=_data(criado), modif=_data(modif),
                         acess=_data(acess), fork=_fork(rec, d + 88), comprimido=bool(flags_dono & UF_COMPRESSED))
@@ -301,6 +311,7 @@ class Hfs(Volume):
         """Gera as entradas lendo as folhas do catálogo; a que depende de uma pasta ainda não lida espera.
         `ao_ler(fração)` (se existir) é chamado a cada 16 nós, mesmo sem entrada nova; pode levantar exceção."""
         pastas, memo, pendentes, lidos = {}, {}, [], 0
+        links, inodes = [], {}                               # links duros e {(pai, n): registro} dos "iNode<n>"
         try:
             for n, recs in self._folhas(self._cat_extents, self.primeira_folha, self.total_nos):
                 lidos += 1
@@ -316,6 +327,11 @@ class Hfs(Volume):
                         if r['id'] == ID_RAIZ:             # a raiz é '/', não uma pasta dentro dele
                             self.rotulo = self.rotulo or r['nome']
                             continue
+                    if r.get('hlnk'):
+                        links.append(r)                      # o inode pode vir depois no catálogo: resolve no fim
+                        continue
+                    if not r['dir'] and r['nome'].startswith('iNode') and r['nome'][5:].isdigit():
+                        inodes[(r['pai'], int(r['nome'][5:]))] = r
                     e = self._entrada(r, pastas, memo, False)
                     if e is _ADIAR:
                         pendentes.append(r)
@@ -337,6 +353,17 @@ class Hfs(Volume):
         for r in pendentes:
             e = self._entrada(r, pastas, memo, True)
             if e is not None and e is not _ADIAR:
+                yield e
+        privadas = {k for k, p in pastas.items() if p['nome'].startswith(NUL4 + 'HFS+ Private Data')}
+        reais = {n: r for (pai, n), r in inodes.items() if pai in privadas}
+        for r in links:
+            real = reais.get(r['hlnk'])
+            if real is not None:
+                r = dict(r, fork=real['fork'], comprimido=real['comprimido'])
+            e = self._entrada(r, pastas, memo, True)
+            if e is not None and e is not _ADIAR:
+                if real is None:
+                    e.estado, e.nota = 'ruim', 'hard link: o inode iNode%d não está no catálogo' % r['hlnk']
                 yield e
         if self.ao_ler:
             self.ao_ler(1.0)

@@ -83,7 +83,7 @@ Regra geral: **tenha um segundo disco com espaço livre** para receber o resulta
 - **ext2/ext3 com arquivo muito grande:** acima de cerca de 1 Mi blocos (1 GiB com blocos de 1 KiB), o programa entrega só o começo, marca o arquivo como `parcial` e o resto como não lido (ext4 não tem esse limite).
 - **ext3/ext4:** ao apagar, o sistema zera os ponteiros do arquivo; aparece o nome, mas o conteúdo só volta pela busca por assinatura.
 - **NTFS:** arquivos comprimidos pelo NTFS e criptografados com EFS não são lidos; arquivos apagados só se os clusters não foram reutilizados.
-- **HFS+ e APFS:** só são reconhecidos (e achados na busca de partições); os arquivos não são listados.
+- **HFS+:** lista pastas e arquivos vivos (catálogo), inclusive hard links de arquivo; hard link de pasta (Time Machine), arquivo apagado e arquivo comprimido (decmpfs) não saem com conteúdo. **APFS:** só é reconhecido (e achado na busca de partições); os arquivos não são listados.
 - **UDF:** 1.02 a 2.01. Sem partição virtual (VAT, CD-R/RW de gravação incremental), esparsa ou de metadados (Blu-ray), sem ICB indireto. Multi-sessão: em unidade de CD/DVD (Linux `/dev/sr*`, Windows `\.\X:` ou `\.\CdRomN`) o TOC da unidade leva direto à última sessão; limitação: o formato TOC lista faixas, não sessões, então vale a faixa de dados de cada sessão. Em arquivo/imagem, ou se a unidade não responde ao TOC, a última sessão só é escolhida com a varredura de âncoras.
 - **Correção de erro:** não há decodificação de ECC do dvdisaster (Reed-Solomon); se você tem o arquivo `.ecc`, use o dvdisaster sobre a imagem que este programa gerou.
 - **Fragmentação:** a busca por assinatura recupera bem arquivos contíguos. Arquivo fragmentado (comum em disco cheio e muito usado) sai parcial ou misturado.
