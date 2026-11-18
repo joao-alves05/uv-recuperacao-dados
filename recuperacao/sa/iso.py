@@ -3,8 +3,8 @@
 
 Se existir descritor suplementar Joliet, ele manda (nomes longos e acentos); senão vale o descritor primário, com
 os nomes 8.3 sem o ";1" final. Arquivos em várias extensões (flag "multi-extent") são juntados. Não há arquivo
-apagado em ISO. Rock Ridge básico: o nome longo (entrada NM) vale quando não há Joliet. Limites: Rock Ridge sem CE,
-links e permissões; El Torito não é lido; só um volume por imagem; UDF fica em udf.py.
+apagado em ISO. Rock Ridge básico: o nome longo (entrada NM) vale quando não há Joliet. Limites: Rock Ridge: a cadeia de CE vai até
+MAX_CE blocos (laço ou bloco fora da imagem vira aviso na nota do arquivo); links e permissões; El Torito não é lido; só um volume por imagem; UDF fica em udf.py.
 """
 import struct
 
@@ -53,14 +53,51 @@ def _entradas_su(su):
         off += ln
 
 
-def rock_ridge_nome(r):
-    """Nome longo da entrada NM (em partes, se preciso) de um registro, ou None."""
-    partes = []
-    for sig, _, dados in _entradas_su(_su(r)):
-        if sig == b'NM' and dados:
-            partes.append(dados[1:])
-            if not dados[0] & 1:
+MAX_CE = 32                             # área de continuação (CE) seguidas por registro; passou disso, para com aviso
+MAX_NOME_RR = 4096                      # bytes de nome Rock Ridge juntados (nome longo legítimo tem até 255)
+
+
+def rock_ridge_nome(r, ler=None, avisos=None):
+    """Nome longo das entradas NM (em partes, flag CONTINUE) de um registro, ou None. Com `ler(lba, off, tam)`, segue a
+    cadeia de CE (área de continuação) até MAX_CE blocos; CE repetido (laço), fora da imagem ou ilegível para a cadeia e
+    põe o motivo em `avisos` (lista do chamador); o nome sai com o que foi lido."""
+    partes, vistos, nce = [], set(), 0
+    fila = [_su(r)]
+    while fila:
+        su = fila.pop(0)
+        for sig, _, dados in _entradas_su(su):
+            if sig == b'ST':
+                fila.clear()
                 break
+            if sig == b'CE' and len(dados) >= 24 and ler is not None:
+                ce = struct.unpack_from('<I', dados, 0)[0], struct.unpack_from('<I', dados, 8)[0],                     struct.unpack_from('<I', dados, 16)[0]
+                if ce in vistos:
+                    if avisos is not None:
+                        avisos.append('Rock Ridge: continuação (CE) aponta para si mesma ou para uma já lida (laço)')
+                    continue
+                vistos.add(ce)
+                nce += 1
+                if nce > MAX_CE:
+                    if avisos is not None:
+                        avisos.append('Rock Ridge: continuações (CE) demais; o resto do nome não foi lido')
+                    continue
+                try:
+                    bloco = ler(*ce)
+                except (OSError, ErroSA, struct.error, ValueError):
+                    bloco = None
+                if not bloco or len(bloco) < ce[2]:
+                    if avisos is not None:
+                        avisos.append('Rock Ridge: continuação (CE) fora da imagem ou ilegível')
+                    continue
+                fila.append(bloco)
+            elif sig == b'NM' and dados:
+                if dados[0] & 6:                              # "." e ".." não são nome
+                    continue
+                if sum(len(p) for p in partes) < MAX_NOME_RR:
+                    partes.append(dados[1:])
+                if not dados[0] & 1:
+                    fila.clear()                              # nome completo: o resto não importa
+                    break
     return b''.join(partes).decode('utf-8', 'replace') if partes else None
 
 
@@ -140,6 +177,12 @@ class Iso(Volume):
         self._avisar(min(1.0, self._lidos_pastas / max(1, self.tamanho)))
         return self._ler(lba * self.bloco, tam)
 
+    def _ler_ce(self, lba, off, tam):
+        """Bloco de continuação Rock Ridge; levanta ErroSA se passa do bloco ou da imagem."""
+        if off + tam > self.bloco or tam > self.bloco or lba * self.bloco + off + tam > self.tamanho:
+            raise ErroSA('CE fora da imagem')
+        return self._ler(lba * self.bloco + off, tam)
+
     def _pasta(self, dados, pai, nivel, vistos):
         pendente = None                                      # arquivo em várias extensões
         for r in self._registros(dados):
@@ -152,7 +195,8 @@ class Iso(Volume):
                 continue
             nome = self._nome(nb)
             if self.rock_ridge:
-                rr = rock_ridge_nome(r)
+                avisos_rr = []
+                rr = rock_ridge_nome(r, self._ler_ce, avisos_rr)
                 if rr:
                     nome = limpar_nome(rr)
             eh_dir = bool(flags & 2)
@@ -170,6 +214,8 @@ class Iso(Volume):
                     ent.runs = [(self.inicio + lba * self.bloco, tam)]
                 if self.inicio + lba * self.bloco + (0 if eh_dir else tam) > self.inicio + self.tamanho:
                     ent.estado, ent.nota = 'parcial', 'a imagem termina antes do fim do arquivo'
+            if self.rock_ridge and avisos_rr and ent.estado == 'bom' and not ent.nota:
+                ent.nota = '; '.join(avisos_rr)
             if flags & 0x80 and not eh_dir:
                 pendente = ent
                 continue
