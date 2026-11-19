@@ -515,11 +515,13 @@ def tiff(j, off, limite, a):
     return res(maximo, 'bom', 100, **extra)
 
 
-# --- caixas ISO (MP4, MOV, HEIC, CR3) ------------------------------------------------------------------------------------
+# --- caixas ISO (MP4, MOV, HEIC, CR3, 3GP) ------------------------------------------------------------------------------------
 _CAIXAS = frozenset(b.encode() for b in (
     'moov', 'mdat', 'free', 'skip', 'wide', 'pnot', 'uuid', 'meta', 'moof', 'mfra', 'sidx', 'styp', 'pdin', 'junk',
     'idat', 'iloc', 'iinf', 'iprp', 'ssix', 'prft', 'emsg', 'PICT', 'prfl', 'cmov'))
 _MARCAS_HEIC = (b'heic', b'heix', b'hevc', b'hevx', b'heim', b'heis', b'mif1', b'msf1')
+_MARCAS_3GP = (b'3gp4', b'3gp5', b'3gp6', b'3ge6', b'3gg6')
+_MARCAS_3G2 = (b'3g2a', b'3g2b', b'3g2c')
 _EPOCA_1904 = 2082844800
 
 
@@ -583,6 +585,10 @@ def iso(j, off, limite, a):
         tipo, ext, grupo = 'HEIC', 'heic', 'foto'
     elif marca == b'crx ':                         # RAW da Canon (CR3): mesmas caixas, com moov + mdat
         tipo, ext, grupo = 'CR3', 'cr3', 'foto'
+    elif marca in _MARCAS_3GP:
+        tipo, ext, grupo = '3GP', '3gp', 'video'
+    elif marca in _MARCAS_3G2:
+        tipo, ext, grupo = '3G2', '3g2', 'video'
     elif marca == b'qt  ':
         tipo, ext, grupo = 'MOV', 'mov', 'video'
     elif marca in (b'M4A ', b'M4B ', b'M4P '):
