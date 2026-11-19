@@ -212,12 +212,25 @@ def _copiar(aberto, achado, tmp, ctrl):
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0), 0o666)   # nunca segue link plantado
     with os.fdopen(fd, 'wb') as saida:
         falta = achado['tamanho']
-        for off, n in achados.extents_de(achado):
+        for off, n, faixas in achados.partes_de(achado):
             while n > 0 and falta > 0:
                 if ctrl.cancelamento_pedido():
                     return 'cancelado'
                 if ctrl.pausa_pedida():
                     return 'pausado'
+                if faixas is not None:                       # unidade comprimida (NTFS LZNT1): grava o descomprimido
+                    pedaco = min(n, falta)
+                    try:
+                        if any(setores_ruins.cortes(ruins, o, q) for o, q in faixas):
+                            raise OSError('setor ruim')
+                        dados = achados.ler_unidade_lznt1(aberto, faixas, n)[:pedaco]
+                    except OSError:                          # unidade ilegível ou inválida: zeros, e conta como lacuna
+                        dados, lacunas = bytes(pedaco), lacunas + 1
+                        perdidos.append((feitos, pedaco))
+                    saida.write(dados)
+                    h.update(dados)
+                    n, falta, feitos = 0, falta - pedaco, feitos + pedaco
+                    continue
                 pedaco = min(BLOCO, n, falta)
                 if off is None:                              # buraco de arquivo esparso: zeros, não é falha de leitura
                     dados = bytes(pedaco)

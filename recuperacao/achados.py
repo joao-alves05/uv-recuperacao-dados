@@ -8,9 +8,12 @@ import json
 import os
 import re
 
+from .sa.ntfs import lznt1_descomprimir
+
 GRUPOS = ('foto', 'video', 'audio', 'documento', 'compactado', 'banco', 'outro')
 ESTADOS = ('bom', 'parcial', 'ruim')
 MAX_NOME = 255
+MAX_UNIDADE = 1 << 26                 # bytes de uma unidade comprimida (NTFS LZNT1), antes e depois de descomprimir
 SETOR_NOME = 512                      # o número no nome gerado (f0001234.jpg) é o setor de 512 bytes onde o achado começa
 
 # coluna -> tipo SQL das colunas que a fase 5 acrescentou à tabela `achados` da fase 1 (migração em JobStore)
@@ -24,6 +27,35 @@ _DATA = re.compile(r'\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?')
 
 def nome_gerado(offset, extensao):
     return 'f%07d.%s' % (offset // SETOR_NOME, extensao.lower()) if extensao else 'f%07d' % (offset // SETOR_NOME)
+
+
+def _extent_valido(e):
+    """[off, n] (off nulo = zeros) ou [off, n, u] (NTFS LZNT1: pedaço de unidade comprimida; u = 0 se a unidade continua,
+    senão os bytes dela depois de descomprimida)."""
+    if not isinstance(e, (list, tuple)) or len(e) not in (2, 3) or type(e[1]) is not int or e[1] <= 0:
+        return False
+    if len(e) == 2:
+        return e[0] is None or (type(e[0]) is int and e[0] >= 0)
+    return type(e[0]) is int and e[0] >= 0 and type(e[2]) is int and 0 <= e[2] <= MAX_UNIDADE
+
+
+def _tamanho_logico(extents):
+    """Bytes do arquivo que os extents formam; None se uma unidade comprimida ficou aberta ou é grande demais."""
+    soma, aberto, fisico = 0, False, 0
+    for e in extents:
+        if len(e) == 2:
+            if aberto:
+                return None
+            soma += e[1]
+            continue
+        fisico += e[1]
+        aberto = e[2] == 0
+        soma += e[2]
+        if fisico > MAX_UNIDADE:
+            return None
+        if not aberto:
+            fisico = 0
+    return None if aberto else soma
 
 
 def _int(valor, campo, minimo=0, maximo=None, opcional=False):
@@ -43,11 +75,9 @@ def normalizar(job_id, a):
     offset = a.get('offset')
     if extents is not None:
         if (not isinstance(extents, (list, tuple)) or not extents or len(extents) > 100000
-                or not all(isinstance(e, (list, tuple)) and len(e) == 2
-                           and (e[0] is None or (type(e[0]) is int and e[0] >= 0)) and type(e[1]) is int and e[1] > 0
-                           for e in extents)):
+                or not all(_extent_valido(e) for e in extents)):
             raise ValueError('achado: "extents" precisa ser uma lista de [offset, comprimento] (offset nulo = zeros)')
-        if sum(e[1] for e in extents) != tamanho:
+        if _tamanho_logico(extents) != tamanho:
             raise ValueError('achado: a soma dos extents não bate com o tamanho')
         offset = next((e[0] for e in extents if e[0] is not None), 0)     # buraco (nulo) no começo: não é posição
         extents = json.dumps([list(e) for e in extents])
@@ -120,15 +150,51 @@ def contar_por_grupo(store, job_id):
 def extents_de(achado):
     """[(offset, comprimento), ...] dos bytes do achado na origem. Offset None = buraco de arquivo esparso (zeros)."""
     if achado.get('extents'):
-        return [(None if o is None else int(o), int(n)) for o, n in achado['extents']]
+        return [(None if e[0] is None else int(e[0]), int(e[1])) for e in achado['extents']]
     return [(int(achado['offset']), int(achado['tamanho']))]
+
+
+def partes_de(achado):
+    """[(offset, comprimento, faixas)]: `faixas` é None no extent comum (offset None = zeros). Unidade comprimida
+    (NTFS LZNT1) sai como (None, bytes depois de descomprimida, [(offset, comprimento), ...] a ler e descomprimir)."""
+    if not achado.get('extents'):
+        return [(int(achado['offset']), int(achado['tamanho']), None)]
+    partes, pend = [], []
+    for e in achado['extents']:
+        if len(e) == 2:
+            partes.append((None if e[0] is None else int(e[0]), int(e[1]), None))
+            continue
+        pend.append((int(e[0]), int(e[1])))
+        if e[2] > 0:
+            partes.append((None, int(e[2]), pend))
+            pend = []
+    return partes
+
+
+def ler_unidade_lznt1(leitor, faixas, u):
+    """Lê as `faixas` de uma unidade comprimida e devolve os `u` bytes descomprimidos. OSError se a leitura falha ou se a
+    compressão é inválida."""
+    bruto = []
+    for off, n in faixas:
+        dados = leitor.ler(off, n)
+        if len(dados) < n:
+            raise OSError('leitura curta em %d' % off)
+        bruto.append(dados)
+    try:
+        return lznt1_descomprimir(b''.join(bruto), u).ljust(u, b'\0')
+    except ValueError as erro:
+        raise OSError('compressão LZNT1 inválida: %s' % erro) from None
 
 
 def ler_achado(leitor, achado, maximo=None, bloco=1 << 20):
     """Gera os bytes do achado, lidos da origem (só leitura), em pedaços de até `bloco`. Para em `maximo` bytes."""
     falta = achado['tamanho'] if maximo is None else min(maximo, achado['tamanho'])
-    for off, n in extents_de(achado):
+    for off, n, faixas in partes_de(achado):
         while n > 0 and falta > 0:
+            if faixas is not None:                           # unidade comprimida (NTFS LZNT1)
+                yield ler_unidade_lznt1(leitor, faixas, n)[:falta]
+                n, falta = 0, falta - n
+                continue
             pedaco = min(bloco, n, falta)
             if off is None:
                 yield bytes(pedaco)

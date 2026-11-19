@@ -4,14 +4,16 @@
 Cada registro da MFT é lido com os fixups aplicados. Vale o $FILE_NAME de melhor namespace (o nome 8.3 só se for o
 único) e o $DATA sem nome (os fluxos alternativos são ignorados). $DATA residente vira `inline`; o não residente vira
 `runs` pelos data runs. Registro apagado (flag "em uso" desligada) cujos clusters aparecem ocupados no $Bitmap sai
-`parcial`: o espaço foi reaproveitado. Limites: arquivos comprimidos (LZNT1) ou criptografados saem `ruim`; registros
+`parcial`: o espaço foi reaproveitado. Arquivo comprimido (LZNT1, unidades de 16 clusters) é descomprimido na leitura:
+o achado leva extents de 3 valores (ver `achados.py`). Limites: arquivo criptografado sai `ruim`, e o comprimido cuja
+estrutura não fecha (unidade incompleta, buraco antes dos dados) também; registros
 de extensão ($ATTRIBUTE_LIST) não são seguidos, então arquivo muito fragmentado pode sair `parcial`; sem leitura do
 espelho da MFT: se o registro 0 estiver ilegível o volume não abre. Os registros do sistema ($MFT, $Bitmap...) e o
 que mora em $Extend não são listados.
 """
 import struct
 
-from .base import ErroSA, Entrada, Volume, MAX_PROFUNDIDADE, limpar_nome
+from .base import ErroSA, Entrada, Volume, MAX_PROFUNDIDADE, limpar_nome, BLOCO
 
 FILETIME_UNIX = 116444736000000000
 RAIZ = 5
@@ -20,6 +22,8 @@ PERDIDOS = '/[perdidos]'
 MAX_RUNS = 100000
 MAX_CLUSTERS_CONFERIDOS = 1 << 20      # no máximo isto de clusters conferidos no $Bitmap por arquivo
 PEDACO_MFT = 4 << 20                    # bytes da MFT lidos de cada vez
+UNIDADE_LZNT1 = 16                      # clusters por unidade de compressão
+MAX_EXTENTS_LZNT1 = 90000               # abaixo do teto de extents de um achado (achados.normalizar)
 _ADIAR = object()
 
 
@@ -69,6 +73,84 @@ def decodificar_runs(dados, ini=0):
             runs.append((None, n))
         i += no
     return runs
+
+
+def lznt1_descomprimir(dados, limite=None):
+    """Descomprime uma sequência de chunks LZNT1 (cabeçalho de 2 bytes: tamanho-3 nos 12 bits baixos, 0x3000 de
+    assinatura, bit 15 = comprimido). Cabeçalho 0 encerra. Para em `limite` bytes, se dado. ValueError se for inválido."""
+    out, i, n = bytearray(), 0, len(dados)
+    while i + 2 <= n and (limite is None or len(out) < limite):
+        cab = dados[i] | dados[i + 1] << 8
+        if cab == 0:
+            break
+        if (cab >> 12) & 7 != 3:
+            raise ValueError('cabeçalho de chunk LZNT1 inválido')
+        fim = i + 2 + (cab & 0xFFF) + 1
+        i += 2
+        if fim > n:
+            raise ValueError('chunk LZNT1 passa do fim dos dados')
+        if not cab & 0x8000:                                 # não comprimido: os bytes vão como estão
+            out += dados[i:fim]
+            i = fim
+            continue
+        base = len(out)
+        while i < fim:
+            flags, i = dados[i], i + 1
+            for b in range(8):
+                if i >= fim:
+                    break
+                if not flags >> b & 1:
+                    out.append(dados[i])
+                    i += 1
+                    continue
+                if i + 2 > fim:
+                    raise ValueError('token LZNT1 truncado')
+                t = dados[i] | dados[i + 1] << 8
+                i += 2
+                pos = len(out) - base                        # a largura de deslocamento/tamanho depende da posição no chunk
+                lg, k = 0, pos - 1
+                while k >= 0x10:
+                    k >>= 1
+                    lg += 1
+                tam = (t & (0xFFF >> lg)) + 3
+                desl = (t >> (12 - lg)) + 1
+                if desl > pos:
+                    raise ValueError('referência LZNT1 antes do início do chunk')
+                ini = len(out) - desl
+                if desl >= tam:
+                    out += out[ini:ini + tam]
+                else:                                        # sobreposição: repete byte a byte
+                    for _ in range(tam):
+                        out.append(out[ini])
+                        ini += 1
+        if len(out) - base > 4096:
+            raise ValueError('chunk LZNT1 maior que 4 KiB')
+        i = fim
+    return bytes(out) if limite is None else bytes(out[:limite])
+
+
+def _fatiar_unidades(runs):
+    """Corta os data runs em unidades de 16 clusters: [[(lcn ou None, clusters)]]. Run esparso inteiro, que começa em
+    unidade nova, sai de uma vez (vários de 16): não percorre um por um."""
+    atual, n = [], 0
+    for lcn, cl in runs:
+        while cl > 0:
+            if lcn is None and n == 0 and cl >= UNIDADE_LZNT1:
+                q = cl - cl % UNIDADE_LZNT1
+                yield [(None, q)]
+                cl -= q
+                continue
+            t = min(cl, UNIDADE_LZNT1 - n)
+            atual.append((lcn, t))
+            n += t
+            cl -= t
+            if lcn is not None:
+                lcn += t
+            if n == UNIDADE_LZNT1:
+                yield atual
+                atual, n = [], 0
+    if atual:
+        yield atual
 
 
 def aplicar_fixups(rec):
@@ -346,8 +428,8 @@ class Ntfs(Volume):
             self._bitmap = faixas
 
     def _dados(self, e, i):
-        if i['comprimido'] or i['cifrado']:
-            e.estado, e.nota = 'ruim', ('comprimido (LZNT1)' if i['comprimido'] else 'criptografado (EFS)') + ': não suportado'
+        if i['cifrado']:
+            e.estado, e.nota = 'ruim', 'criptografado (EFS): não suportado'
             return
         if i['inline'] is not None:
             e.inline = i['inline']
@@ -358,18 +440,24 @@ class Ntfs(Volume):
             if i['lista']:
                 e.estado, e.nota = 'parcial', 'dados em registro de extensão ($ATTRIBUTE_LIST), não seguido'
             return
-        runs, falta, validas = [], i['tam'], []
-        for lcn, cl in i['runs'] or []:
-            if falta <= 0:
-                break
-            n = min(cl * self.csize, falta)
-            if lcn is not None and (lcn < 0 or (lcn + cl) > self.nclusters):
-                e.estado, e.nota = 'ruim', 'data run fora do volume'
-                e.runs = []
+        if i['comprimido']:
+            achou = self._unidades_lznt1(e, i)
+            if achou is None:
                 return
-            runs.append((None if lcn is None else self.inicio + lcn * self.csize, n))
-            validas.append((lcn, -(-n // self.csize)))       # só os clusters que de fato pertencem ao arquivo
-            falta -= n
+            runs, validas, falta = achou
+        else:
+            runs, falta, validas = [], i['tam'], []
+            for lcn, cl in i['runs'] or []:
+                if falta <= 0:
+                    break
+                n = min(cl * self.csize, falta)
+                if lcn is not None and (lcn < 0 or (lcn + cl) > self.nclusters):
+                    e.estado, e.nota = 'ruim', 'data run fora do volume'
+                    e.runs = []
+                    return
+                runs.append((None if lcn is None else self.inicio + lcn * self.csize, n))
+                validas.append((lcn, -(-n // self.csize)))       # só os clusters que de fato pertencem ao arquivo
+                falta -= n
         e.runs = runs
         if falta > 0:
             e.estado, e.nota = 'parcial', 'data runs não cobrem o tamanho'
@@ -393,6 +481,88 @@ class Ntfs(Volume):
                 e.estado, e.nota = 'parcial', 'clusters já reutilizados (conforme o $Bitmap)'
             elif self._bitmap is None:
                 e.nota = 'sem $Bitmap para conferir reuso'
+
+    def _unidades_lznt1(self, e, i):
+        """Arquivo comprimido: monta `e.extents_lznt1` e devolve (runs lógicos, clusters válidos, bytes que faltam), ou None
+        depois de marcar a entrada `ruim`. Cada unidade de 16 clusters é: toda esparsa (zeros), toda alocada (gravada sem
+        compressão) ou com clusters alocados no começo e esparsos no fim (comprimida). Extents: [off, n] comum ou
+        esparso ([None, n]); [off, n, 0] é um pedaço de unidade comprimida e [off, n, u] o último dela, com u bytes
+        depois de descomprimida."""
+        def ruim(nota):
+            e.estado, e.nota, e.runs = 'ruim', nota, []
+            return None
+        if i['tam'] > 4 * self.tamanho:
+            return ruim('tamanho incoerente com o volume (estrutura danificada?)')
+        csize, falta = self.csize, i['tam']
+        ext, validas = [], []
+        for pedacos in _fatiar_unidades(i['runs'] or []):
+            if falta <= 0:
+                break
+            total = sum(cl for _, cl in pedacos)
+            reais = [(l, cl) for l, cl in pedacos if l is not None]
+            if any(l < 0 or l + cl > self.nclusters for l, cl in reais):
+                return ruim('data run fora do volume')
+            u = min(total * csize, falta)
+            if not reais:                                    # unidade esparsa
+                if ext and ext[-1][0] is None and len(ext[-1]) == 2:
+                    ext[-1][1] += u
+                else:
+                    ext.append([None, u])
+            elif total != UNIDADE_LZNT1:
+                return ruim('comprimido (LZNT1): unidade de compressão incompleta')
+            elif len(reais) == len(pedacos):                 # tudo alocado: gravada sem compressão
+                resta = u
+                for l, cl in reais:
+                    q = min(cl * csize, resta)
+                    off = self.inicio + l * csize
+                    if ext and len(ext[-1]) == 2 and ext[-1][0] is not None and ext[-1][0] + ext[-1][1] == off:
+                        ext[-1][1] += q
+                    else:
+                        ext.append([off, q])
+                    validas.append((l, -(-q // csize)))
+                    resta -= q
+            else:                                            # comprimida: dados primeiro, esparso depois
+                if pedacos[:len(reais)] != reais:
+                    return ruim('comprimido (LZNT1): buraco antes dos dados da unidade')
+                for k, (l, cl) in enumerate(reais):
+                    ext.append([self.inicio + l * csize, cl * csize, u if k == len(reais) - 1 else 0])
+                    validas.append((l, cl))
+            if len(ext) > MAX_EXTENTS_LZNT1:
+                return ruim('comprimido (LZNT1): fragmentado demais')
+            falta -= u
+        e.extents_lznt1 = ext
+        cobertos = i['tam'] - max(falta, 0)
+        return ([(None, cobertos)] if cobertos else []), validas, falta
+
+    def ler(self, entrada, bloco=BLOCO):
+        """Como `Volume.ler`, mas descomprime o arquivo LZNT1. Unidade ilegível ou inválida: OSError."""
+        ext = getattr(entrada, 'extents_lznt1', None)
+        if ext is None:
+            yield from super().ler(entrada, bloco)
+            return
+        falta, pend = entrada.tamanho, []
+        for e in ext:
+            if len(e) == 3:
+                pend.append((e[0], e[1]))
+                if e[2] == 0:
+                    continue
+                try:
+                    bruto = b''.join(self.leitor.ler(o, n) for o, n in pend)
+                    dados = lznt1_descomprimir(bruto, e[2]).ljust(e[2], b'\0')
+                except ValueError as erro:
+                    raise OSError('LZNT1 inválido: %s' % erro) from None
+                pend = []
+                yield dados[:falta]
+                falta -= e[2]
+                continue
+            off, n = e
+            while n > 0 and falta > 0:
+                q = min(n, falta, bloco)
+                yield (b'\0' * q) if off is None else self.leitor.ler(off, q)
+                if off is not None:
+                    off += q
+                n -= q
+                falta -= q
 
     def _runs_residente(self, i):
         """Onde estão, na origem, os bytes de um $DATA residente. O NTFS troca os 2 últimos bytes de cada setor de 512
