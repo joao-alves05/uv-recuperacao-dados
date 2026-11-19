@@ -594,6 +594,7 @@ def _marcar_sobreposicao(res):
 
 # --- busca de partição perdida ------------------------------------------------------------------------------
 # padrão, deslocamento do padrão dentro da estrutura, tipo da busca
+ASSINATURA_BOOT = bytes([0x55, 0xAA])
 PADROES = [(b'NTFS    ', 3, 'ntfs'), (b'EXFAT   ', 3, 'exfat'), (b'FAT32   ', 82, 'fat'), (b'FAT16   ', 54, 'fat'),
            (b'FAT12   ', 54, 'fat'), (b'FAT     ', 54, 'fat'), (b'\x53\xef', 56, 'ext'), (b'H+\x00\x04', 0, 'hfs'),
            (b'HX\x00\x05', 0, 'hfs'), (b'NXSB', 32, 'apfs'), (b'\x01CD001\x01', 0, 'iso')]
@@ -634,6 +635,15 @@ def hits_do_bloco(l, base, setor=512, bloco=BLOCO_BUSCA):
                 if info:
                     hits.append({'t': tipo, 'x': base + xs, 'i': info})
             p = janela.find(padrao, p + 1)
+    achados = {h['x'] for h in hits}
+    p = janela.find(ASSINATURA_BOOT)                                  # FAT12/16 sem rótulo: só setores 55AA + salto EB/E9
+    while p != -1:
+        xs = p - 510
+        if 0 <= xs < bloco and not (base + xs) % setor and janela[xs] in (0xEB, 0xE9) and base + xs not in achados:
+            info = det_fat(janela[xs: xs + 512])
+            if info:
+                hits.append({'t': 'fat', 'x': base + xs, 'i': info})
+        p = janela.find(ASSINATURA_BOOT, p + 1)
     hits.sort(key=lambda h: h['x'])
     return hits, ruins
 
