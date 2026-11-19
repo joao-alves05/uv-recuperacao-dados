@@ -9,8 +9,15 @@ Multi-sessão: se o leitor oferecer `sessoes()` (lista dos setores iniciais, vin
 em início + 256 e vale a última sessão que tem conjunto de volume válido. Sem isso, só as âncoras padrão são olhadas;
 com `todas_sessoes=True` (ou se nenhuma âncora padrão existe) o disco inteiro é varrido atrás de âncoras.
 
-Fora do que lemos (dito em `limitacao`): partição virtual/VAT (CD-R/RW incremental), esparsa (CD-RW 1.5), de
-metadados (UDF 2.50+, Blu-ray), fluxos nomeados, ACL e atributos estendidos. Só lê, pelo `Leitor`.
+Partição virtual (CD-R/RW gravado de forma incremental): o mapa tipo 2 "*UDF Virtual Partition" manda traduzir todo
+bloco lógico (FSD, ICBs, extensões de arquivo) pela VAT. A VAT é um arquivo cujo File Entry fica no último setor
+gravado (fim da imagem, ou o setor antes do início da sessão seguinte; procura nos últimos MAX_BUSCA_VAT setores):
+UDF 2.00+ = tipo de arquivo 248 com cabeçalho; UDF 1.50 = só a tabela, terminada pelo "*UDF Virtual Alloc Tbl".
+VAT ilegível não derruba o volume: abre sem listar nada e o motivo vai em `limitacao`. Só a partição virtual é
+traduzida; referências à física no mesmo volume são lidas como se fossem virtuais.
+
+Fora do que lemos (dito em `limitacao`): partição esparsa (CD-RW 1.5), de metadados (UDF 2.50+, Blu-ray), fluxos
+nomeados, ACL e atributos estendidos. Só lê, pelo `Leitor`.
 """
 import struct
 
@@ -21,7 +28,9 @@ MAX_DIR = 64 << 20
 MAX_TOTAL_PASTAS = 256 << 20            # bytes de pastas lidos numa varredura (pastas que se sobrepõem não viram bomba)
 MAX_ANCORAS = 64
 MAX_SALTOS_ICB = 16                      # Indirect Entries seguidas até o File Entry; mais que isso é laço ou lixo
-LIMITACAO = ('UDF: sem partição virtual (VAT), esparsa ou de metadados, fluxos nomeados e ACL.')
+MAX_BUSCA_VAT = 64                       # setores procurados de trás para frente atrás do File Entry da VAT
+MAX_VAT = 64 << 20                       # bytes de VAT aceitos (16 milhões de blocos virtuais)
+LIMITACAO = ('UDF: sem partição esparsa ou de metadados, fluxos nomeados e ACL.')
 
 
 def _tag(b, minimo=16):
@@ -133,12 +142,16 @@ class Udf(Volume):
     def __init__(self, leitor, inicio=0, tamanho=None, todas_sessoes=False):
         super().__init__(leitor, inicio, tamanho)
         self.limitacao = LIMITACAO
+        self.vat = None                                     # lista bloco virtual -> bloco físico, só em partição virtual
+        self._raiz = None
+        self._sessoes = None
         sessoes = None
         if callable(getattr(leitor, 'sessoes', None)):
             try:
                 sessoes = list(leitor.sessoes())
             except OSError:
                 sessoes = None
+        self._sessoes = sessoes
         try:
             ancoras = achar_ancoras(leitor, inicio, self.tamanho, todas_sessoes, sessoes)
         except OSError as e:
@@ -165,13 +178,13 @@ class Udf(Volume):
             if comp == 0:
                 continue
             try:
-                self._conjunto(loc, min(comp, 256 * SETOR) // SETOR)
+                self._conjunto(loc, min(comp, 256 * SETOR) // SETOR, ancora)
                 return
             except (ErroSA, OSError, struct.error) as e:
                 ultimo = e
         raise ErroSA(str(ultimo) if ultimo else 'Âncora UDF sem conjunto de volume.')
 
-    def _conjunto(self, loc, n):
+    def _conjunto(self, loc, n, ancora=0):
         pvd = pd = lvd = None
         for k in range(n):
             b = self._setor(loc + k)
@@ -198,7 +211,7 @@ class Udf(Volume):
         self.part_ini = struct.unpack_from('<I', pd, 188)[0]
         self.part_tam = struct.unpack_from('<I', pd, 192)[0]
         tam_mapas, n_mapas = struct.unpack_from('<II', lvd, 264)
-        off, mapa = 440, None
+        off, mapa, virtual = 440, None, False
         for _ in range(min(n_mapas, 8)):
             tipo, ln = lvd[off], lvd[off + 1]
             if ln < 2:
@@ -206,11 +219,21 @@ class Udf(Volume):
             if tipo == 1:
                 if struct.unpack_from('<H', lvd, off + 4)[0] == num_part and mapa is None:
                     mapa = off
+            elif tipo == 2 and ln >= 40 and lvd[off + 5: off + 27] == b'*UDF Virtual Partition':
+                virtual = True
             else:
-                raise ErroSA('Partição UDF virtual, esparsa ou de metadados: não suportada.')
+                raise ErroSA('Partição UDF esparsa ou de metadados: não suportada.')
             off += ln
         if mapa is None:
             raise ErroSA('O volume UDF não tem partição física legível.')
+        self.vat = None
+        if virtual:
+            try:
+                self.vat = self._ler_vat(ancora)
+            except (ErroSA, OSError, struct.error) as e:
+                self.limitacao = '%s AVISO: VAT ilegível (%s); os arquivos da partição virtual não foram listados.' % (LIMITACAO, e)
+                self._raiz = None
+                return
         fsd = struct.unpack_from('<II', lvd, 248)          # tamanho, bloco (long_ad do conjunto de arquivos)
         fsd_lbn = fsd[1]
         for k in range(16):
@@ -225,8 +248,57 @@ class Udf(Volume):
                 break
         raise ErroSA('Não achei o conjunto de arquivos (FSD) do UDF.')
 
+    def _ler_vat(self, ancora):
+        """Tabela (lista bloco virtual -> bloco físico; None = livre) do File Entry da VAT mais perto do fim gravado."""
+        fim = self.tamanho // SETOR
+        for ini in sorted(self._sessoes or []):
+            if ancora < ini < fim:                          # a VAT da sessão da âncora acaba antes da próxima
+                fim = ini
+                break
+        ultimo = None
+        for sec in range(fim - 1, max(self.part_ini, fim - 1 - MAX_BUSCA_VAT) - 1, -1):
+            try:
+                t = _tag(self._setor(sec))
+                if t is None or t[0] not in (261, 266):
+                    continue
+                r = self._ler_icb(sec - self.part_ini)
+                if r['info'] > MAX_VAT:
+                    continue
+                dados = self._conteudo(r)
+            except (ErroSA, OSError, struct.error) as e:
+                ultimo = e
+                continue
+            if r['tipo'] == 248:                            # UDF 2.00+: cabeçalho de L_HD bytes, depois as entradas
+                hl = struct.unpack_from('<H', dados, 0)[0]
+                if hl < 4 or hl > len(dados):
+                    raise ErroSA('cabeçalho da VAT inválido')
+                corpo = dados[hl:]
+            elif b'*UDF Virtual Alloc Tbl' in dados[-36:-4]:      # UDF 1.50: só a tabela e 36 bytes de rodapé
+                corpo = dados[:-36]
+            else:
+                continue
+            n = len(corpo) // 4
+            tab = struct.unpack('<%dI' % n, corpo[:n * 4])
+            if not n or any(v != 0xFFFFFFFF and (v >= self.part_tam > 0) for v in tab):
+                raise ErroSA('tabela da VAT inconsistente')
+            return [None if v == 0xFFFFFFFF else v for v in tab]
+        raise ErroSA(str(ultimo) if ultimo else 'VAT não encontrada nos últimos %d setores gravados' % MAX_BUSCA_VAT)
+
+    def _fisico(self, lbn):
+        """Bloco físico da partição para um bloco lógico (traduzido pela VAT quando a partição é virtual)."""
+        if self.vat is None:
+            return lbn
+        if not 0 <= lbn < len(self.vat) or self.vat[lbn] is None:
+            raise ErroSA('bloco virtual UDF %d sem entrada na VAT' % lbn)
+        return self.vat[lbn]
+
     def _particao(self, lbn, n=1):
         """n blocos a partir do bloco `lbn` da partição."""
+        if self.vat is not None:
+            return b''.join(self._particao_fisica(self._fisico(lbn + k), 1) for k in range(n))
+        return self._particao_fisica(lbn, n)
+
+    def _particao_fisica(self, lbn, n=1):
         if lbn < 0 or (self.part_tam and lbn + n > self.part_tam):
             raise ErroSA('bloco UDF fora da partição')
         return self._setor(self.part_ini + lbn, n)
@@ -252,9 +324,22 @@ class Udf(Volume):
                 ad_bytes, off = b[24:24 + ln], 0
                 continue
             n = min(n, falta)
+            if kind == 0 and self.vat is not None:         # cada bloco virtual vai para o seu físico; junta os vizinhos
+                restante, k = n, 0
+                while restante > 0:
+                    f = self._fisico(lbn + k)
+                    q = min(SETOR, restante)
+                    if runs and len(runs[-1]) == 3 and runs[-1][2] == f - 1 and runs[-1][1] % SETOR == 0:
+                        runs[-1] = (runs[-1][0], runs[-1][1] + q, f)
+                    else:
+                        runs.append((self.inicio + (self.part_ini + f) * SETOR, q, f))
+                    restante -= q
+                    k += 1
+                falta -= n
+                continue
             runs.append(((self.inicio + (self.part_ini + lbn) * SETOR) if kind == 0 else None, n))
             falta -= n
-        return runs
+        return [(r[0], r[1]) for r in runs]
 
     def _ler_icb(self, lbn):
         """File Entry / Extended File Entry do bloco `lbn`: {tipo, info, runs, inline, datas}."""
@@ -307,6 +392,8 @@ class Udf(Volume):
 
     def varrer(self):
         self._lidos_pastas = 0
+        if self._raiz is None:                              # VAT ilegível: nada a listar, o motivo está em `limitacao`
+            return
         try:
             yield from self._pasta(self._raiz, '/', 0, {self._raiz})
         except OSError as e:

@@ -37,15 +37,22 @@ def fid(nome, icb, carac=0):
     return bytes(b).ljust((len(b) + 3) & ~3, b'\0')
 
 
+DESLOCA_VIRTUAL = 100
+
+
 class Sessao:
     """Uma sessão UDF a partir do setor `base`. Arquivos: {caminho: bytes | ('apagado', bytes)}; pastas implícitas."""
 
-    def __init__(self, arquivos, base=0, rotulo='UDFTESTE', alt_fim=None, indireto=None):
+    def __init__(self, arquivos, base=0, rotulo='UDFTESTE', alt_fim=None, indireto=None, vat=None):
         # indireto: {caminho: n} = n Indirect Entries (tag 259) antes do File Entry; {caminho: 'laco'} = 2 que apontam uma para a outra
+        # vat: None = partição física; '2.00' ou '1.50' = partição virtual com a VAT no último setor da imagem; 'ruim' = VAT 2.00 com
+        # cabeçalho corrompido. Na virtual, o bloco virtual é o físico + DESLOCA_VIRTUAL (nunca batem).
         self.arq, self.base, self.rotulo, self.alt_fim, self.indireto = arquivos, base, rotulo, alt_fim, indireto or {}
+        self.vat = vat
 
     def gerar(self, img):
         base = self.base
+        virt = (lambda p: p + DESLOCA_VIRTUAL) if self.vat else (lambda p: p)    # bloco físico -> o que se grava nas referências
         ps = base + 260                                    # início da partição (setor)
         proximo = [3]                                      # bloco 0 FSD, 1 raiz (FE), 2 dados da raiz
 
@@ -80,7 +87,7 @@ class Sessao:
         def indireta(lbn, destino):
             corpo = bytearray(36)
             struct.pack_into('<IHHHBB', corpo, 0, 0, 4, 0, 1, 0, 12)            # ICB tag: tipo 12 = Indirect Entry
-            struct.pack_into('<IIH', corpo, 20, SETOR, destino, 0)              # long_ad do próximo ICB (36)
+            struct.pack_into('<IIH', corpo, 20, SETOR, virt(destino), 0)              # long_ad do próximo ICB (36)
             poe(ps + lbn, tag(259, bytes(corpo), lbn))
 
         def cadeia(caminho, real):
@@ -99,13 +106,13 @@ class Sessao:
             return blocos[0]
 
         def gravar_pasta(no, lbn_fe, lbn_pai, prefixo=''):
-            fids = fid('', lbn_pai, 0x0A)
+            fids = fid('', virt(lbn_pai), 0x0A)
             for nome, v in no.items():
                 if isinstance(v, dict):
                     l = aloc()
                     d = aloc()
                     gravar_pasta(v, l, lbn_fe, prefixo + nome + '/')
-                    fids += fid(nome, l, 0x02)
+                    fids += fid(nome, virt(l), 0x02)
                 else:
                     apagado = isinstance(v, tuple)
                     dados = v[1] if apagado else v
@@ -116,15 +123,34 @@ class Sessao:
                         n = -(-len(dados) // SETOR)
                         ini = aloc(n)
                         img[(ps + ini) * SETOR: (ps + ini) * SETOR + len(dados)] = dados
-                        fe(l, 5, len(dados), 0, struct.pack('<II', len(dados), ini))
-                    fids += fid(nome, cadeia(prefixo + nome, l), 0x04 if apagado else 0)
+                        fe(l, 5, len(dados), 0, struct.pack('<II', len(dados), virt(ini)))
+                    fids += fid(nome, virt(cadeia(prefixo + nome, l)), 0x04 if apagado else 0)
             d = aloc()
             img[(ps + d) * SETOR: (ps + d) * SETOR + len(fids)] = fids
-            fe(lbn_fe, 4, len(fids), 0, struct.pack('<II', len(fids), d))
+            fe(lbn_fe, 4, len(fids), 0, struct.pack('<II', len(fids), virt(d)))
 
         gravar_pasta(raiz, 1, 1)
         total_blocos = proximo[0]
-        poe(ps + 0, tag(256, bytes(384) + struct.pack('<IIH', SETOR, 1, 0), 0))
+        tam_part = total_blocos + 1
+        if self.vat:                                       # VAT: dados no penúltimo setor da imagem e File Entry no último
+            ultimo = len(img) // SETOR - 1
+            fe_vat, dados_vat = ultimo - ps, ultimo - 1 - ps
+            tam_part = fe_vat + 1
+            tab = [0xFFFFFFFF] * (total_blocos + DESLOCA_VIRTUAL)
+            for p in range(total_blocos):
+                tab[virt(p)] = p
+            corpo = struct.pack('<%dI' % len(tab), *tab)
+            if self.vat == '1.50':
+                corpo += bytes(1) + b'*UDF Virtual Alloc Tbl'.ljust(23, bytes(1)) + bytes(8) + bytes(4)
+                tipo_vat = 0
+            else:
+                hl = 60000 if self.vat == 'ruim' else 152
+                corpo = struct.pack('<HH', hl, 0) + bytes(148) + corpo
+                tipo_vat = 248
+            assert len(corpo) <= SETOR
+            poe(ps + dados_vat, corpo)
+            fe(fe_vat, tipo_vat, len(corpo), 0, struct.pack('<II', len(corpo), dados_vat))
+        poe(ps + 0, tag(256, bytes(384) + struct.pack('<IIH', SETOR, virt(1), 0), 0))
         # VRS
         for k, ident in enumerate((b'BEA01', b'NSR02', b'TEA01')):
             poe(base + 16 + k, b'\0' + ident + b'\x01')
@@ -136,14 +162,18 @@ class Sessao:
             poe(vds, tag(1, bytes(pvd), vds))
             pd = bytearray(496)
             struct.pack_into('<IHH', pd, 0, 2, 1, 1)
-            struct.pack_into('<II', pd, 172, ps, total_blocos + 1)               # início (188) e tamanho (192)
+            struct.pack_into('<II', pd, 172, ps, tam_part)               # início (188) e tamanho (192)
             poe(vds + 1, tag(5, bytes(pd), vds + 1))
             lvd = bytearray(496)
             struct.pack_into('<I', lvd, 0, 3)
             struct.pack_into('<I', lvd, 196, SETOR)                               # bloco lógico (212)
-            struct.pack_into('<II', lvd, 232, SETOR, 0)                           # FSD: tamanho (248), bloco (252)
-            struct.pack_into('<II', lvd, 248, 6, 1)                               # tamanho dos mapas (264), quantidade (268)
+            struct.pack_into('<II', lvd, 232, SETOR, virt(0))                           # FSD: tamanho (248), bloco (252)
+            struct.pack_into('<II', lvd, 248, 6 + (64 if self.vat else 0), 2 if self.vat else 1)   # tamanho dos mapas (264), quantidade (268)
             lvd[424:430] = struct.pack('<BBHH', 1, 6, 1, 1)                       # mapa tipo 1 (440)
+            if self.vat:                                                          # mapa tipo 2, partição virtual (446)
+                lvd[430:434] = bytes([2, 64, 0, 0])
+                lvd[435:435 + 22] = b'*UDF Virtual Partition'
+                struct.pack_into('<HH', lvd, 466, 1, 1)
             poe(vds + 2, tag(6, bytes(lvd), vds + 2))
             poe(vds + 3, tag(8, bytes(0), vds + 3))
         for a in (base + 256,) + ((self.alt_fim,) if self.alt_fim else ()):
