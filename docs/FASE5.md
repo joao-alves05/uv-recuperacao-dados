@@ -58,6 +58,22 @@ Cada achado é um dict. Campos (os de `*` são obrigatórios):
 
 `achados.obter(store, id)` devolve o dict com `extents` já como lista e `apagado` como bool/nulo; `achados.extents_de(achado)` dá `[(offset, comprimento)]`; `achados.ler_achado(leitor, achado, maximo=None)` gera os bytes lendo da origem (só leitura). Esses dois últimos são o jeito de ler um achado: o job `recuperar` e a prévia usam as mesmas funções, então achados da fase 4 (com `caminho`, `apagado` e `extents`) funcionam sem código novo.
 
+### Extents de arquivo comprimido (fase 4: NTFS LZNT1 e HFS+ decmpfs)
+
+Os bytes de um arquivo comprimido não existem no disco como estão: o achado leva extents de 3 ou 4 valores e `achados.ler_achado` / o job `recuperar` gravam o conteúdo **descomprimido**. `tamanho` é o tamanho descomprimido.
+
+| Extent | Quem gera | Significado |
+|---|---|---|
+| `[offset, n]` | todos | `n` bytes na origem; `offset` nulo = zeros (esparso) |
+| `[offset, n, u]` | NTFS (LZNT1) | `n` bytes comprimidos em LZNT1 na origem, parte de uma unidade de 16 clusters |
+| `[offset, n, u, "zlib"]` | HFS+ (decmpfs tipos 3 e 4) | `n` bytes comprimidos em zlib na origem, parte de uma unidade |
+
+- `u = 0`: a unidade continua no extent seguinte (unidade em mais de um pedaço no disco). `u > 0`: este é o último pedaço dela e `u` é o tamanho dela depois de descomprimida; os pedaços anteriores com `u = 0` mais este formam os bytes comprimidos. A soma dos `u` (mais o `n` dos extents de 2 valores) tem de dar `tamanho`; unidade que ficou aberta, ou acima de 64 MiB, recusa o achado em `normalizar`.
+- LZNT1: cada unidade tem 16 clusters; unidade toda esparsa é `[null, bytes]`, e a gravada sem compressão sai como extent de 2 valores.
+- decmpfs tipo 3: um extent só, apontando para os bytes zlib dentro do atributo `com.apple.decmpfs` (na B-tree de atributos, depois dos 16 bytes do cabeçalho `fpmc`). Tipo 4: uma unidade por bloco de 64 KiB do resource fork (`u` = 65536, e o resto no último), com os offsets já resolvidos pelos extents do fork. Em zlib, unidade cujo primeiro byte é `0xFF` é crua (os bytes seguintes valem como estão).
+- Unidade ilegível ou inválida vira zeros no arquivo recuperado, conta como lacuna e o resultado sai `com_falhas`.
+- LZVN/LZFSE (decmpfs tipos 7, 8, 11 e 12) não são suportados: o arquivo sai `ruim` com a nota "compressão LZVN/LZFSE não suportada" e, sem bytes recuperáveis, não entra na lista de achados.
+
 ## Tabela de assinaturas (`recuperacao/assinaturas.json`)
 
 `{"assinaturas": [ {tipo, grupo, extensao, cabecalho (hex), cabecalho_offset?, rodape? (hex), tamanho_max (bytes), validar?, forma?} ]}`. Tipo novo = linha nova. Sem `validar`, vale o `rodape` (o arquivo vai do cabeçalho até o primeiro rodapé; pontuação 60). Tabela inválida é recusada com frase clara (`ErroAssinaturas`). Os validadores (`recuperacao/validar.py`) podem trocar `tipo`, `extensao` e `grupo` pelo que acharem dentro (TIFF vira CR2/NEF/ARW/DNG; ZIP vira DOCX/XLSX/PPTX/ODT/ODS/ODP/EPUB/JAR/APK; OLE2 vira DOC/XLS/PPT; MP4 vira MOV/M4A/HEIC/CR3/3GP/3G2). Tipos prontos: JPG, PNG, GIF, BMP, TIFF e RAW, MP4/MOV/M4A/HEIC/CR3 (RAW da Canon, ftyp `crx `)/3GP/3G2 (ftyp `3gp*`, `3ge6`, `3gg6`, `3g2*`), MKV/WebM (EBML; tamanho do Segment, ou Cluster a Cluster se desconhecido), AVI, WAV, MP3 (começando em ID3), PDF, ZIP e derivados, RAR 4 e 5, 7z, SQLite, OLE2, RTF.

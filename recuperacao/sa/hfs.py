@@ -8,8 +8,10 @@ os 8 extents do registro e, se faltar, os do arquivo de extents overflow.
 O que NÃO dá para fazer, e por quê:
   * Arquivo apagado: o HFS+ tira o registro do catálogo e reaproveita o nó da B-tree; o que sobra nos nós é acaso.
     Não há como recuperar pela estrutura: deixe para a busca por assinatura (carving).
-  * Resource fork, atributos estendidos e arquivo comprimido (decmpfs): os bytes não estão no fork de dados. Arquivo
-    comprimido sai `ruim` com a explicação.
+  * Resource fork e atributos estendidos em geral: não são listados.
+  * Arquivo comprimido (decmpfs, flag UF_COMPRESSED + atributo "com.apple.decmpfs"): tipo 3 (zlib no atributo) e tipo 4
+    (zlib em blocos de 64 KiB no resource fork) saem descomprimidos: a entrada leva `extents_decmpfs`, extents de 4
+    valores [offset, n, u, 'zlib'] (ver `achados.py`), que `ler()` e o achado usam. LZVN (7/8) e LZFSE (11/12) saem `ruim` com a nota.
   * Links simbólicos não são listados; a pasta escondida "HFS+ Private Data" também não.
   * Hard link de ARQUIVO é listado com o nome e o caminho do link e os dados do inode real ("iNode<n>" na pasta
     escondida). Se o inode não está no catálogo, o link sai `ruim` com a explicação. Hard link de PASTA (Time Machine,
@@ -19,6 +21,7 @@ O que NÃO dá para fazer, e por quê:
 """
 import struct
 import unicodedata
+import zlib
 
 from .base import ErroSA, Entrada, Volume, MAX_PROFUNDIDADE, epoch, juntar, limpar_nome
 
@@ -28,7 +31,26 @@ ID_EXTENTS, ID_CATALOGO = 3, 4
 PERDIDOS = '/[perdidos]'
 _ADIAR = object()
 UF_COMPRESSED = 0x20
+ATTR_DECMPFS = 'com.apple.decmpfs'
+BLOCO_DECMPFS = 1 << 16
+MAX_BLOCOS_DECMPFS = 1 << 16                 # 4 GiB descomprimidos por arquivo
+MAX_TIPO3_DECMPFS = 16 << 20                 # teto de bytes descomprimidos do tipo 3
+MAX_EXTENTS_DECMPFS = 90000                  # abaixo do teto de extents de um achado (achados.normalizar)
 NUL4 = chr(0) * 4
+
+
+def descomprimir_zlib(bruto, u):
+    """Os `u` bytes de uma unidade decmpfs: zlib, ou crua se o primeiro byte é 0xFF. ValueError se for inválida."""
+    if bruto[:1] == bytes([255]):
+        dados = bruto[1:1 + u]
+    else:
+        try:
+            dados = zlib.decompressobj().decompress(bruto, u)
+        except zlib.error as erro:
+            raise ValueError('zlib inválido: %s' % erro) from None
+    if len(dados) < u:
+        raise ValueError('unidade mais curta que o declarado')
+    return dados
 
 
 def _data(v):
@@ -52,7 +74,7 @@ def _cabecalho(b):
     if bs < 512 or bs > (1 << 20) or bs & (bs - 1) or total == 0:
         raise ErroSA('Tamanho de bloco HFS+ inválido.')
     return dict(hfsx=b[:2] == b'HX', bs=bs, total=total, atrib=struct.unpack_from('>I', b, 4)[0],
-                extents_fork=_fork(b, 192), catalogo_fork=_fork(b, 272))
+                extents_fork=_fork(b, 192), catalogo_fork=_fork(b, 272), atributos_fork=_fork(b, 352))
 
 
 def reconhecer(leitor, inicio=0, tamanho=None):
@@ -84,6 +106,8 @@ class Hfs(Volume):
         self.ao_ler = None
         self.no_tam = 4096
         self._ov = None
+        self._attr_fork = cab['atributos_fork']
+        self._decmpfs_attrs = None
         self._ext_extents = self._completar(cab['extents_fork'], None)
         self._cat_extents = self._completar(cab['catalogo_fork'], ID_CATALOGO)
         tam_cat = cab['catalogo_fork'][0]
@@ -142,12 +166,14 @@ class Hfs(Volume):
         if 14 + 2 * (nreg + 1) > self.no_tam:                  # a tabela de offsets nem caberia no nó
             raise ErroSA('Nó %d do catálogo com %d registros: inválido' % (no_n, nreg))
         offs = [struct.unpack_from('>H', b, self.no_tam - 2 * (i + 1))[0] for i in range(nreg + 1)]
-        recs = []
+        recs, pos = [], []
         for i in range(nreg):
             a, z = offs[i], offs[i + 1]
             if a < 14 or z > self.no_tam - 2 * (nreg + 1) or z < a:
                 continue
             recs.append(b[a:z])
+            pos.append(a)
+        self._ult_pos = pos                                    # onde cada registro começa no nó
         return flink, kind, recs
 
     def _folhas(self, extents, primeira, total_nos):
@@ -190,6 +216,51 @@ class Hfs(Volume):
         except (ErroSA, OSError, struct.error):
             pass
         return ov
+
+    def _decmpfs(self):
+        """{id do arquivo: (bytes do atributo com.apple.decmpfs, offset deles no volume ou None)}, lido uma vez da
+        B-tree de atributos."""
+        if self._decmpfs_attrs is not None:
+            return self._decmpfs_attrs
+        out = {}
+        self._decmpfs_attrs = out
+        tam, total, ext = self._attr_fork
+        try:
+            if not ext:
+                return out
+            b = self._ler_fork(ext, 0, 512)
+            if struct.unpack_from('>b', b, 8)[0] != 1:
+                return out
+            no_tam, primeira = struct.unpack_from('>H', b, 14 + 18)[0], struct.unpack_from('>I', b, 14 + 10)[0]
+            total_nos = struct.unpack_from('>I', b, 14 + 22)[0] or 1
+            if no_tam < 512 or no_tam > 32768 or no_tam & (no_tam - 1):
+                return out
+            total_nos = min(total_nos, max(1, tam // no_tam))
+            guardado, self.no_tam = self.no_tam, no_tam
+            try:
+                for n_no, recs in self._folhas(ext, primeira, total_nos):
+                    for r, a in zip(recs, self._ult_pos):
+                        if len(r) < 14:
+                            continue
+                        klen, _pad, fid, _ini, nl = struct.unpack_from('>HHIIH', r, 0)
+                        d = (2 + klen + 1) & ~1
+                        if klen < 12 + 2 * nl or 2 + klen > len(r) or d + 16 > len(r):
+                            continue
+                        nome = r[14:14 + 2 * nl].decode('utf-16-be', 'replace')
+                        if nome != ATTR_DECMPFS or struct.unpack_from('>I', r, d)[0] != 0x10:    # 0x10 = dados inline
+                            continue
+                        n = struct.unpack_from('>I', r, d + 12)[0]
+                        dados = bytes(r[d + 16:d + 16 + n])
+                        try:
+                            faixas = self._faixas(ext, n_no * no_tam + a + d + 16, len(dados))
+                        except ErroSA:
+                            faixas = []
+                        out[fid] = (dados, faixas[0][0] if len(faixas) == 1 and dados else None)
+            finally:
+                self.no_tam = guardado
+        except (ErroSA, OSError, struct.error):
+            pass
+        return out
 
     # ---- catálogo --------------------------------------------------------------------------------------------
     def _resolver(self, pai, pastas, memo, final):
@@ -243,7 +314,7 @@ class Hfs(Volume):
             e.estado, e.nota = 'ruim', 'hard link sem inode'
             return
         if r['comprimido']:
-            e.estado, e.nota = 'ruim', 'comprimido (decmpfs): os bytes não estão no fork de dados'
+            self._dados_decmpfs(e, r)
             return
         tam, total, ext = r['fork']
         e.tamanho = tam
@@ -267,6 +338,90 @@ class Hfs(Volume):
             e.nota = 'os extents não cobrem o tamanho (extent overflow ausente ou volume cortado)'
         if not runs:
             e.estado = 'ruim'
+
+    def _dados_decmpfs(self, e, r):
+        """Arquivo comprimido: lê o cabeçalho 'fpmc' (little-endian) do atributo e monta `e.extents_decmpfs`:
+        [offset, n, u, 'zlib'] com n bytes comprimidos; u = 0 se a unidade continua no próximo extent, senão os bytes
+        dela depois de descomprimida (o tipo 3 é uma unidade só; o tipo 4 tem uma por bloco de 64 KiB)."""
+        e.estado = 'ruim'
+        achou = self._decmpfs().get(r.get('attr_id', r['id']))
+        if achou is None:
+            e.nota = 'comprimido (decmpfs): atributo com.apple.decmpfs não encontrado'
+            return
+        attr, pos = achou
+        if len(attr) < 16 or attr[:4] != b'fpmc':
+            e.nota = 'comprimido (decmpfs): cabeçalho do atributo inválido'
+            return
+        tipo, tam = struct.unpack_from('<IQ', attr, 4)
+        if tipo in (7, 8, 11, 12):
+            e.nota = 'compressão LZVN/LZFSE não suportada'
+            return
+        if tipo not in (3, 4):
+            e.nota = 'compressão decmpfs tipo %d não suportada' % tipo
+            return
+        try:
+            ext = []
+            if tam and tipo == 3:
+                if tam > MAX_TIPO3_DECMPFS:
+                    raise ErroSA('arquivo descomprimido grande demais (%d bytes)' % tam)
+                if pos is None:
+                    raise ErroSA('atributo fragmentado no disco')
+                descomprimir_zlib(attr[16:], tam)                # confere já: o atributo é pequeno
+                ext = [[self.inicio + pos + 16, len(attr) - 16, tam, 'zlib']]      # depois do cabeçalho 'fpmc'
+            elif tam:
+                ext = self._extents_tipo4(r, tam)
+        except (ErroSA, OSError, struct.error, ValueError) as erro:
+            e.nota = 'comprimido (decmpfs tipo %d): %s' % (tipo, erro)
+            return
+        e.extents_decmpfs = ext
+        e.tamanho = tam
+        e.runs = [(None, tam)] if tam else []
+        e.estado = 'bom'
+
+    def _extents_tipo4(self, r, tam):
+        """Tipo 4: confere a tabela de blocos do resource fork e devolve os extents [offset, n, u, 'zlib']."""
+        _t, total, ext = r['rsrc']
+        if not ext or total == 0:
+            raise ErroSA('resource fork ausente')
+        nblocos = -(-tam // BLOCO_DECMPFS)
+        if nblocos > MAX_BLOCOS_DECMPFS:
+            raise ErroSA('tamanho descomprimido grande demais')
+        base = struct.unpack_from('>I', self._ler_fork(ext, 0, 4), 0)[0]
+        if base < 16 or base > 0x1000:
+            raise ErroSA('cabeçalho do resource fork inválido')
+        n = struct.unpack_from('<I', self._ler_fork(ext, base + 4, 4))[0]
+        if n != nblocos:
+            raise ErroSA('tabela de blocos com %d entradas, esperava %d' % (n, nblocos))
+        tab = self._ler_fork(ext, base + 8, 8 * n)
+        out, falta = [], tam
+        for off, t in struct.iter_unpack('<II', tab):
+            if t == 0 or t > 2 * BLOCO_DECMPFS:
+                raise ErroSA('bloco comprimido com tamanho inválido')
+            faixas = self._faixas(ext, base + 4 + off, t)
+            for k, (o, q) in enumerate(faixas):
+                out.append([self.inicio + o, q, min(BLOCO_DECMPFS, falta) if k == len(faixas) - 1 else 0, 'zlib'])
+            falta -= BLOCO_DECMPFS
+            if len(out) > MAX_EXTENTS_DECMPFS:
+                raise ErroSA('fragmentado demais')
+        return out
+
+    def ler(self, entrada, *a, **k):
+        ext = getattr(entrada, 'extents_decmpfs', None)
+        if ext is None:
+            yield from super().ler(entrada, *a, **k)
+            return
+        falta, pend = entrada.tamanho, []
+        for off, n, u, _cod in ext:
+            pend.append((off, n))
+            if u == 0 or falta <= 0:
+                continue
+            try:
+                dados = descomprimir_zlib(b''.join(self.leitor.ler(o, q) for o, q in pend), u)
+            except ValueError as erro:
+                raise OSError('decmpfs inválido: %s' % erro) from None
+            pend = []
+            yield dados[:falta]
+            falta -= u
 
     def _registro(self, rec):
         """Registro de folha -> dict de pasta/arquivo, ou None (threads, hard links, links simbólicos e outros)."""
@@ -304,7 +459,8 @@ class Hfs(Volume):
             if modo in (0o120000, 0o060000, 0o020000, 0o010000, 0o140000) or tipo_arq in (b'hlnk', b'fdrp'):   # hlnk sem 'hfs+' e hard link de pasta
                 return None
             return dict(id=fid, pai=pai, nome=nome, dir=False, criado=_data(criado), modif=_data(modif),
-                        acess=_data(acess), fork=_fork(rec, d + 88), comprimido=bool(flags_dono & UF_COMPRESSED))
+                        acess=_data(acess), fork=_fork(rec, d + 88), rsrc=_fork(rec, d + 168),
+                        comprimido=bool(flags_dono & UF_COMPRESSED))
         return None
 
     def varrer(self):
@@ -359,7 +515,7 @@ class Hfs(Volume):
         for r in links:
             real = reais.get(r['hlnk'])
             if real is not None:
-                r = dict(r, fork=real['fork'], comprimido=real['comprimido'])
+                r = dict(r, fork=real['fork'], comprimido=real['comprimido'], rsrc=real.get('rsrc'), attr_id=real['id'])
             e = self._entrada(r, pastas, memo, True)
             if e is not None and e is not _ADIAR:
                 if real is None:

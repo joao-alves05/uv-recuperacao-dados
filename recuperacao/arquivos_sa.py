@@ -122,8 +122,9 @@ def achado_de(e, prefixo=''):
         a['tipo'] = ext.upper()
     if cobre < e.tamanho:
         a['tamanho_total'] = e.tamanho                       # o resto não foi lido: o relatório diz quanto faltou
-    if getattr(e, 'extents_lznt1', None):                    # NTFS comprimido: extents de 3 valores (ver achados.partes_de)
-        a['extents'] = e.extents_lznt1
+    comprimido = getattr(e, 'extents_lznt1', None) or getattr(e, 'extents_decmpfs', None)
+    if comprimido:                                           # NTFS LZNT1 (3 valores) ou HFS+ decmpfs (4): ver achados.partes_de
+        a['extents'] = comprimido
     elif len(runs) <= 1 and (not runs or runs[0][0] is not None):
         a['offset'] = runs[0][0] if runs else 0
     else:

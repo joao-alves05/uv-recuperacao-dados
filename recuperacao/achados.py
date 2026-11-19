@@ -8,6 +8,7 @@ import json
 import os
 import re
 
+from .sa.hfs import descomprimir_zlib
 from .sa.ntfs import lznt1_descomprimir
 
 GRUPOS = ('foto', 'video', 'audio', 'documento', 'compactado', 'banco', 'outro')
@@ -30,9 +31,11 @@ def nome_gerado(offset, extensao):
 
 
 def _extent_valido(e):
-    """[off, n] (off nulo = zeros) ou [off, n, u] (NTFS LZNT1: pedaço de unidade comprimida; u = 0 se a unidade continua,
-    senão os bytes dela depois de descomprimida)."""
-    if not isinstance(e, (list, tuple)) or len(e) not in (2, 3) or type(e[1]) is not int or e[1] <= 0:
+    """[off, n] (off nulo = zeros), [off, n, u] (NTFS LZNT1) ou [off, n, u, 'zlib'] (HFS+ decmpfs): pedaço de unidade
+    comprimida; u = 0 se a unidade continua, senão os bytes dela depois de descomprimida."""
+    if not isinstance(e, (list, tuple)) or len(e) not in (2, 3, 4) or type(e[1]) is not int or e[1] <= 0:
+        return False
+    if len(e) == 4 and e[3] != 'zlib':
         return False
     if len(e) == 2:
         return e[0] is None or (type(e[0]) is int and e[0] >= 0)
@@ -154,6 +157,10 @@ def extents_de(achado):
     return [(int(achado['offset']), int(achado['tamanho']))]
 
 
+class FaixasZlib(list):
+    """Faixas de uma unidade comprimida com zlib (HFS+ decmpfs); a lista comum é LZNT1 (NTFS)."""
+
+
 def partes_de(achado):
     """[(offset, comprimento, faixas)]: `faixas` é None no extent comum (offset None = zeros). Unidade comprimida
     (NTFS LZNT1) sai como (None, bytes depois de descomprimida, [(offset, comprimento), ...] a ler e descomprimir)."""
@@ -164,6 +171,8 @@ def partes_de(achado):
         if len(e) == 2:
             partes.append((None if e[0] is None else int(e[0]), int(e[1]), None))
             continue
+        if not pend:
+            pend = FaixasZlib() if len(e) == 4 else []
         pend.append((int(e[0]), int(e[1])))
         if e[2] > 0:
             partes.append((None, int(e[2]), pend))
@@ -181,9 +190,11 @@ def ler_unidade_lznt1(leitor, faixas, u):
             raise OSError('leitura curta em %d' % off)
         bruto.append(dados)
     try:
+        if isinstance(faixas, FaixasZlib):
+            return descomprimir_zlib(b''.join(bruto), u)
         return lznt1_descomprimir(b''.join(bruto), u).ljust(u, b'\0')
     except ValueError as erro:
-        raise OSError('compressão LZNT1 inválida: %s' % erro) from None
+        raise OSError('compressão inválida: %s' % erro) from None
 
 
 def ler_achado(leitor, achado, maximo=None, bloco=1 << 20):
