@@ -515,7 +515,7 @@ def tiff(j, off, limite, a):
     return res(maximo, 'bom', 100, **extra)
 
 
-# --- caixas ISO (MP4, MOV, HEIC) ------------------------------------------------------------------------------------
+# --- caixas ISO (MP4, MOV, HEIC, CR3) ------------------------------------------------------------------------------------
 _CAIXAS = frozenset(b.encode() for b in (
     'moov', 'mdat', 'free', 'skip', 'wide', 'pnot', 'uuid', 'meta', 'moof', 'mfra', 'sidx', 'styp', 'pdin', 'junk',
     'idat', 'iloc', 'iinf', 'iprp', 'ssix', 'prft', 'emsg', 'PICT', 'prfl', 'cmov'))
@@ -581,6 +581,8 @@ def iso(j, off, limite, a):
     heic = marca in _MARCAS_HEIC
     if heic:
         tipo, ext, grupo = 'HEIC', 'heic', 'foto'
+    elif marca == b'crx ':                         # RAW da Canon (CR3): mesmas caixas, com moov + mdat
+        tipo, ext, grupo = 'CR3', 'cr3', 'foto'
     elif marca == b'qt  ':
         tipo, ext, grupo = 'MOV', 'mov', 'video'
     elif marca in (b'M4A ', b'M4B ', b'M4P '):
