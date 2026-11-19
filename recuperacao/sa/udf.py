@@ -10,7 +10,7 @@ em início + 256 e vale a última sessão que tem conjunto de volume válido. Se
 com `todas_sessoes=True` (ou se nenhuma âncora padrão existe) o disco inteiro é varrido atrás de âncoras.
 
 Fora do que lemos (dito em `limitacao`): partição virtual/VAT (CD-R/RW incremental), esparsa (CD-RW 1.5), de
-metadados (UDF 2.50+, Blu-ray), ICB indireto, fluxos nomeados, ACL e atributos estendidos. Só lê, pelo `Leitor`.
+metadados (UDF 2.50+, Blu-ray), fluxos nomeados, ACL e atributos estendidos. Só lê, pelo `Leitor`.
 """
 import struct
 
@@ -20,7 +20,8 @@ SETOR = 2048
 MAX_DIR = 64 << 20
 MAX_TOTAL_PASTAS = 256 << 20            # bytes de pastas lidos numa varredura (pastas que se sobrepõem não viram bomba)
 MAX_ANCORAS = 64
-LIMITACAO = ('UDF: sem partição virtual (VAT), esparsa ou de metadados, sem ICB indireto, fluxos nomeados e ACL.')
+MAX_SALTOS_ICB = 16                      # Indirect Entries seguidas até o File Entry; mais que isso é laço ou lixo
+LIMITACAO = ('UDF: sem partição virtual (VAT), esparsa ou de metadados, fluxos nomeados e ACL.')
 
 
 def _tag(b, minimo=16):
@@ -120,6 +121,10 @@ def reconhecer(leitor, inicio=0, tamanho=None, todas_sessoes=False):
         return Udf(leitor, inicio, tamanho, todas_sessoes)
     except (ErroSA, OSError, struct.error):
         return None
+
+
+class ErroICBIndireto(ErroSA):
+    """Cadeia de Indirect Entries em laço ou longa demais: o arquivo sai `ruim` com nota, a varredura segue."""
 
 
 class Udf(Volume):
@@ -255,6 +260,16 @@ class Udf(Volume):
         """File Entry / Extended File Entry do bloco `lbn`: {tipo, info, runs, inline, datas}."""
         b = self._particao(lbn, 1)
         t = _tag(b)
+        vistos = {lbn}
+        while t is not None and t[0] == 259:               # Indirect Entry (ECMA-167 4/14.7): o ICB seguinte vem no long_ad em 36
+            if len(vistos) > MAX_SALTOS_ICB:
+                raise ErroICBIndireto('cadeia de ICB indireto com mais de %d saltos' % MAX_SALTOS_ICB)
+            lbn = struct.unpack_from('<I', b, 40)[0]
+            if lbn in vistos:
+                raise ErroICBIndireto('cadeia de ICB indireto em laço (bloco %d)' % lbn)
+            vistos.add(lbn)
+            b = self._particao(lbn, 1)
+            t = _tag(b)
         if t is None or t[0] not in (261, 266):
             raise ErroSA('ICB UDF inválido no bloco %d.' % lbn)
         tipo_arq, flags = b[27], struct.unpack_from('<H', b, 34)[0]
@@ -322,6 +337,10 @@ class Udf(Volume):
             nome = limpar_nome(_nome_udf(nome_b))
             try:
                 f = self._ler_icb(icb_lbn)
+            except ErroICBIndireto as e:
+                yield Entrada(nome=nome, caminho=juntar(pai, nome), eh_dir=False, tamanho=0, apagado=bool(carac & 0x04),
+                              estado='ruim', ident=icb_lbn, runs=[], nota='%s; arquivo não lido' % e)
+                continue
             except (ErroSA, OSError):
                 continue
             if f['tipo'] not in (0, 4, 5):

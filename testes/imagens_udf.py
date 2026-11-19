@@ -40,8 +40,9 @@ def fid(nome, icb, carac=0):
 class Sessao:
     """Uma sessão UDF a partir do setor `base`. Arquivos: {caminho: bytes | ('apagado', bytes)}; pastas implícitas."""
 
-    def __init__(self, arquivos, base=0, rotulo='UDFTESTE', alt_fim=None):
-        self.arq, self.base, self.rotulo, self.alt_fim = arquivos, base, rotulo, alt_fim
+    def __init__(self, arquivos, base=0, rotulo='UDFTESTE', alt_fim=None, indireto=None):
+        # indireto: {caminho: n} = n Indirect Entries (tag 259) antes do File Entry; {caminho: 'laco'} = 2 que apontam uma para a outra
+        self.arq, self.base, self.rotulo, self.alt_fim, self.indireto = arquivos, base, rotulo, alt_fim, indireto or {}
 
     def gerar(self, img):
         base = self.base
@@ -76,13 +77,34 @@ class Sessao:
             corpo[160:] = ads
             poe(ps + lbn, tag(261, bytes(corpo), lbn))
 
-        def gravar_pasta(no, lbn_fe, lbn_pai):
+        def indireta(lbn, destino):
+            corpo = bytearray(36)
+            struct.pack_into('<IHHHBB', corpo, 0, 0, 4, 0, 1, 0, 12)            # ICB tag: tipo 12 = Indirect Entry
+            struct.pack_into('<IIH', corpo, 20, SETOR, destino, 0)              # long_ad do próximo ICB (36)
+            poe(ps + lbn, tag(259, bytes(corpo), lbn))
+
+        def cadeia(caminho, real):
+            """Bloco que a pasta deve apontar para o arquivo: `real`, ou o início da cadeia de Indirect Entries."""
+            n = self.indireto.get(caminho)
+            if not n:
+                return real
+            if n == 'laco':
+                a, b = aloc(), aloc()
+                indireta(a, b)
+                indireta(b, a)
+                return a
+            blocos = [aloc() for _ in range(n)]
+            for i, bl in enumerate(blocos):
+                indireta(bl, blocos[i + 1] if i + 1 < n else real)
+            return blocos[0]
+
+        def gravar_pasta(no, lbn_fe, lbn_pai, prefixo=''):
             fids = fid('', lbn_pai, 0x0A)
             for nome, v in no.items():
                 if isinstance(v, dict):
                     l = aloc()
                     d = aloc()
-                    gravar_pasta(v, l, lbn_fe)
+                    gravar_pasta(v, l, lbn_fe, prefixo + nome + '/')
                     fids += fid(nome, l, 0x02)
                 else:
                     apagado = isinstance(v, tuple)
@@ -95,7 +117,7 @@ class Sessao:
                         ini = aloc(n)
                         img[(ps + ini) * SETOR: (ps + ini) * SETOR + len(dados)] = dados
                         fe(l, 5, len(dados), 0, struct.pack('<II', len(dados), ini))
-                    fids += fid(nome, l, 0x04 if apagado else 0)
+                    fids += fid(nome, cadeia(prefixo + nome, l), 0x04 if apagado else 0)
             d = aloc()
             img[(ps + d) * SETOR: (ps + d) * SETOR + len(fids)] = fids
             fe(lbn_fe, 4, len(fids), 0, struct.pack('<II', len(fids), d))
