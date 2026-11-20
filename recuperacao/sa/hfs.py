@@ -17,7 +17,9 @@ O que NÃO dá para fazer, e por quê:
     escondida). Se o inode não está no catálogo, o link sai `ruim` com a explicação. Hard link de PASTA (Time Machine,
     ".HFS+ Private Directory Data") NÃO é listado: o conteúdo não aparece pelo caminho do link.
   * Volume com journal sujo: o catálogo no disco pode estar atrasado em relação ao journal, que não é reaplicado.
-  * HFS+ embrulhado em HFS clássico (assinatura "BD") não é reconhecido.
+  * HFS+ embrulhado em HFS clássico (MDB "BD" no setor 2, drEmbedSigWord "H+", Mac OS 8.1 a 9): o deslocamento do
+    volume embutido é drAlBlSt * 512 + startBlock * drAlBlkSiz, e o resto lê como volume normal. Extent que não
+    cabe na imagem: o volume é só reconhecido, com aviso. HFS clássico sem HFS+ embutido não é lido.
 """
 import struct
 import unicodedata
@@ -77,17 +79,49 @@ def _cabecalho(b):
                 extents_fork=_fork(b, 192), catalogo_fork=_fork(b, 272), atributos_fork=_fork(b, 352))
 
 
+class ErroEmbrulhado(ErroSA):
+    """O HFS clássico anuncia um HFS+ embutido, mas o extent dele é inválido ou está fora da imagem."""
+
+
 def reconhecer(leitor, inicio=0, tamanho=None):
     try:
         return Hfs(leitor, inicio, tamanho)
+    except ErroEmbrulhado as erro:
+        from .outros import Reconhecido
+        v = Reconhecido(leitor, inicio, tamanho, 'HFS+')
+        v.limitacao = '%s Use a busca profunda (carving) para achar os arquivos.' % erro
+        return v
     except (ErroSA, OSError, struct.error):
         return None
+
+
+def _embutido(mdb, tamanho):
+    """(deslocamento, bytes) do HFS+ embutido num MDB do HFS clássico, ou None se não é wrapper. ErroEmbrulhado se o
+    extent é inválido ou passa do fim."""
+    if len(mdb) < 128 or mdb[:2] != b'BD' or mdb[124:126] != b'H+':
+        return None
+    bloco, = struct.unpack_from('>I', mdb, 20)
+    primeiro, = struct.unpack_from('>H', mdb, 28)
+    ini, cont = struct.unpack_from('>HH', mdb, 126)
+    off, n = primeiro * 512 + ini * bloco, cont * bloco
+    if bloco == 0 or bloco % 512 or cont == 0 or n < 4096 or off + n > tamanho:
+        raise ErroEmbrulhado('O disco é um HFS clássico com um HFS+ embutido, mas a posição dele (bloco %d, %d blocos) '
+                             'é inválida ou passa do fim da imagem.' % (ini, cont))
+    return off, n
 
 
 class Hfs(Volume):
     def __init__(self, leitor, inicio=0, tamanho=None):
         super().__init__(leitor, inicio, tamanho)
         self.usou_reserva = False
+        self.embrulhado = False
+        fim_total = self.tamanho
+        try:
+            emb = _embutido(self._ler(1024, 512), self.tamanho)
+        except (OSError, struct.error):
+            emb = None
+        if emb is not None:                                    # offsets do HFS+ embutido valem a partir do começo dele
+            self.inicio, self.tamanho, self.embrulhado = self.inicio + emb[0], emb[1], True
         cab = None
         try:
             cab = _cabecalho(self._ler(1024, 512))
@@ -98,7 +132,14 @@ class Hfs(Volume):
                 cab = _cabecalho(self._ler(self.tamanho - 1024, 512))     # cópia no fim do volume
                 self.usou_reserva = True
             except (ErroSA, OSError, struct.error):
-                raise ErroSA('Nenhum cabeçalho HFS+ legível (nem a cópia do fim).') from None
+                try:
+                    if not self.embrulhado:
+                        raise ErroSA('sem cópia')
+                    # no wrapper a cópia fica no fim do disco, não no do volume embutido
+                    cab = _cabecalho(self.leitor.ler(inicio + fim_total - 1024, 512))
+                    self.usou_reserva = True
+                except (ErroSA, OSError, struct.error):
+                    raise ErroSA('Nenhum cabeçalho HFS+ legível (nem a cópia do fim).') from None
         self.hfsx = cab['hfsx']
         self.tipo = 'HFSX' if self.hfsx else 'HFS+'
         self.bs, self.total, self.journal = cab['bs'], cab['total'], bool(cab['atrib'] & 0x2000)
