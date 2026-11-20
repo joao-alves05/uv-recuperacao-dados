@@ -16,9 +16,15 @@ UDF 2.00+ = tipo de arquivo 248 com cabeçalho; UDF 1.50 = só a tabela, termina
 VAT ilegível não derruba o volume: abre sem listar nada e o motivo vai em `limitacao`. Só a partição virtual é
 traduzida; referências à física no mesmo volume são lidas como se fossem virtuais.
 
-Fora do que lemos (dito em `limitacao`): partição esparsa (CD-RW 1.5), de metadados (UDF 2.50+, Blu-ray), fluxos
-nomeados, ACL e atributos estendidos. Só lê, pelo `Leitor`.
+Partição esparsa (CD-RW em pacotes, UDF 1.50+): o mapa tipo 2 "*UDF Sparable Partition" traz o tamanho do pacote e
+até 4 cópias da Sparing Table ("*UDF Sparing Table", checada por tag, identificador e CRC). Bloco cujo pacote está na
+tabela é lido do pacote de reposição (endereços relativos ao início da partição, como o kernel do Linux). Vale a
+primeira cópia válida; nenhuma válida = aviso em `limitacao` e leitura direta, sem remapear.
+
+Fora do que lemos (dito em `limitacao`): partição de metadados (UDF 2.50+, Blu-ray), fluxos nomeados, ACL e
+atributos estendidos. Só lê, pelo `Leitor`.
 """
+import binascii
 import struct
 
 from .base import ErroSA, ErroTeto, Entrada, Volume, MAX_PROFUNDIDADE, epoch, juntar, limpar_nome
@@ -30,7 +36,8 @@ MAX_ANCORAS = 64
 MAX_SALTOS_ICB = 16                      # Indirect Entries seguidas até o File Entry; mais que isso é laço ou lixo
 MAX_BUSCA_VAT = 64                       # setores procurados de trás para frente atrás do File Entry da VAT
 MAX_VAT = 64 << 20                       # bytes de VAT aceitos (16 milhões de blocos virtuais)
-LIMITACAO = ('UDF: sem partição esparsa ou de metadados, fluxos nomeados e ACL.')
+MAX_ESPARSA = 1 << 20                    # entradas de pacote remapeado aceitas na Sparing Table
+LIMITACAO = ('UDF: sem partição de metadados, fluxos nomeados e ACL.')
 
 
 def _tag(b, minimo=16):
@@ -143,6 +150,8 @@ class Udf(Volume):
         super().__init__(leitor, inicio, tamanho)
         self.limitacao = LIMITACAO
         self.vat = None                                     # lista bloco virtual -> bloco físico, só em partição virtual
+        self.spar = None                                    # {1º bloco do pacote original: 1º bloco do pacote de reposição}
+        self.spar_pacote = 0
         self._raiz = None
         self._sessoes = None
         sessoes = None
@@ -211,7 +220,7 @@ class Udf(Volume):
         self.part_ini = struct.unpack_from('<I', pd, 188)[0]
         self.part_tam = struct.unpack_from('<I', pd, 192)[0]
         tam_mapas, n_mapas = struct.unpack_from('<II', lvd, 264)
-        off, mapa, virtual = 440, None, False
+        off, mapa, virtual, esparsa = 440, None, False, None
         for _ in range(min(n_mapas, 8)):
             tipo, ln = lvd[off], lvd[off + 1]
             if ln < 2:
@@ -221,11 +230,18 @@ class Udf(Volume):
                     mapa = off
             elif tipo == 2 and ln >= 40 and lvd[off + 5: off + 27] == b'*UDF Virtual Partition':
                 virtual = True
+            elif (tipo == 2 and ln >= 64 and lvd[off + 5: off + 28] == b'*UDF Sparable Partition'
+                  and struct.unpack_from('<H', lvd, off + 38)[0] == num_part and mapa is None):
+                mapa = off
+                esparsa = lvd[off: off + ln]
             else:
                 raise ErroSA('Partição UDF esparsa ou de metadados: não suportada.')
             off += ln
         if mapa is None:
             raise ErroSA('O volume UDF não tem partição física legível.')
+        self.spar, self.spar_pacote = None, 0
+        if esparsa:
+            self._ler_esparsa(esparsa)
         self.vat = None
         if virtual:
             try:
@@ -284,17 +300,49 @@ class Udf(Volume):
             return [None if v == 0xFFFFFFFF else v for v in tab]
         raise ErroSA(str(ultimo) if ultimo else 'VAT não encontrada nos últimos %d setores gravados' % MAX_BUSCA_VAT)
 
+    def _ler_esparsa(self, mapa):
+        """Sparing Table da primeira cópia válida; sem nenhuma, avisa em `limitacao` e deixa a leitura direta."""
+        pacote, n, tam = struct.unpack_from('<HBxI', mapa, 40)
+        motivo = 'nenhuma cópia da Sparing Table'
+        if pacote == 0:
+            motivo = 'tamanho de pacote zero'
+        else:
+            for k in range(min(n, 4)):
+                loc = struct.unpack_from('<I', mapa, 48 + 4 * k)[0]
+                try:
+                    b = self._setor(loc, max(1, min(-(-tam // SETOR), 64)))
+                    if b[17:35] != b'*UDF Sparing Table':
+                        raise ErroSA('sem o identificador')
+                    crc, comp = struct.unpack_from('<HH', b, 8)         # a tag da Sparing Table tem id 0: só o checksum vale
+                    if (sum(b[:4]) + sum(b[5:16])) & 0xFF != b[4] or 16 + comp > len(b) or binascii.crc_hqx(b[16:16 + comp], 0) != crc:
+                        raise ErroSA('tag ou CRC inválido')
+                    qtd = struct.unpack_from('<H', b, 48)[0]
+                    tab = {}
+                    for i in range(min(qtd, MAX_ESPARSA, (len(b) - 56) // 8)):
+                        orig, novo = struct.unpack_from('<II', b, 56 + 8 * i)
+                        if orig < 0xFFFFFFF0:
+                            tab[orig] = novo
+                    self.spar, self.spar_pacote = tab, pacote
+                    return
+                except (ErroSA, OSError, struct.error) as e:
+                    motivo = 'cópia %d da Sparing Table ilegível (%s)' % (k + 1, e)
+        self.limitacao = '%s AVISO: %s; blocos de pacotes remapeados serão lidos sem remapear.' % (self.limitacao, motivo)
+
     def _fisico(self, lbn):
-        """Bloco físico da partição para um bloco lógico (traduzido pela VAT quando a partição é virtual)."""
-        if self.vat is None:
-            return lbn
-        if not 0 <= lbn < len(self.vat) or self.vat[lbn] is None:
-            raise ErroSA('bloco virtual UDF %d sem entrada na VAT' % lbn)
-        return self.vat[lbn]
+        """Bloco físico da partição para um bloco lógico: traduzido pela VAT (partição virtual) e depois pela Sparing Table."""
+        if self.vat is not None:
+            if not 0 <= lbn < len(self.vat) or self.vat[lbn] is None:
+                raise ErroSA('bloco virtual UDF %d sem entrada na VAT' % lbn)
+            lbn = self.vat[lbn]
+        if self.spar:
+            base = lbn - lbn % self.spar_pacote
+            if base in self.spar:
+                lbn = self.spar[base] + lbn - base
+        return lbn
 
     def _particao(self, lbn, n=1):
         """n blocos a partir do bloco `lbn` da partição."""
-        if self.vat is not None:
+        if self.vat is not None or self.spar:
             return b''.join(self._particao_fisica(self._fisico(lbn + k), 1) for k in range(n))
         return self._particao_fisica(lbn, n)
 
@@ -324,7 +372,7 @@ class Udf(Volume):
                 ad_bytes, off = b[24:24 + ln], 0
                 continue
             n = min(n, falta)
-            if kind == 0 and self.vat is not None:         # cada bloco virtual vai para o seu físico; junta os vizinhos
+            if kind == 0 and (self.vat is not None or self.spar):   # cada bloco lógico vai para o seu físico; junta os vizinhos
                 restante, k = n, 0
                 while restante > 0:
                     f = self._fisico(lbn + k)

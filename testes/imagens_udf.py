@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Monta imagens de disco óptico só em Python: UDF 1.02 (com várias sessões) e ISO 9660 com Rock Ridge."""
+import binascii
 import struct
 
 SETOR = 2048
@@ -43,12 +44,16 @@ DESLOCA_VIRTUAL = 100
 class Sessao:
     """Uma sessão UDF a partir do setor `base`. Arquivos: {caminho: bytes | ('apagado', bytes)}; pastas implícitas."""
 
-    def __init__(self, arquivos, base=0, rotulo='UDFTESTE', alt_fim=None, indireto=None, vat=None):
+    def __init__(self, arquivos, base=0, rotulo='UDFTESTE', alt_fim=None, indireto=None, vat=None, esparsa=None):
         # indireto: {caminho: n} = n Indirect Entries (tag 259) antes do File Entry; {caminho: 'laco'} = 2 que apontam uma para a outra
         # vat: None = partição física; '2.00' ou '1.50' = partição virtual com a VAT no último setor da imagem; 'ruim' = VAT 2.00 com
         # cabeçalho corrompido. Na virtual, o bloco virtual é o físico + DESLOCA_VIRTUAL (nunca batem).
         self.arq, self.base, self.rotulo, self.alt_fim, self.indireto = arquivos, base, rotulo, alt_fim, indireto or {}
         self.vat = vat
+        # esparsa: None = partição física; {'pacote': P, 'remapa': caminho, 'copias': ['ruim', 'ok', ...]} = partição esparsa
+        # (1 a 4 cópias da Sparing Table em base+200..; 'ruim' corrompe a cópia sem refazer o CRC). Os pacotes do arquivo
+        # `remapa` são gravados no pacote de reposição e o original fica com lixo.
+        self.esparsa = esparsa
 
     def gerar(self, img):
         base = self.base
@@ -105,6 +110,8 @@ class Sessao:
                 indireta(bl, blocos[i + 1] if i + 1 < n else real)
             return blocos[0]
 
+        dados_em = {}
+
         def gravar_pasta(no, lbn_fe, lbn_pai, prefixo=''):
             fids = fid('', virt(lbn_pai), 0x0A)
             for nome, v in no.items():
@@ -121,7 +128,12 @@ class Sessao:
                         fe(l, 5, len(dados), 3, dados)
                     else:
                         n = -(-len(dados) // SETOR)
+                        if self.esparsa:                               # dados alinhados em pacote, sozinhos nele
+                            P = self.esparsa['pacote']
+                            proximo[0] = -(-proximo[0] // P) * P
+                            n = -(-n // P) * P
                         ini = aloc(n)
+                        dados_em[prefixo + nome] = (ini, n)
                         img[(ps + ini) * SETOR: (ps + ini) * SETOR + len(dados)] = dados
                         fe(l, 5, len(dados), 0, struct.pack('<II', len(dados), virt(ini)))
                     fids += fid(nome, virt(cadeia(prefixo + nome, l)), 0x04 if apagado else 0)
@@ -130,6 +142,35 @@ class Sessao:
             fe(lbn_fe, 4, len(fids), 0, struct.pack('<II', len(fids), virt(d)))
 
         gravar_pasta(raiz, 1, 1)
+        spar_map = b''
+        if self.esparsa:
+            P = self.esparsa['pacote']
+            proximo[0] = -(-proximo[0] // P) * P
+            ini, n = dados_em[self.esparsa['remapa']]
+            entradas = []
+            for orig in range(ini, ini + n, P):
+                novo = aloc(P)
+                img[(ps + novo) * SETOR:(ps + novo + P) * SETOR] = img[(ps + orig) * SETOR:(ps + orig + P) * SETOR]
+                img[(ps + orig) * SETOR:(ps + orig + P) * SETOR] = bytes([0xEE]) * (P * SETOR)         # pacote defeituoso: lixo
+                entradas.append((orig, novo))
+            corpo = bytearray(40 + 8 * len(entradas))
+            corpo[1:19] = b'*UDF Sparing Table'
+            struct.pack_into('<HHI', corpo, 32, len(entradas), 0, 1)
+            for i, (o, nv) in enumerate(entradas):
+                struct.pack_into('<II', corpo, 40 + 8 * i, o, nv)
+            locs = []
+            for k, estado in enumerate(self.esparsa['copias']):
+                loc = base + 200 + k
+                t = bytearray(tag(0, bytes(corpo), loc))
+                struct.pack_into('<H', t, 8, binascii.crc_hqx(bytes(t[16:16 + len(corpo)]), 0))
+                t[4] = (sum(t[:4]) + sum(t[5:16])) & 0xFF
+                if estado == 'ruim':
+                    t[16 + 40] ^= 0xFF                                    # corrompe a 1ª entrada; o CRC deixa de bater
+                poe(loc, bytes(t))
+                locs.append(loc)
+            spar_map = (bytes([2, 64, 0, 0, 0]) + b'*UDF Sparable Partition'.ljust(23, bytes(1)) + bytes(8)
+                        + struct.pack('<HHHBBI', 1, 1, P, len(locs), 0, len(corpo) + 16)
+                        + b''.join(struct.pack('<I', l) for l in locs)).ljust(64, bytes(1))
         total_blocos = proximo[0]
         tam_part = total_blocos + 1
         if self.vat:                                       # VAT: dados no penúltimo setor da imagem e File Entry no último
@@ -170,6 +211,9 @@ class Sessao:
             struct.pack_into('<II', lvd, 232, SETOR, virt(0))                           # FSD: tamanho (248), bloco (252)
             struct.pack_into('<II', lvd, 248, 6 + (64 if self.vat else 0), 2 if self.vat else 1)   # tamanho dos mapas (264), quantidade (268)
             lvd[424:430] = struct.pack('<BBHH', 1, 6, 1, 1)                       # mapa tipo 1 (440)
+            if spar_map:                                                          # mapa tipo 2 esparsa no lugar do tipo 1
+                struct.pack_into('<II', lvd, 248, 64, 1)
+                lvd[424:488] = spar_map
             if self.vat:                                                          # mapa tipo 2, partição virtual (446)
                 lvd[430:434] = bytes([2, 64, 0, 0])
                 lvd[435:435 + 22] = b'*UDF Virtual Partition'
