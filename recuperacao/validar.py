@@ -1282,6 +1282,42 @@ def generico(j, off, limite, a):
     return None
 
 
+# --- MPEG-TS (TS) e AVCHD (MTS/M2TS) ----------------------------------------------------------------------------------
+_TS_MIN_PACOTES = 5               # 0x47 é um byte comum: só vale com 5 sync seguidos no passo certo
+
+
+def ts(j, off, limite, a):
+    """TS: pacotes de 188 bytes com 0x47 no primeiro. MTS/M2TS: 192 (4 de timestamp + 188), 0x47 no offset 4
+    (`cabecalho_offset` da assinatura). O arquivo vai até a cadência de sync quebrar; só pacote inteiro conta."""
+    desl = a.get('cabecalho_offset', 0)
+    passo = 192 if desl == 4 else 188
+    teste = j.ler(off, _TS_MIN_PACOTES * passo)       # leitura pequena primeiro: quase todo 0x47 do disco morre aqui
+    if len(teste) < _TS_MIN_PACOTES * passo or teste[desl::passo].count(0x47) != _TS_MIN_PACOTES:
+        return None
+    n, quebrou, bloco = 0, False, passo * 4096
+    while not quebrou:
+        ini = n * passo
+        dados = j.ler(off + ini, min(bloco, limite - ini))
+        if len(dados) < passo:
+            break
+        inteiros = len(dados) // passo
+        sync = dados[desl:inteiros * passo:passo]
+        bons = inteiros if sync.count(0x47) == inteiros else len(sync) - len(sync.lstrip(b'G'))
+        n += bons
+        quebrou = bons < inteiros
+        if len(dados) < min(bloco, limite - ini):      # a mídia acabou antes do pedido
+            break
+    if n < _TS_MIN_PACOTES:
+        return None
+    tam = n * passo
+    resto = 0 if quebrou else len(j.ler(off + tam, passo - 1))
+    if resto:
+        return res(tam, 'parcial', 60, tipo='MTS' if passo == 192 else 'TS', extensao='mts' if passo == 192 else 'ts',
+                   grupo='video')
+    return res(tam, 'bom', 100, tipo='MTS' if passo == 192 else 'TS', extensao='mts' if passo == 192 else 'ts',
+               grupo='video')
+
+
 VALIDADORES = {'jpg': jpg, 'png': png, 'gif': gif, 'bmp': bmp, 'tiff': tiff, 'iso': iso, 'riff': riff, 'mp3': mp3,
-               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ole2': ole2, 'rtf': rtf,
+               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'ole2': ole2, 'rtf': rtf,
                'generico': generico}

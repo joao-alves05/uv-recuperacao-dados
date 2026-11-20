@@ -19,6 +19,8 @@
     {"tipo": "7Z", "grupo": "compactado", "extensao": "7z", "cabecalho": "377ABCAF271C", "tamanho_max": 4294967296, "validar": "7z"},
     {"tipo": "SQLITE", "grupo": "banco", "extensao": "sqlite", "cabecalho": "53514C69746520666F726D6174203300", "tamanho_max": 4294967296, "validar": "sqlite"},
     {"tipo": "DOC", "grupo": "documento", "extensao": "doc", "cabecalho": "D0CF11E0A1B11AE1", "tamanho_max": 268435456, "validar": "ole2"},
-    {"tipo": "RTF", "grupo": "documento", "extensao": "rtf", "cabecalho": "7B5C72746631", "tamanho_max": 67108864, "validar": "rtf"}
+    {"tipo": "RTF", "grupo": "documento", "extensao": "rtf", "cabecalho": "7B5C72746631", "tamanho_max": 67108864, "validar": "rtf"},
+    {"tipo": "TS", "grupo": "video", "extensao": "ts", "cabecalho": "474000", "tamanho_max": 4294967296, "validar": "ts"},
+    {"tipo": "MTS", "grupo": "video", "extensao": "mts", "cabecalho": "474000", "cabecalho_offset": 4, "tamanho_max": 4294967296, "validar": "ts"}
   ]
 }
