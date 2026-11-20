@@ -21,8 +21,14 @@ até 4 cópias da Sparing Table ("*UDF Sparing Table", checada por tag, identifi
 tabela é lido do pacote de reposição (endereços relativos ao início da partição, como o kernel do Linux). Vale a
 primeira cópia válida; nenhuma válida = aviso em `limitacao` e leitura direta, sem remapear.
 
-Fora do que lemos (dito em `limitacao`): partição de metadados (UDF 2.50+, Blu-ray), fluxos nomeados, ACL e
-atributos estendidos. Só lê, pelo `Leitor`.
+Partição de metadados (UDF 2.50+, Blu-ray e HD em UDF): o mapa tipo 2 "*UDF Metadata Partition" aponta o Metadata
+File (File Entry tipo 250) e o Metadata Mirror File (251). Os ICBs e os diretórios ficam dentro dele: o bloco da
+partição de metadados é um deslocamento no arquivo, traduzido pelos extents dele para a partição física (a
+"partition reference" dos long_ad e dos FIDs diz quem é quem; short_ad herda a do ICB). Se o Metadata File ou o
+conteúdo dele (conjunto de arquivos) estiver ilegível, lê pelo espelho e avisa; nenhum dos dois serve = aviso e nada
+listado. O Metadata Bitmap não é lido. Os dados dos arquivos ficam na partição física.
+
+Fora do que lemos (dito em `limitacao`): fluxos nomeados, ACL e atributos estendidos. Só lê, pelo `Leitor`.
 """
 import binascii
 import struct
@@ -37,7 +43,7 @@ MAX_SALTOS_ICB = 16                      # Indirect Entries seguidas até o File
 MAX_BUSCA_VAT = 64                       # setores procurados de trás para frente atrás do File Entry da VAT
 MAX_VAT = 64 << 20                       # bytes de VAT aceitos (16 milhões de blocos virtuais)
 MAX_ESPARSA = 1 << 20                    # entradas de pacote remapeado aceitas na Sparing Table
-LIMITACAO = ('UDF: sem partição de metadados, fluxos nomeados e ACL.')
+LIMITACAO = ('UDF: partição de metadados lida pelo Metadata File, sem o bitmap; sem fluxos nomeados e ACL.')
 
 
 def _tag(b, minimo=16):
@@ -150,6 +156,8 @@ class Udf(Volume):
         super().__init__(leitor, inicio, tamanho)
         self.limitacao = LIMITACAO
         self.vat = None                                     # lista bloco virtual -> bloco físico, só em partição virtual
+        self.meta, self.meta_ref = None, None               # [(início no arquivo, offset absoluto, bytes)] do Metadata File; nº da partition reference
+        self._raiz_ref = None
         self.spar = None                                    # {1º bloco do pacote original: 1º bloco do pacote de reposição}
         self.spar_pacote = 0
         self._raiz = None
@@ -220,8 +228,9 @@ class Udf(Volume):
         self.part_ini = struct.unpack_from('<I', pd, 188)[0]
         self.part_tam = struct.unpack_from('<I', pd, 192)[0]
         tam_mapas, n_mapas = struct.unpack_from('<II', lvd, 264)
-        off, mapa, virtual, esparsa = 440, None, False, None
-        for _ in range(min(n_mapas, 8)):
+        off, mapa, virtual, esparsa, meta_map = 440, None, False, None, None
+        self.meta, self.meta_ref = None, None
+        for ref in range(min(n_mapas, 8)):
             tipo, ln = lvd[off], lvd[off + 1]
             if ln < 2:
                 break
@@ -234,8 +243,12 @@ class Udf(Volume):
                   and struct.unpack_from('<H', lvd, off + 38)[0] == num_part and mapa is None):
                 mapa = off
                 esparsa = lvd[off: off + ln]
+            elif (tipo == 2 and ln >= 60 and lvd[off + 5: off + 28] == b'*UDF Metadata Partition'
+                  and struct.unpack_from('<H', lvd, off + 38)[0] == num_part):
+                meta_map = struct.unpack_from('<II', lvd, off + 40)         # Metadata File, Metadata Mirror File
+                self.meta_ref = ref
             else:
-                raise ErroSA('Partição UDF esparsa ou de metadados: não suportada.')
+                raise ErroSA('Tipo de partição UDF não suportado.')
             off += ln
         if mapa is None:
             raise ErroSA('O volume UDF não tem partição física legível.')
@@ -250,19 +263,58 @@ class Udf(Volume):
                 self.limitacao = '%s AVISO: VAT ilegível (%s); os arquivos da partição virtual não foram listados.' % (LIMITACAO, e)
                 self._raiz = None
                 return
-        fsd = struct.unpack_from('<II', lvd, 248)          # tamanho, bloco (long_ad do conjunto de arquivos)
-        fsd_lbn = fsd[1]
+        fsd = struct.unpack_from('<IIH', lvd, 248)         # tamanho, bloco e partition reference (long_ad do conjunto de arquivos)
+        if meta_map is None:
+            self._raiz, self._raiz_ref = self._achar_fsd(fsd[1], fsd[2])
+            return
+        avisos = []
+        for k, (nome, loc, tipo) in enumerate((('Metadata File', meta_map[0], 250), ('Metadata Mirror File', meta_map[1], 251))):
+            try:
+                self.meta = None
+                self.meta = self._ler_meta(loc, tipo)
+                self._raiz, self._raiz_ref = self._achar_fsd(fsd[1], fsd[2])
+                if k:
+                    self.limitacao = '%s AVISO: %s; lido pelo Metadata Mirror File.' % (self.limitacao, avisos[0])
+                return
+            except (ErroSA, OSError, struct.error) as e:
+                avisos.append('%s ilegível (%s)' % (nome, e))
+        self.meta, self._raiz = None, None
+        self.limitacao = '%s AVISO: %s; os arquivos da partição de metadados não foram listados.' % (self.limitacao, '; '.join(avisos))
+
+    def _achar_fsd(self, fsd_lbn, ref):
         for k in range(16):
-            b = self._particao(fsd_lbn + k, 1)
+            b = self._particao(fsd_lbn + k, 1, ref)
             t = _tag(b)
             if t and t[0] == 256:
-                self._raiz = struct.unpack_from('<II', b, 400)[1]
                 if not struct.unpack_from('<I', b, 400)[0]:
                     raise ErroSA('Conjunto de arquivos UDF sem pasta raiz.')
-                return
+                return struct.unpack_from('<I', b, 404)[0], struct.unpack_from('<H', b, 408)[0]
             if t and t[0] == 8:
                 break
         raise ErroSA('Não achei o conjunto de arquivos (FSD) do UDF.')
+
+    def _ler_meta(self, loc, tipo):
+        """Extents do Metadata File (ou do espelho) no bloco físico `loc`: [(início no arquivo, offset absoluto, bytes)]."""
+        r = self._ler_icb(loc)
+        if r['tipo'] != tipo or r['runs'] is None:
+            raise ErroSA('File Entry de metadados inválido no bloco %d' % loc)
+        out, ini = [], 0
+        for off, n in r['runs']:
+            out.append((ini, off, n))
+            ini += n
+        if not out:
+            raise ErroSA('arquivo de metadados vazio')
+        return out
+
+    def _meta_fisico(self, lbn):
+        """Bloco físico (relativo à partição) do bloco `lbn` da partição de metadados."""
+        b = lbn * SETOR
+        for ini, off, n in self.meta:
+            if ini <= b < ini + n:
+                if off is None:
+                    break
+                return (off + b - ini - self.inicio) // SETOR - self.part_ini
+        raise ErroSA('bloco de metadados %d fora do Metadata File' % lbn)
 
     def _ler_vat(self, ancora):
         """Tabela (lista bloco virtual -> bloco físico; None = livre) do File Entry da VAT mais perto do fim gravado."""
@@ -328,9 +380,11 @@ class Udf(Volume):
                     motivo = 'cópia %d da Sparing Table ilegível (%s)' % (k + 1, e)
         self.limitacao = '%s AVISO: %s; blocos de pacotes remapeados serão lidos sem remapear.' % (self.limitacao, motivo)
 
-    def _fisico(self, lbn):
+    def _fisico(self, lbn, ref=None):
         """Bloco físico da partição para um bloco lógico: traduzido pela VAT (partição virtual) e depois pela Sparing Table."""
-        if self.vat is not None:
+        if self.meta is not None and ref == self.meta_ref:
+            lbn = self._meta_fisico(lbn)
+        elif self.vat is not None:
             if not 0 <= lbn < len(self.vat) or self.vat[lbn] is None:
                 raise ErroSA('bloco virtual UDF %d sem entrada na VAT' % lbn)
             lbn = self.vat[lbn]
@@ -340,10 +394,10 @@ class Udf(Volume):
                 lbn = self.spar[base] + lbn - base
         return lbn
 
-    def _particao(self, lbn, n=1):
-        """n blocos a partir do bloco `lbn` da partição."""
-        if self.vat is not None or self.spar:
-            return b''.join(self._particao_fisica(self._fisico(lbn + k), 1) for k in range(n))
+    def _particao(self, lbn, n=1, ref=None):
+        """n blocos a partir do bloco `lbn` da partição (`ref`: partition reference, só importa com partição de metadados)."""
+        if self.vat is not None or self.spar or self.meta is not None:
+            return b''.join(self._particao_fisica(self._fisico(lbn + k, ref), 1) for k in range(n))
         return self._particao_fisica(lbn, n)
 
     def _particao_fisica(self, lbn, n=1):
@@ -352,30 +406,31 @@ class Udf(Volume):
         return self._setor(self.part_ini + lbn, n)
 
     # --- ICBs e extensões ------------------------------------------------------
-    def _extents(self, ad_bytes, tipo_aloc, info, fim_volume):
+    def _extents(self, ad_bytes, tipo_aloc, info, fim_volume, ref=None):
         """[(offset absoluto no leitor ou None, bytes)] de uma lista de descritores de alocação, cortada em `info`."""
         runs, falta = [], info
         tam_ad = 8 if tipo_aloc == 0 else 16
         off, vistos = 0, 0
         while off + tam_ad <= len(ad_bytes) and falta > 0 and vistos < 4096:
             comp, lbn = struct.unpack_from('<II', ad_bytes, off)
+            ref_ad = struct.unpack_from('<H', ad_bytes, off + 8)[0] if tam_ad == 16 else ref      # short_ad herda a do ICB
             off += tam_ad
             vistos += 1
             kind, n = comp >> 30, comp & 0x3FFFFFFF
             if n == 0:
                 break
             if kind == 3:                                  # continua noutro bloco (AED)
-                b = self._particao(lbn, 1)
+                b = self._particao(lbn, 1, ref_ad)
                 if (_tag(b) or (0,))[0] != 258:
                     raise ErroSA('Continuação de alocação UDF inválida.')
                 ln = struct.unpack_from('<I', b, 20)[0]
                 ad_bytes, off = b[24:24 + ln], 0
                 continue
             n = min(n, falta)
-            if kind == 0 and (self.vat is not None or self.spar):   # cada bloco lógico vai para o seu físico; junta os vizinhos
+            if kind == 0 and (self.vat is not None or self.spar or self.meta is not None):   # cada bloco lógico vai para o seu físico; junta os vizinhos
                 restante, k = n, 0
                 while restante > 0:
-                    f = self._fisico(lbn + k)
+                    f = self._fisico(lbn + k, ref_ad)
                     q = min(SETOR, restante)
                     if runs and len(runs[-1]) == 3 and runs[-1][2] == f - 1 and runs[-1][1] % SETOR == 0:
                         runs[-1] = (runs[-1][0], runs[-1][1] + q, f)
@@ -389,9 +444,9 @@ class Udf(Volume):
             falta -= n
         return [(r[0], r[1]) for r in runs]
 
-    def _ler_icb(self, lbn):
+    def _ler_icb(self, lbn, ref=None):
         """File Entry / Extended File Entry do bloco `lbn`: {tipo, info, runs, inline, datas}."""
-        b = self._particao(lbn, 1)
+        b = self._particao(lbn, 1, ref)
         t = _tag(b)
         vistos = {lbn}
         while t is not None and t[0] == 259:               # Indirect Entry (ECMA-167 4/14.7): o ICB seguinte vem no long_ad em 36
@@ -400,8 +455,9 @@ class Udf(Volume):
             lbn = struct.unpack_from('<I', b, 40)[0]
             if lbn in vistos:
                 raise ErroICBIndireto('cadeia de ICB indireto em laço (bloco %d)' % lbn)
+            ref = struct.unpack_from('<H', b, 44)[0]
             vistos.add(lbn)
-            b = self._particao(lbn, 1)
+            b = self._particao(lbn, 1, ref)
             t = _tag(b)
         if t is None or t[0] not in (261, 266):
             raise ErroSA('ICB UDF inválido no bloco %d.' % lbn)
@@ -421,7 +477,7 @@ class Udf(Volume):
         if aloc == 3:
             r['inline'] = ads[:info]
         elif aloc in (0, 1):
-            r['runs'] = self._extents(ads, aloc, info, self.inicio + self.tamanho)
+            r['runs'] = self._extents(ads, aloc, info, self.inicio + self.tamanho, ref)
         else:
             raise ErroSA('Tipo de alocação UDF %d não suportado.' % aloc)
         return r
@@ -443,12 +499,12 @@ class Udf(Volume):
         if self._raiz is None:                              # VAT ilegível: nada a listar, o motivo está em `limitacao`
             return
         try:
-            yield from self._pasta(self._raiz, '/', 0, {self._raiz})
+            yield from self._pasta(self._raiz, '/', 0, {self._raiz}, self._raiz_ref)
         except OSError as e:
             raise ErroSA('Não consegui ler a pasta raiz do UDF: %s' % e) from None
 
-    def _pasta(self, lbn, pai, nivel, vistos):
-        r = self._ler_icb(lbn)
+    def _pasta(self, lbn, pai, nivel, vistos, ref=None):
+        r = self._ler_icb(lbn, ref)
         if r['tipo'] != 4 or r['info'] > MAX_DIR:
             raise ErroSA('A pasta UDF no bloco %d é inválida.' % lbn)
         self._lidos_pastas += r['info']
@@ -463,6 +519,7 @@ class Udf(Volume):
                 break
             carac, l_fi = dados[off + 18], dados[off + 19]
             icb_lbn = struct.unpack_from('<I', dados, off + 24)[0]
+            icb_ref = struct.unpack_from('<H', dados, off + 28)[0]
             l_iu = struct.unpack_from('<H', dados, off + 36)[0]
             ini = off + 38 + l_iu
             nome_b = dados[ini: ini + l_fi]
@@ -471,7 +528,7 @@ class Udf(Volume):
                 continue
             nome = limpar_nome(_nome_udf(nome_b))
             try:
-                f = self._ler_icb(icb_lbn)
+                f = self._ler_icb(icb_lbn, icb_ref)
             except ErroICBIndireto as e:
                 yield Entrada(nome=nome, caminho=juntar(pai, nome), eh_dir=False, tamanho=0, apagado=bool(carac & 0x04),
                               estado='ruim', ident=icb_lbn, runs=[], nota='%s; arquivo não lido' % e)
@@ -498,7 +555,7 @@ class Udf(Volume):
             if eh_dir and not ent.apagado and icb_lbn not in vistos and nivel < MAX_PROFUNDIDADE:
                 vistos.add(icb_lbn)
                 try:
-                    yield from self._pasta(icb_lbn, ent.caminho, nivel + 1, vistos)
+                    yield from self._pasta(icb_lbn, ent.caminho, nivel + 1, vistos, icb_ref)
                 except ErroTeto:
                     raise
                 except (ErroSA, OSError):
