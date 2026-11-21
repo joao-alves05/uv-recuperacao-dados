@@ -1346,6 +1346,31 @@ def ts(j, off, limite, a):
                grupo='video')
 
 
+# --- RAF (RAW da Fujifilm) ---------------------------------------------------------------------------------------------
+def raf(j, off, limite, a):
+    """Cabeçalho de 108 bytes (ExifTool, tags do FujiFilm RAF), tudo big-endian: 0x00 "FUJIFILMCCD-RAW ", 0x10 versão
+    (4 dígitos), 0x54/0x58 offset e tamanho do JPEG embutido, 0x5C/0x60 do cabeçalho CFA, 0x64/0x68 dos dados CFA. O fim
+    é o maior offset + tamanho. Os três blocos ficam depois do cabeçalho e não se sobrepõem."""
+    h = j.ler(off, 108)
+    if len(h) < 108 or h[:16] != b'FUJIFILMCCD-RAW ' or not h[16:20].isdigit():
+        return None
+    blocos = sorted((u32(h, o, False), u32(h, o + 4, False)) for o in (84, 92, 100))
+    if any(t == 0 or o < 108 for o, t in blocos):
+        return None
+    for (o1, t1), (o2, _) in zip(blocos, blocos[1:]):
+        if o1 + t1 > o2:                       # sobrepostos
+            return None
+    fim = blocos[-1][0] + blocos[-1][1]
+    if fim > a['tamanho_max']:
+        return None
+    jpg_off = u32(h, 84, False)
+    if jpg_off < limite and j.ler(off + jpg_off, 2) not in (bytes((0xFF, 0xD8)), b''):
+        return None
+    if fim > limite:
+        return res(limite, 'parcial', 40, tipo='RAF', extensao='raf', grupo='foto')
+    return res(fim, 'bom', 100, tipo='RAF', extensao='raf', grupo='foto')
+
+
 VALIDADORES = {'jpg': jpg, 'png': png, 'gif': gif, 'bmp': bmp, 'tiff': tiff, 'iso': iso, 'riff': riff, 'mp3': mp3,
-               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'ole2': ole2, 'rtf': rtf,
+               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'raf': raf, 'ole2': ole2, 'rtf': rtf,
                'generico': generico}
