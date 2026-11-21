@@ -8,7 +8,7 @@ Nome, empresa, contato e cores do app vêm de configuração: nenhum dado de emp
 
 ## O que o programa faz
 
-Abre um painel no navegador (o programa roda só no seu computador) onde você escolhe o disco, pen drive, cartão ou CD/DVD, e o programa: lê a mídia **só para leitura**; faz uma imagem bit a bit dela, pulando e voltando depois nos setores ruins como o ddrescue; lê as partições (MBR, GPT) e procura as que se perderam; lista os arquivos pelo sistema de arquivos (FAT, exFAT, NTFS, ext2/3/4, ISO 9660, UDF), inclusive os apagados com nome e pasta; e procura arquivos por assinatura (fotos, vídeos, documentos...) quando o sistema de arquivos não existe mais. Você marca o que quer e recupera para **outro disco**, com um relatório do que saiu inteiro, parcial ou ruim.
+Abre um painel no navegador (o programa roda só no seu computador) onde você escolhe o disco, pen drive, cartão ou CD/DVD, e o programa: lê a mídia **só para leitura**; faz uma imagem bit a bit dela, pulando e voltando depois nos setores ruins como o ddrescue; lê as partições (MBR, GPT) e procura as que se perderam; lista os arquivos pelo sistema de arquivos (FAT, exFAT, NTFS, ext2/3/4, HFS+, ISO 9660, UDF), inclusive os apagados com nome e pasta; e procura arquivos por assinatura (fotos, vídeos, documentos...) quando o sistema de arquivos não existe mais. Entre os tipos da busca por assinatura estão vídeo MKV/WebM, 3GP/3G2 e TS/MTS (filmadora AVCHD), a foto RAW CR3 da Canon e ZIP (inclusive ZIP64), cujo CRC-32 é conferido: ZIP com dados zerados ou trocados sai `parcial`, não `bom`. Você marca o que quer e recupera para **outro disco**, com um relatório do que saiu inteiro, parcial ou ruim.
 
 ## Como baixar e rodar
 
@@ -57,6 +57,7 @@ O Windows e o Linux só deixam um programa ler o **disco inteiro** (e não só o
 
 - **Confere se o disco é o mesmo.** Ao criar uma imagem ou busca, o programa guarda a identidade do disco (número de série e assinatura). Antes de recuperar ou retomar, confere: se outro disco assumiu o lugar, ele **recusa** e pede para refazer a busca. Se não consegue ler algum dado de identificação, **avisa e segue**, sem bloquear.
 - **Sugere o destino.** Na hora de recuperar, o programa oferece uma pasta `Recuperados` em outro disco (no Windows, outra letra; no Linux, outro disco montado em `/media`, `/run/media` ou `/mnt`), do mais livre ao menos. Se você escolher uma pasta recusada (por exemplo, no disco da origem), a resposta já traz a sugestão certa. A pasta só é criada quando você recupera.
+- **Arquivo esparso** (com "buraco") entra na lista e sai com zeros no buraco, sem contar como erro de leitura.
 - **Não trava o PC.** No Windows o programa roda com prioridade baixa de CPU e de disco; se o computador ficar lento mesmo assim, é o disco sendo lido, não um defeito.
 
 ## Passo a passo por cenário
@@ -69,9 +70,11 @@ Regra geral: **tenha um segundo disco com espaço livre** para receber o resulta
 
 **HD com setor ruim (faça a imagem primeiro).** Disco que estala, trava ou some não deve ser lido repetidamente: cada leitura pode piorá-lo. Crie primeiro uma **imagem** do disco para um arquivo em outro disco. O programa lê em blocos grandes, pula as áreas ruins, volta nelas depois (passada reversa, com várias tentativas) e guarda um mapa dos setores; pode pausar, fechar e retomar de onde parou. Depois trabalhe **sobre a imagem**, nunca no disco doente. O que continuar ilegível sai como zeros, e os arquivos que tocam esses setores saem `parcial`, com os trechos faltantes listados em `lacunas.csv`.
 
-**Partição perdida.** O disco aparece como "não formatado" ou sem partição. Use **Procurar partições perdidas**: o programa varre atrás de setores de boot e superblocos (FAT, exFAT, NTFS, ext, HFS+, APFS, ISO), inclusive das cópias reservas, e mostra candidatos com um nível de confiança (alta, média, baixa) e as evidências. Escolha o candidato e liste os arquivos dele. A tabela reconstruída pode ser exportada (`.json`, `.mbr`, `.gpt`), mas aplicá-la ao disco é decisão sua, feita fora do programa.
+**Partição perdida.** O disco aparece como "não formatado" ou sem partição. Use **Procurar partições perdidas**: o programa varre atrás de setores de boot e superblocos (FAT, exFAT, NTFS, ext, HFS+, APFS, ISO), inclusive das cópias reservas, e mostra candidatos com um nível de confiança (alta, média, baixa) e as evidências. FAT12/16 sem o texto de rótulo também é achado, pela estrutura do setor de boot (FAT32 sem o texto ainda não). Escolha o candidato e liste os arquivos dele. A tabela reconstruída pode ser exportada (`.json`, `.mbr`, `.gpt`), mas aplicá-la ao disco é decisão sua, feita fora do programa. Com mais de 4 partições, o `.mbr` leva 3 primárias e uma estendida, e os setores das lógicas (EBRs) saem num arquivo `.mbr-ebrs`: os dois vão juntos.
 
-**CD/DVD/Blu-ray riscado.** Coloque o disco e crie uma **imagem** dele para outro disco. Mídia riscada pode levar **horas**, porque a unidade tenta de novo sozinha nos trechos ruins; pause e retome à vontade. O programa lê o disco todo, pula o que não consegue e volta depois (por padrão 3 tentativas nos setores ruins). Em seguida, **Recuperar arquivos** sobre a imagem lista os arquivos pelo ISO 9660/Joliet/Rock Ridge ou pelo UDF. Arquivo com setor ilegível sai parcial.
+**CD/DVD/Blu-ray riscado.** Coloque o disco e crie uma **imagem** dele para outro disco. Mídia riscada pode levar **horas**, porque a unidade tenta de novo sozinha nos trechos ruins; pause e retome à vontade. O programa lê o disco todo, pula o que não consegue e volta depois (por padrão 3 tentativas nos setores ruins; dá para escolher o número ao criar a imagem). Em seguida, **Recuperar arquivos** sobre a imagem lista os arquivos pelo ISO 9660/Joliet/Rock Ridge ou pelo UDF. Arquivo com setor ilegível sai parcial.
+
+**CD/DVD gravado em várias vezes.** Disco multi-sessão ou CD-R/RW com UDF gravado aos poucos guarda versões antigas dos arquivos: vale a última sessão. Em unidade de CD/DVD o programa pergunta à unidade onde ela começa; numa imagem, ou se a unidade não responde, ele procura a sessão pelo disco inteiro (mais lento) quando a opção `todas_sessoes` do job de varredura é ligada (veja [docs/FASE6.md](docs/FASE6.md)). O UDF incremental (partição virtual, VAT), o CD-RW com setores remapeados e o Blu-ray/HD em UDF 2.50 são lidos; se a tabela de controle estiver ruim, o programa avisa em vez de travar.
 
 **SSD (e pen drives modernos) com arquivo apagado.** O SSD apaga de verdade o que foi excluído (comando TRIM) e o próprio disco zera o espaço livre, às vezes em minutos. Se o arquivo foi apagado há tempo, a chance é pequena e nenhum programa muda isso. Desligue o computador, não use o SSD, e tente a varredura pelo sistema de arquivos e a assinatura sobre uma imagem. Espere resultados muito menores que num HD. Para dado importante, procure um laboratório antes de tentar qualquer coisa.
 
@@ -80,11 +83,10 @@ Regra geral: **tenha um segundo disco com espaço livre** para receber o resulta
 - **TRIM:** SSD e pen drive com TRIM zeram o que foi apagado; não há como desfazer.
 - **Sobrescrita:** dado sobrescrito se foi para sempre.
 - **Criptografia:** BitLocker, VeraCrypt, FileVault e LUKS precisam da chave; sem ela só se enxerga ruído.
-- **ext2/ext3 com arquivo muito grande:** acima de cerca de 1 Mi blocos (1 GiB com blocos de 1 KiB), o programa entrega só o começo, marca o arquivo como `parcial` e o resto como não lido (ext4 não tem esse limite).
 - **ext3/ext4:** ao apagar, o sistema zera os ponteiros do arquivo; aparece o nome, mas o conteúdo só volta pela busca por assinatura.
-- **NTFS:** arquivos comprimidos pelo NTFS e criptografados com EFS não são lidos; arquivos apagados só se os clusters não foram reutilizados.
-- **HFS+:** lista pastas e arquivos vivos (catálogo), inclusive hard links de arquivo; hard link de pasta (Time Machine), arquivo apagado e arquivo comprimido (decmpfs) não saem com conteúdo. **APFS:** só é reconhecido (e achado na busca de partições); os arquivos não são listados.
-- **UDF:** 1.02 a 2.01. Sem partição virtual (VAT, CD-R/RW de gravação incremental), esparsa ou de metadados (Blu-ray), sem ICB indireto. Multi-sessão: em unidade de CD/DVD (Linux `/dev/sr*`, Windows `\.\X:` ou `\.\CdRomN`) o TOC da unidade leva direto à última sessão; limitação: o formato TOC lista faixas, não sessões, então vale a faixa de dados de cada sessão. Em arquivo/imagem, ou se a unidade não responde ao TOC, a última sessão só é escolhida com a varredura de âncoras.
+- **NTFS:** arquivos comprimidos pelo NTFS (LZNT1) saem descomprimidos, e a unidade corrompida vira zeros (resultado `com_falhas`); arquivos criptografados com EFS não são lidos; arquivos apagados só se os clusters não foram reutilizados.
+- **HFS+:** lista pastas e arquivos vivos (catálogo), inclusive hard links de arquivo, arquivos comprimidos do Mac (decmpfs com zlib, tipos 3 e 4) e o HFS+ embrulhado em HFS clássico (Mac OS 8.1 a 9); compressão LZVN/LZFSE sai `ruim` com nota, e hard link de pasta (Time Machine) e arquivo apagado não saem com conteúdo. HFS clássico sem HFS+ dentro não é lido. **APFS:** só é reconhecido (e achado na busca de partições); os arquivos não são listados.
+- **UDF:** 1.02 a 2.50, com blocos de 2048 bytes; lê partição virtual (VAT), esparsa (CD-RW), de metadados (Blu-ray) e ICB indireto, mas não lê fluxos nomeados nem ACL. Multi-sessão: em unidade de CD/DVD (Linux `/dev/sr*`, Windows `\.\X:` ou `\.\CdRomN`) o TOC da unidade leva direto à última sessão; limitação: o formato TOC lista faixas, não sessões, então vale a faixa de dados de cada sessão. Em arquivo/imagem, ou se a unidade não responde ao TOC, a última sessão só é escolhida com a varredura de âncoras.
 - **Correção de erro:** não há decodificação de ECC do dvdisaster (Reed-Solomon); se você tem o arquivo `.ecc`, use o dvdisaster sobre a imagem que este programa gerou.
 - **Fragmentação:** a busca por assinatura recupera bem arquivos contíguos. Arquivo fragmentado (comum em disco cheio e muito usado) sai parcial ou misturado.
 - **Disco real:** os testes usam imagens sintéticas e drives falsos; nada foi validado contra hardware com defeito de verdade.
@@ -95,7 +97,7 @@ O trabalho pesado não depende da página. Um **serviço local** (só em `127.0.
 
 1. **Serviço e jobs** (Flask, SQLite): [docs/FASE1.md](docs/FASE1.md) e [docs/TECNICO.md](docs/TECNICO.md).
 2. **Leitura e imagem** (`Leitor` só leitura, mapa de setores ruins): [docs/FASE2.md](docs/FASE2.md).
-3. **Partições** (MBR, GPT, busca de partição perdida) e **sistemas de arquivos** (FAT, exFAT, NTFS, ext, ISO), em Python puro: [docs/FASE3-4.md](docs/FASE3-4.md).
+3. **Partições** (MBR, GPT, busca de partição perdida) e **sistemas de arquivos** (FAT, exFAT, NTFS, ext, HFS+, ISO), em Python puro: [docs/FASE3-4.md](docs/FASE3-4.md).
 4. **Carving** por assinatura, validação, lista de resultados e recuperação: [docs/FASE5.md](docs/FASE5.md).
 5. **CD, DVD e Blu-ray** (UDF, Rock Ridge, leitura resiliente, recuperação parcial): [docs/FASE6.md](docs/FASE6.md).
 6. **Painel** em `recuperacao/painel/`, sem scripts embutidos (política de segurança restrita a `'self'`).
@@ -109,7 +111,7 @@ Testes: `python -m unittest discover -s testes`. O teste de tela usa o Edge: `py
 | 1 | Serviço local, jobs persistentes e painel que se reconecta | pronta |
 | 2 | Leitura só de leitura e imagem de disco com mapa de setores ruins | pronta |
 | 3 | Partições: MBR, GPT e busca de partições apagadas | pronta |
-| 4 | Sistemas de arquivos: FAT, exFAT, NTFS, ext2/3/4, ISO9660 | pronta |
+| 4 | Sistemas de arquivos: FAT, exFAT, NTFS, ext2/3/4, HFS+, ISO9660 | pronta |
 | 5 | File carving por assinatura, com validação de cada arquivo | pronta |
 | 6 | CD, DVD e Blu-ray: ISO9660, Rock Ridge, UDF e releitura resiliente | motor pronto |
 | 7 | Interface em 3 passos, prévia, filtros e desempenho para discos acima de 1 TB | em andamento |
