@@ -774,14 +774,37 @@ def _zip_caminhar(j, off, fim):
             return pos, nomes, 'fim'
         flags, tc = u16(h, 6), u32(h, 18)
         nlen, xlen = u16(h, 26), u16(h, 28)
-        if flags & 8 or tc == 0xFFFFFFFF:
+        if flags & 8:
             return pos, nomes, 'desc'
+        if tc == 0xFFFFFFFF or u32(h, 22) == 0xFFFFFFFF:      # ZIP64: o tamanho de verdade está no campo extra 0x0001
+            z64 = _zip64_extra(j.ler(pos + 30 + nlen, xlen), u32(h, 22), tc)
+            if z64 is None:
+                return pos, nomes, 'fim'
+            tc = z64[1]
         novo = pos + 30 + nlen + xlen + tc
         if novo > fim:
             return pos, nomes, 'cortado'
         nomes.append(j.ler(pos + 30, nlen))
         pos = novo
     return pos, nomes, 'cortado' if pos < fim else 'fim'
+
+
+def _zip64_extra(extra, usize, csize, lo=0):
+    """(usize, csize, lo) com os campos 0xFFFFFFFF trocados pelos de 64 bits do campo extra 0x0001 (na ordem usize,
+    csize, lo). None se o campo falta ou está curto."""
+    falta = [i for i, v in enumerate((usize, csize, lo)) if v == 0xFFFFFFFF]
+    vals = [usize, csize, lo]
+    p = 0
+    while p + 4 <= len(extra):
+        ident, n = u16(extra, p), u16(extra, p + 2)
+        if ident == 1:
+            if n < 8 * len(falta) or p + 4 + 8 * len(falta) > len(extra):
+                return None
+            for k, i in enumerate(falta):
+                vals[i] = u64(extra, p + 4 + 8 * k)
+            return tuple(vals)
+        p += 4 + n
+    return None if falta else tuple(vals)
 
 
 def _zip_fechar(j, off, ini_cd, fim):
@@ -797,10 +820,15 @@ def _zip_fechar(j, off, ini_cd, fim):
         if data is None:
             data = _data_dos(u16(e, 14), u16(e, 12))
         # o deslocamento do cabeçalho local tem de apontar para um cabeçalho local de verdade
-        lo = u32(e, 42)
-        if lo != 0xFFFFFFFF and j.ler(off + lo, 4) != _PK_LOCAL:
+        usize, csize, lo = u32(e, 24), u32(e, 20), u32(e, 42)
+        if 0xFFFFFFFF in (usize, csize, lo):               # ZIP64: os valores de 64 bits vêm do campo extra
+            z64 = _zip64_extra(j.ler(p + 46 + nlen, xlen), usize, csize, lo)
+            if z64 is None:
+                return None
+            usize, csize, lo = z64
+        if j.ler(off + lo, 4) != _PK_LOCAL:
             return None
-        entradas.append((lo, u16(e, 8), u16(e, 10), u32(e, 16), u32(e, 20), u32(e, 24)))
+        entradas.append((lo, u16(e, 8), u16(e, 10), u32(e, 16), csize, usize))
         p += 46 + nlen + xlen + clen
         n += 1
     if j.ler(p, 4) == b'PK\x05\x05':                      # assinatura digital: pula
