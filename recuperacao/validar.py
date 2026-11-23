@@ -418,13 +418,15 @@ def bmp(j, off, limite, a):
 
 # --- TIFF e RAW de câmera ---------------------------------------------------------------------------------------
 _RAW_POR_MARCA = (('NIKON', 'NEF'), ('SONY', 'ARW'))
+_TIFF_RAW_CAB = (b'IIRO', b'IIRS', b'MMOR', b'IIU\x00')      # ORF (Olympus, 0x4F52 ou 0x5352) e RW2 (Panasonic, 0x55)
 
 
 def tiff(j, off, limite, a):
     cab = j.ler(off, 16)
-    if len(cab) < 16 or cab[:4] not in (b'II*\x00', b'MM\x00*'):
+    if len(cab) < 16 or cab[:4] not in (b'II*\x00', b'MM\x00*', *_TIFF_RAW_CAB):
         return None
     le = cab[:2] == b'II'
+    rw2 = cab[:4] == b'IIU\x00'                    # RW2: 0x55 no lugar do 42; ORF: 'RO'/'RS' (o resto é TIFF)
     ifd0 = u32(cab, 4, le)
     if ifd0 < 8 or ifd0 >= limite:
         return None
@@ -434,6 +436,7 @@ def tiff(j, off, limite, a):
     dng = False
     truncado = False
     primeiro = True
+    raw_off = None
     while fila and len(visitados) < 64:
         pos = fila.pop()
         if pos in visitados or pos < 8 or pos + 2 > limite:
@@ -454,6 +457,7 @@ def tiff(j, off, limite, a):
         primeiro = False
         maximo = max(maximo, pos + 2 + n * 12 + 4)
         offs = cnts = None
+        jo = jl = None
         for k in range(n):
             tag, tp, cnt = u16(ent, k * 12, le), u16(ent, k * 12 + 2, le), u32(ent, k * 12 + 4, le)
             vf = ent[k * 12 + 8: k * 12 + 12]
@@ -483,6 +487,12 @@ def tiff(j, off, limite, a):
                 offs = valores()
             elif tag in (279, 325):
                 cnts = valores()
+            elif tag == 513 and tp == 4:                       # JPEGInterchangeFormat / Length (JPEG de prévia)
+                jo = u32(vf, 0, le)
+            elif tag == 514 and tp == 4:
+                jl = u32(vf, 0, le)
+            elif tag == 280 and rw2 and tp == 4:               # RW2: RawDataOffset (os dados vão até o fim das tiras)
+                raw_off = u32(vf, 0, le)
             elif tag in (330, 34665, 34853) and tp in (4, 13):
                 fila.extend(valores() if tag == 330 else [u32(vf, 0, le)])
             elif tag == 256 and largura is None and tp in (3, 4):
@@ -495,14 +505,24 @@ def tiff(j, off, limite, a):
                 dng = True
         if offs and cnts and len(offs) == len(cnts):
             maximo = max(maximo, max(o + c for o, c in zip(offs, cnts)))
+        if jo is not None and jl is not None and jo >= 8:
+            maximo = max(maximo, jo + jl)
         prox = u32(ent, n * 12, le)
         if prox:
+            if prox in visitados:                              # IFD em laço: estrutura inventada
+                return None
             fila.append(prox)
+    if rw2 and raw_off is not None and maximo <= raw_off:      # RawDataOffset sem tira que chegue a ele: dados faltam
+        truncado, maximo = True, min(limite, max(maximo, raw_off))
+    if maximo > a.get('tamanho_max', maximo):
+        return None
     if maximo > limite:
         truncado, maximo = True, limite
     data = _exif_data(j.ler(off, min(limite, 1 << 20)))
     tipo = 'TIFF'
-    if cab[8:10] == b'CR':
+    if cab[:4] in _TIFF_RAW_CAB:
+        tipo = 'RW2' if rw2 else 'ORF'
+    elif cab[8:10] == b'CR':
         tipo = 'CR2'
     elif dng:
         tipo = 'DNG'
