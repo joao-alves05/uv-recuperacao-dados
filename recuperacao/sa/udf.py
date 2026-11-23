@@ -18,7 +18,10 @@ traduzida; referências à física no mesmo volume são lidas como se fossem vir
 
 Partição esparsa (CD-RW em pacotes, UDF 1.50+): o mapa tipo 2 "*UDF Sparable Partition" traz o tamanho do pacote e
 até 4 cópias da Sparing Table ("*UDF Sparing Table", checada por tag, identificador e CRC). Bloco cujo pacote está na
-tabela é lido do pacote de reposição (endereços relativos ao início da partição, como o kernel do Linux). Vale a
+tabela é lido do pacote de reposição. Regra do kernel (fs/udf/partition.c, udf_get_pblock_spar15): o pacote é
+comparado com `origLocation` em endereço RELATIVO à partição (`packet = (block + offset) & ~(packet_len - 1)`), mas
+`mappedLocation` é ABSOLUTO no disco: o físico é `mappedLocation + (block & (packet_len - 1))`, sem somar o início
+da partição (`return le32(mappedLocation) + ((block + offset) & (packet_len - 1))`). Vale a
 primeira cópia válida; nenhuma válida = aviso em `limitacao` e leitura direta, sem remapear.
 
 Partição de metadados (UDF 2.50+, Blu-ray e HD em UDF): o mapa tipo 2 "*UDF Metadata Partition" aponta o Metadata
@@ -401,7 +404,7 @@ class Udf(Volume):
         if self.spar:
             base = lbn - lbn % self.spar_pacote
             if base in self.spar:
-                lbn = self.spar[base] + lbn - base
+                lbn = self.spar[base] - self.part_ini + lbn - base     # mappedLocation é absoluto; `lbn` volta relativo à partição
         return lbn
 
     def _particao(self, lbn, n=1, ref=None):

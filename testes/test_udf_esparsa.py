@@ -41,6 +41,8 @@ class TestEsparsa(unittest.TestCase):
         v, ents = self.abrir(['ok'])
         self.assertTrue(v.spar)
         self.assertEqual(len(v.spar), 2)
+        self.assertGreater(v.part_ini, 0)                                  # partição longe do setor 0: a regra errada leria part_ini adiante
+        self.assertTrue(all(m >= v.part_ini for m in v.spar.values()))     # mappedLocation é absoluto no disco
         self.assertEqual(sha(b''.join(v.ler(ents['/docs/remapeado.bin']))), sha(REMAPEADO))
         self.assertEqual(b''.join(v.ler(ents['/outro.bin'])), OUTRO)
         self.assertNotIn('AVISO', v.limitacao)

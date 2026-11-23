@@ -203,7 +203,7 @@ class Sessao:
                 novo = aloc(P)
                 img[(ps + novo) * SETOR:(ps + novo + P) * SETOR] = img[(ps + orig) * SETOR:(ps + orig + P) * SETOR]
                 img[(ps + orig) * SETOR:(ps + orig + P) * SETOR] = bytes([0xEE]) * (P * SETOR)         # pacote defeituoso: lixo
-                entradas.append((orig, novo))
+                entradas.append((orig, ps + novo))                      # origLocation relativo à partição, mappedLocation absoluto
             corpo = bytearray(40 + 8 * len(entradas))
             corpo[1:19] = b'*UDF Sparing Table'
             struct.pack_into('<HHI', corpo, 32, len(entradas), 0, 1)
