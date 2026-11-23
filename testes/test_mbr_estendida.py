@@ -121,6 +121,35 @@ class TestMbrEstendida(Base):
         self.assertNotIn('mbr_ebrs', res['aplicacao'])
         self.assertNotIn('junto_com', res['aplicacao']['mbr'])
 
+    def _ebr_fora_de_toda_particao(self, prop):
+        for byte, _ in particoes.montar_ebrs(prop, 1 << 40):
+            sec = byte // SEC
+            for p in prop:
+                self.assertFalse(p['inicio'] // SEC <= sec < p['fim'] // SEC, 'EBR em %d cai na partição %r' % (sec, p))
+
+    def test_ebr_nunca_cai_no_fim_de_particao_colada_ou_descartada(self):
+        # A=8000..9000, B=9000..10000 (colada na A), C=10000..10500 (colada na B: o setor 9999 e o backup do boot da B)
+        dados = [(100, 1000), (2000, 1000), (4000, 1000), (8000, 1000), (9000, 1000), (10000, 500)]
+        prop = [{'inicio': i * SEC, 'tamanho': n * SEC, 'fim': (i + n) * SEC, 'sistema': 'ntfs'} for i, n in dados]
+        self._ebr_fora_de_toda_particao(prop)
+        self.assertEqual([b // SEC for b, _ in particoes.montar_ebrs(prop, 1 << 40)], [7999])
+        _, av = particoes.montar_mbr(prop, 1 << 40)
+        self.assertEqual(sum('setor livre' in a for a in av), 2)        # B e C, cada uma com o seu motivo
+        self.assertTrue(any('pertence à partição' in a for a in av))
+
+    def test_propriedade_ebr_fora_de_qualquer_particao_em_propostas_aleatorias(self):
+        import random
+        rnd = random.Random(20260311)
+        for _ in range(200):
+            prop, pos = [], rnd.randint(1, 50)
+            for _ in range(rnd.randint(5, 9)):
+                n = rnd.randint(1, 300)
+                prop.append({'inicio': pos * SEC, 'tamanho': n * SEC, 'fim': (pos + n) * SEC,
+                             'sistema': rnd.choice(['ntfs', 'fat32', 'ext4'])})
+                pos += n + rnd.choice([0, 0, 0, 1, 2, 5, 50])
+            rnd.shuffle(prop)
+            self._ebr_fora_de_toda_particao(prop)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -897,13 +897,21 @@ def _plano_mbr(proposta, setor):
     prim, resto, logicas = ents[:3], ents[3:], []
     avisos.append('MBR só tem 4 entradas primárias: 3 ficaram primárias e as %d seguintes foram para uma partição '
                   'estendida, como lógicas (cada uma com o seu EBR).' % len(resto))
-    fim_ant = prim[-1][1] + prim[-1][2]
     for t, ini, n in resto:
-        if ini - 1 < max(fim_ant, 1):
-            avisos.append('A partição em %d não tem um setor livre antes dela para o EBR: ficou de fora.' % (ini * setor))
+        # o EBR ocupa o setor ini-1: ele não pode cair dentro de NENHUMA partição da proposta (nem das que ficaram de
+        # fora), senão a gravação sobrescreveria dado do cliente (ex.: o backup do boot NTFS no último setor)
+        dono = next((e for e in ents if e[1] <= ini - 1 < e[1] + e[2]), None)
+        if ini < 2 or dono:
+            avisos.append('A partição em %d não tem um setor livre antes dela para o EBR (%s): ficou de fora.'
+                          % (ini * setor, 'esse setor é o início do disco' if ini < 2 else
+                             'esse setor pertence à partição em %d' % (dono[1] * setor)))
             continue
         logicas.append((t, ini, n))
-        fim_ant = ini + n
+    if not logicas:                                                   # nenhuma lógica cabe: volta às 4 primárias
+        avisos[:] = [x for x in avisos if not x.startswith('MBR só tem 4')]
+        avisos.append('MBR só tem 4 entradas primárias: as %d partições seguintes ficaram de fora (não há como pôr '
+                      'uma estendida sem gravar por cima de uma partição).' % (len(ents) - 4))
+        return ents[:4], [], avisos
     return prim, logicas, avisos
 
 
