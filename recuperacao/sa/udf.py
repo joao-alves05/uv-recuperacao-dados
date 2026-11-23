@@ -32,6 +32,8 @@ Fora do que lemos (dito em `limitacao`): fluxos nomeados, ACL e atributos estend
 """
 import binascii
 import struct
+import sys
+from array import array
 
 from .base import ErroSA, ErroTeto, Entrada, Volume, MAX_PROFUNDIDADE, epoch, juntar, limpar_nome
 
@@ -41,7 +43,9 @@ MAX_TOTAL_PASTAS = 256 << 20            # bytes de pastas lidos numa varredura (
 MAX_ANCORAS = 64
 MAX_SALTOS_ICB = 16                      # Indirect Entries seguidas até o File Entry; mais que isso é laço ou lixo
 MAX_BUSCA_VAT = 64                       # setores procurados de trás para frente atrás do File Entry da VAT
-MAX_VAT = 64 << 20                       # bytes de VAT aceitos (16 milhões de blocos virtuais)
+MAX_VAT = 16 << 20                       # bytes de VAT aceitos (4 milhões de entradas): a VAT só tem um bloco por ICB (arquivo ou
+                                         # pasta), não por bloco de dados; 4 milhões de arquivos já passa do que um CD/DVD/BD guarda.
+                                         # Além do teto, e além de `part_tam` entradas, a tabela não é lida (array('I'): 4 bytes cada)
 MAX_ESPARSA = 1 << 20                    # entradas de pacote remapeado aceitas na Sparing Table
 LIMITACAO = ('UDF: partição de metadados lida pelo Metadata File, sem o bitmap; sem fluxos nomeados e ACL.')
 
@@ -155,7 +159,7 @@ class Udf(Volume):
     def __init__(self, leitor, inicio=0, tamanho=None, todas_sessoes=False):
         super().__init__(leitor, inicio, tamanho)
         self.limitacao = LIMITACAO
-        self.vat = None                                     # lista bloco virtual -> bloco físico, só em partição virtual
+        self.vat = None                                     # array('I') bloco virtual -> bloco físico (0xFFFFFFFF = livre), só em partição virtual
         self.meta, self.meta_ref = None, None               # [(início no arquivo, offset absoluto, bytes)] do Metadata File; nº da partition reference
         self._raiz_ref = None
         self.spar = None                                    # {1º bloco do pacote original: 1º bloco do pacote de reposição}
@@ -317,7 +321,7 @@ class Udf(Volume):
         raise ErroSA('bloco de metadados %d fora do Metadata File' % lbn)
 
     def _ler_vat(self, ancora):
-        """Tabela (lista bloco virtual -> bloco físico; None = livre) do File Entry da VAT mais perto do fim gravado."""
+        """Tabela (array bloco virtual -> bloco físico; 0xFFFFFFFF = livre) do File Entry da VAT mais perto do fim gravado."""
         fim = self.tamanho // SETOR
         for ini in sorted(self._sessoes or []):
             if ancora < ini < fim:                          # a VAT da sessão da âncora acaba antes da próxima
@@ -331,7 +335,7 @@ class Udf(Volume):
                     continue
                 r = self._ler_icb(sec - self.part_ini)
                 if r['info'] > MAX_VAT:
-                    continue
+                    raise ErroSA('VAT com %d bytes, acima do teto de %d' % (r['info'], MAX_VAT))
                 dados = self._conteudo(r)
             except (ErroSA, OSError, struct.error) as e:
                 ultimo = e
@@ -346,10 +350,16 @@ class Udf(Volume):
             else:
                 continue
             n = len(corpo) // 4
-            tab = struct.unpack('<%dI' % n, corpo[:n * 4])
+            if self.part_tam:
+                n = min(n, self.part_tam)                   # a tradução não precisa de mais entradas que blocos na partição
+            tab = array('I')
+            tab.frombytes(corpo[:n * 4])
+            if sys.byteorder == 'big':
+                tab.byteswap()
+            del corpo, dados
             if not n or any(v != 0xFFFFFFFF and (v >= self.part_tam > 0) for v in tab):
                 raise ErroSA('tabela da VAT inconsistente')
-            return [None if v == 0xFFFFFFFF else v for v in tab]
+            return tab
         raise ErroSA(str(ultimo) if ultimo else 'VAT não encontrada nos últimos %d setores gravados' % MAX_BUSCA_VAT)
 
     def _ler_esparsa(self, mapa):
@@ -385,7 +395,7 @@ class Udf(Volume):
         if self.meta is not None and ref == self.meta_ref:
             lbn = self._meta_fisico(lbn)
         elif self.vat is not None:
-            if not 0 <= lbn < len(self.vat) or self.vat[lbn] is None:
+            if not 0 <= lbn < len(self.vat) or self.vat[lbn] == 0xFFFFFFFF:
                 raise ErroSA('bloco virtual UDF %d sem entrada na VAT' % lbn)
             lbn = self.vat[lbn]
         if self.spar:

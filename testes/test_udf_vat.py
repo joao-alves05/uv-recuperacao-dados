@@ -3,6 +3,8 @@
 import hashlib
 import os
 import unittest
+from array import array
+from unittest import mock
 
 import auxiliar  # noqa: F401  (ajusta o sys.path)
 import imagens_udf as iu
@@ -54,6 +56,24 @@ class TestVat(unittest.TestCase):
         self.assertEqual(v.vat[iu.DESLOCA_VIRTUAL + 3], 3)
         self.assertNotEqual(v._raiz, 1)                                    # raiz virtual 101, física 1
         self.assertEqual(v._fisico(v._raiz), 1)
+
+    def test_tabela_fica_compacta_e_limitada_a_particao(self):
+        v = self.abrir('2.00')
+        self.assertIsInstance(v.vat, array)                                 # 4 bytes por entrada, não uma lista de ints
+        self.assertEqual(v.vat.itemsize, 4)
+        self.assertLessEqual(len(v.vat), v.part_tam)
+
+    def test_vat_acima_do_teto_vira_aviso_sem_estourar(self):
+        img = iu.disco_udf([iu.Sessao(ARQ, 0, vat='2.00')], 1000)
+        with mock.patch.object(udf, 'MAX_VAT', 100):
+            v = sa.detectar(Mem(img))
+        self.assertIsNone(v.vat)
+        self.assertEqual(list(v.varrer()), [])
+        self.assertIn('AVISO: VAT ilegível', v.limitacao)
+        self.assertIn('teto', v.limitacao)
+
+    def test_teto_real_e_razoavel(self):
+        self.assertLessEqual(udf.MAX_VAT, 16 << 20)
 
     def test_extensao_se_quebra_quando_os_blocos_fisicos_nao_sao_vizinhos(self):
         v = self.abrir('2.00')
