@@ -864,16 +864,18 @@ def _zip_fechar(j, off, ini_cd, fim):
 
 _ZIP_BLOCO = 1 << 20                    # a conferência dos dados lê em blocos de 1 MiB (nunca a entrada inteira)
 _ZIP_CONFERIR_MAX = 256 << 20           # teto de bytes lidos (compactados) para conferir CRC; o que passa disso não é conferido
+_ZIP_DESCOMP_BLOCO = 1 << 20            # o deflate sai em pedaços de 1 MiB (bomba de zeros: 300 KB viram 300 MiB), sem guardar
+_ZIP_DESCOMP_MAX = 2 << 30              # teto de bytes DESCOMPACTADOS conferidos por ZIP; o que passa disso não é conferido
 
 
 def _zip_dados_ok(j, off, entradas):
     """Confere o CRC-32 de cada entrada (armazenada ou deflate) (dados que acabam em zeros antes do tamanho
     declarado não batem). False = achou dano. Entrada cifrada, zip64 ou de outro método não é conferida; passado o teto, para."""
-    lido = 0
+    lido = lido_desc = 0
     for lo, flags, metodo, crc, csize, usize in entradas:
         if flags & 1 or metodo not in (0, 8) or 0xFFFFFFFF in (lo, csize, usize):
             continue
-        if lido + csize > _ZIP_CONFERIR_MAX:
+        if lido + csize > _ZIP_CONFERIR_MAX or lido_desc + usize > _ZIP_DESCOMP_MAX:
             break
         h = j.ler(off + lo, 30)
         if len(h) < 30 or h[:4] != _PK_LOCAL:
@@ -887,17 +889,28 @@ def _zip_dados_ok(j, off, entradas):
             if not c:
                 return False
             pos += len(c)
-            if d is not None:
+            if d is None:
+                soma = zlib.crc32(c, soma)
+                total += len(c)
+                continue
+            while c:                                   # em pedaços, com o CRC corrido: nada fica guardado
                 try:
-                    c = d.decompress(c)
+                    saida = d.decompress(c, _ZIP_DESCOMP_BLOCO)
                 except zlib.error:
                     return False
-            soma = zlib.crc32(c, soma)
-            total += len(c)
+                soma = zlib.crc32(saida, soma)
+                total += len(saida)
+                if total > usize:                      # descomprime mais que o declarado: dano (ou bomba)
+                    return False
+                novo = d.unconsumed_tail
+                if d.eof or len(novo) >= len(c) and not saida:
+                    break
+                c = novo
         if d is not None:
             if not d.eof:
                 return False
         lido += csize
+        lido_desc += usize
         if total != usize or soma != crc:
             return False
     return True
