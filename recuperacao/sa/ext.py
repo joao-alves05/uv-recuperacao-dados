@@ -256,6 +256,9 @@ class Ext(Volume):
                 return
             runs.append((None if p is None else self.inicio + p * self.bs, q))
             falta -= q
+        if runs and falta <= 0 and all(o is None for o, _ in runs) and tam > self.tamanho:
+            ent.estado, ent.nota, ent.runs = 'ruim', 'mapa só de buracos e tamanho maior que o volume (inode danificado?)', []
+            return
         ent.runs = runs
         if falta > 0:
             ent.estado, ent.nota = 'parcial', 'ponteiros não cobrem o tamanho'
