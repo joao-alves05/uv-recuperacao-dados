@@ -150,6 +150,29 @@ class TestMbrEstendida(Base):
             rnd.shuffle(prop)
             self._ebr_fora_de_toda_particao(prop)
 
+    def test_particao_que_passa_do_fim_do_disco_sai_com_aviso_e_fora_do_mbr(self):
+        img = bytearray(100000 * SEC)
+        ip.fat32(img, 2048 * SEC, 8192 * SEC)
+        ip.ntfs(img, 20480 * SEC, 8192 * SEC)
+        prop = [{'inicio': 2048 * SEC, 'tamanho': 8192 * SEC, 'fim': 10240 * SEC, 'sistema': 'fat32'},
+                {'inicio': 20480 * SEC, 'tamanho': 8192 * SEC, 'fim': 28672 * SEC, 'sistema': 'ntfs'},
+                {'inicio': 4000 * SEC, 'tamanho': 996000 * SEC, 'fim': 1000000 * SEC, 'sistema': 'ext4'}]
+        mbr, av = particoes.montar_mbr(prop, len(img))
+        self.assertTrue(any('passa do fim do disco em %d bytes' % ((1000000 - 100000) * SEC) in a for a in av), av)
+        self.assertEqual([mbr[446 + 16 * k + 4] for k in range(4)], [0x0C, 0x07, 0, 0])
+        img[0:512] = mbr
+        t = particoes.analisar(self.abrir(img))
+        self.assertEqual([(p['inicio'], p['tamanho']) for p in t['particoes']],
+                         [(2048 * SEC, 8192 * SEC), (20480 * SEC, 8192 * SEC)])
+
+    def test_particao_alem_do_fim_nao_vira_logica_nem_gera_ebr(self):
+        dados = [(100, 1000), (2000, 1000), (4000, 1000), (8000, 1000), (20000, 90000), (12000, 1000)]
+        prop = [{'inicio': i * SEC, 'tamanho': n * SEC, 'fim': (i + n) * SEC, 'sistema': 'ntfs'} for i, n in dados]
+        mbr, av = particoes.montar_mbr(prop, 100000 * SEC)          # a de 20000..110000 passa do fim: sobram 5
+        self.assertEqual(sum('passa do fim' in a for a in av), 1)
+        self.assertEqual([b // SEC for b, _ in particoes.montar_ebrs(prop, 100000 * SEC)], [7999, 11999])
+        self.assertTrue(mbr[446 + 48 + 4] in (0x05, 0x0F))
+
 
 if __name__ == '__main__':
     unittest.main()

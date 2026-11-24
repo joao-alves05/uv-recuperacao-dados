@@ -877,7 +877,7 @@ def _chs(lba):
     return bytes([h, ((c >> 2) & 0xC0) | s, c & 0xFF])
 
 
-def _plano_mbr(proposta, setor):
+def _plano_mbr(proposta, tamanho, setor):
     """Reparte a proposta em (primárias, lógicas, avisos). Com até 4 partições, tudo primária e na ordem dada.
     Com mais, as 3 primeiras (por início) ficam primárias e as demais vão numa estendida, cada lógica com o seu EBR
     no setor imediatamente antes dela (a lógica que não tem esse setor livre fica de fora)."""
@@ -889,6 +889,9 @@ def _plano_mbr(proposta, setor):
             avisos.append('A partição em %d (%s) não tem tipo de MBR conhecido: ficou de fora.' % (p['inicio'], p.get('sistema') or '?'))
         elif ini >= 1 << 32 or n >= 1 << 32 or ini + n > 1 << 32:
             avisos.append('A partição em %d passa de 2 TiB: não cabe em MBR.' % p['inicio'])
+        elif ini + n > tamanho // setor:
+            avisos.append('A partição em %d passa do fim do disco em %d bytes: ficou de fora (recortar mudaria o tamanho '
+                          'do sistema de arquivos).' % (p['inicio'], (ini + n) * setor - tamanho // setor * setor))
         else:
             ents.append((t, ini, n))
     if len(ents) <= 4:
@@ -922,7 +925,7 @@ def _tipo_estendida(fim_lba):
 def montar_mbr(proposta, tamanho, setor=512):
     """Setor 0 de um MBR com a tabela proposta (sem código de boot). Devolve (512 bytes ou None, avisos).
     Com mais de 4 partições a 4ª entrada é a estendida; os EBRs das lógicas saem de `montar_ebrs`."""
-    prim, logicas, avisos = _plano_mbr(proposta, setor)
+    prim, logicas, avisos = _plano_mbr(proposta, tamanho, setor)
     if not prim:
         return None, avisos + ['Nenhuma partição cabe num MBR.']
     b = bytearray(512)
@@ -939,7 +942,7 @@ def montar_mbr(proposta, tamanho, setor=512):
 def montar_ebrs(proposta, tamanho, setor=512):
     """Os EBRs da estendida de `montar_mbr`: lista de (byte onde gravar, 512 bytes). Vazia com até 4 partições.
     O endereço da lógica é relativo ao seu EBR; o do próximo EBR é relativo ao início da estendida."""
-    _, logicas, _ = _plano_mbr(proposta, setor)
+    _, logicas, _ = _plano_mbr(proposta, tamanho, setor)
     if not logicas:
         return []
     ext = logicas[0][1] - 1
