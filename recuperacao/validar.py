@@ -1404,6 +1404,91 @@ def raf(j, off, limite, a):
     return res(fim, 'bom', 100, tipo='RAF', extensao='raf', grupo='foto')
 
 
+# --- GZ (gzip) ----------------------------------------------------------------------------------------------------------
+_GZ_MAGIA = b'\x1f\x8b\x08'
+_GZ_CAB_MAX = 80000                  # FEXTRA (até 64 KiB) + FNAME + FCOMMENT cabem aqui
+
+
+def _gz_membro(j, pos, fim):
+    """Um membro gzip a partir de pos. (estado, fim_do_membro, bytes_descompactados): 'ok', 'crc' (rodapé não bate),
+    'cortado' (os dados acabaram), 'teto' (passou do teto descompactado) ou 'invalido' (cabeçalho ou deflate ruim)."""
+    cab = j.ler(pos, min(_GZ_CAB_MAX, fim - pos))
+    if len(cab) < 10 or cab[:3] != _GZ_MAGIA or cab[3] & 0xE0 or cab[8] not in (0, 2, 4) or not (cab[9] <= 13 or cab[9] == 255):
+        return 'invalido', pos, 0
+    flg, p = cab[3], 10
+    if flg & 4:                                        # FEXTRA
+        if len(cab) < p + 2:
+            return 'cortado', pos + len(cab), 0
+        p += 2 + u16(cab, p)
+    for bit in (8, 16):                                # FNAME, FCOMMENT: texto terminado em zero
+        if flg & bit:
+            z = cab.find(b'\x00', p, p + 4096)
+            if z < 0:
+                return ('cortado' if len(cab) < p + 4096 and len(cab) < fim - pos else 'invalido'), pos + len(cab), 0
+            p = z + 1
+    if flg & 2:                                        # FHCRC: 16 bits baixos do CRC-32 do cabeçalho
+        if len(cab) < p + 2:
+            return 'cortado', pos + len(cab), 0
+        if zlib.crc32(cab[:p]) & 0xFFFF != u16(cab, p):
+            return 'invalido', pos, 0
+        p += 2
+    if len(cab) < p:
+        return 'cortado', pos + len(cab), 0
+    d = zlib.decompressobj(-15)
+    q, crc, total = pos + p, 0, 0
+    while True:
+        c = j.ler(q, min(_ZIP_BLOCO, fim - q))
+        if not c:
+            return 'cortado', q, total
+        buf = c
+        while buf:                                     # em pedaços de 1 MiB, com o CRC corrido (bomba de zeros)
+            try:
+                saida = d.decompress(buf, _ZIP_DESCOMP_BLOCO)
+            except zlib.error:
+                return 'invalido', q, total
+            crc = zlib.crc32(saida, crc)
+            total += len(saida)
+            if total > _ZIP_DESCOMP_MAX:
+                return 'teto', q + len(c), total
+            if d.eof:
+                fim_def = q + len(c) - len(d.unused_data)
+                rod = j.ler(fim_def, min(8, fim - fim_def))
+                if len(rod) < 8:
+                    return 'cortado', fim_def + len(rod), total
+                bom = u32(rod, 0) == crc and u32(rod, 4) == total & 0xFFFFFFFF
+                return ('ok' if bom else 'crc'), fim_def + 8, total
+            novo = d.unconsumed_tail
+            if len(novo) >= len(buf) and not saida:
+                return 'invalido', q, total
+            buf = novo
+        q += len(c)
+
+
+def gz(j, off, limite, a):
+    """O fim não está no cabeçalho: descomprime o deflate em streaming até o rodapé (CRC-32 e ISIZE). Membros
+    concatenados seguem enquanto vier outro 1F 8B 08 colado; o fim é o do último membro. Dado que acaba no meio do
+    membro, rodapé que não bate ou passar do teto descompactado (o do ZIP) saem `parcial`."""
+    fim = off + limite
+    pos, membros, estado = off, 0, 'bom'
+    while pos < fim:
+        if membros and j.ler(pos, 3) != _GZ_MAGIA:
+            break
+        r, novo, total = _gz_membro(j, pos, fim)
+        if r == 'invalido':
+            if not membros:
+                return None
+            break
+        if r != 'ok':
+            if r == 'cortado' and not membros and total == 0:      # só o cabeçalho: pouco para dizer que é gzip
+                return None
+            pos, estado = novo, 'parcial'
+            break
+        pos, membros = novo, membros + 1
+    if pos == off:
+        return None
+    return res(pos - off, estado, 100 if estado == 'bom' else 45, tipo='GZ', extensao='gz', grupo='compactado')
+
+
 VALIDADORES = {'jpg': jpg, 'png': png, 'gif': gif, 'bmp': bmp, 'tiff': tiff, 'iso': iso, 'riff': riff, 'mp3': mp3,
-               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'raf': raf, 'ole2': ole2, 'rtf': rtf,
+               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'gz': gz, 'raf': raf, 'ole2': ole2, 'rtf': rtf,
                'generico': generico}
