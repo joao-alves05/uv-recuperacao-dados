@@ -1489,6 +1489,81 @@ def gz(j, off, limite, a):
     return res(pos - off, estado, 100 if estado == 'bom' else 45, tipo='GZ', extensao='gz', grupo='compactado')
 
 
+# --- OGG (Vorbis, Opus, FLAC e Theora em Ogg) ---------------------------------------------------------------------------
+_OGG_REV = bytes(int('{:08b}'.format(i)[::-1], 2) for i in range(256))
+_OGG_CODECS = ((b'\x01vorbis', 'OGG', 'ogg', 'audio'), (b'OpusHead', 'OPUS', 'opus', 'audio'),
+               (b'\x7fFLAC', 'OGA', 'oga', 'audio'), (b'\x80theora', 'OGV', 'ogv', 'video'),
+               (b'Speex   ', 'OGG', 'ogg', 'audio'))
+
+
+def _crc_ogg(dados):
+    """CRC do Ogg: polinômio 0x04C11DB7 sem reflexão, início 0, sem xor final. Sai do zlib (refletido) com os bytes
+    invertidos bit a bit e o resultado invertido de volta, que é feito em C e roda a dezenas de MB/s."""
+    r = zlib.crc32(dados.translate(_OGG_REV), 0xFFFFFFFF) ^ 0xFFFFFFFF
+    return int('{:032b}'.format(r)[::-1], 2)
+
+
+def _ogg_pagina(j, pos, fim):
+    """(tamanho, tipo, serie, sequência, corpo_inicio) da página em pos, ou None se não é uma página Ogg íntegra."""
+    h = j.ler(pos, 27)
+    if len(h) < 27 or h[:4] != b'OggS' or h[4] != 0 or h[5] & 0xF8:
+        return None
+    n = h[26]
+    tab = j.ler(pos + 27, n)
+    if len(tab) < n:
+        return None
+    tam = 27 + n + sum(tab)
+    if pos + tam > fim:
+        return None
+    pag = j.ler(pos, tam)
+    if len(pag) < tam or _crc_ogg(pag[:22] + b'\x00\x00\x00\x00' + pag[26:]) != u32(pag, 22):
+        return None
+    return tam, h[5], u32(h, 14), u32(h, 18), pag[27 + n:27 + n + 8]
+
+
+def ogg(j, off, limite, a):
+    """Anda de página em página (27 bytes + tabela de segmentos), conferindo o CRC, o número de série e a sequência. O
+    fim é a página EOS (de todos os fluxos abertos); sem EOS, até a última página válida, como `parcial`. O codec vem
+    da primeira página (Vorbis/Speex = OGG, Opus, FLAC = OGA, Theora = OGV)."""
+    fim = off + limite
+    p = _ogg_pagina(j, off, fim)
+    if p is None or not p[1] & 2 or p[1] & 1:
+        return None
+    codec = next((c for c in _OGG_CODECS if p[4].startswith(c[0])), None)
+    if codec is None:
+        return None
+    pos, paginas, abertos, ultima = off, 0, set(), {}
+    while pos < fim:
+        p = _ogg_pagina(j, pos, fim)
+        if p is None:
+            break
+        tam, tp, serie, seq, _ = p
+        if tp & 2:                                     # BOS: fluxo novo (multiplexado, ou outro elo de um Ogg encadeado)
+            if serie in abertos:
+                break
+            if not abertos:
+                ultima.clear()
+            abertos.add(serie)
+            ultima[serie] = seq
+        elif serie not in abertos or seq != ultima[serie] + 1:
+            break                                      # fluxo desconhecido ou página perdida no meio
+        else:
+            ultima[serie] = seq
+        pos += tam
+        paginas += 1
+        if tp & 4:
+            abertos.discard(serie)
+            if not abertos:
+                prox = _ogg_pagina(j, pos, fim) if pos < fim else None
+                if prox is None or not prox[1] & 2:    # sem outro elo encadeado: acabou
+                    break
+    estado = 'bom' if paginas and not abertos else 'parcial'
+    if paginas < 2 and estado != 'bom':
+        return None
+    _, tipo, ext, grupo = codec
+    return res(pos - off, estado, 100 if estado == 'bom' else 50, tipo=tipo, extensao=ext, grupo=grupo)
+
+
 VALIDADORES = {'jpg': jpg, 'png': png, 'gif': gif, 'bmp': bmp, 'tiff': tiff, 'iso': iso, 'riff': riff, 'mp3': mp3,
-               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'gz': gz, 'raf': raf, 'ole2': ole2, 'rtf': rtf,
+               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'gz': gz, 'ogg': ogg, 'raf': raf, 'ole2': ole2, 'rtf': rtf,
                'generico': generico}

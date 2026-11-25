@@ -25,6 +25,7 @@
     {"tipo": "DOC", "grupo": "documento", "extensao": "doc", "cabecalho": "D0CF11E0A1B11AE1", "tamanho_max": 268435456, "validar": "ole2"},
     {"tipo": "RTF", "grupo": "documento", "extensao": "rtf", "cabecalho": "7B5C72746631", "tamanho_max": 67108864, "validar": "rtf"},
     {"tipo": "GZ", "grupo": "compactado", "extensao": "gz", "cabecalho": "1F8B08", "tamanho_max": 4294967296, "validar": "gz"},
+    {"tipo": "OGG", "grupo": "audio", "extensao": "ogg", "cabecalho": "4F676753", "tamanho_max": 536870912, "validar": "ogg"},
     {"tipo": "TS", "grupo": "video", "extensao": "ts", "cabecalho": "474000", "tamanho_max": 4294967296, "validar": "ts"},
     {"tipo": "RAF", "grupo": "foto", "extensao": "raf", "cabecalho": "46554A4946494C4D4343442D52415720", "tamanho_max": 268435456, "validar": "raf"},
     {"tipo": "MTS", "grupo": "video", "extensao": "mts", "cabecalho": "474000", "cabecalho_offset": 4, "tamanho_max": 4294967296, "validar": "ts"}
