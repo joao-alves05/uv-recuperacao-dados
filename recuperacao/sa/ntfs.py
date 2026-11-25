@@ -540,6 +540,11 @@ class Ntfs(Volume):
         if ext is None:
             yield from super().ler(entrada, bloco)
             return
+        def lido(off, n):
+            dados = self.leitor.ler(off, n)
+            if len(dados) < n:
+                raise OSError('leitura curta em %d' % off)      # como achados.ler_unidade_lznt1
+            return dados
         falta, pend = entrada.tamanho, []
         for e in ext:
             if len(e) == 3:
@@ -547,7 +552,7 @@ class Ntfs(Volume):
                 if e[2] == 0:
                     continue
                 try:
-                    bruto = b''.join(self.leitor.ler(o, n) for o, n in pend)
+                    bruto = b''.join(lido(o, n) for o, n in pend)
                     dados = lznt1_descomprimir(bruto, e[2]).ljust(e[2], b'\0')
                 except ValueError as erro:
                     raise OSError('LZNT1 inválido: %s' % erro) from None
@@ -558,7 +563,7 @@ class Ntfs(Volume):
             off, n = e
             while n > 0 and falta > 0:
                 q = min(n, falta, bloco)
-                yield (b'\0' * q) if off is None else self.leitor.ler(off, q)
+                yield (b'\0' * q) if off is None else lido(off, q)
                 if off is not None:
                     off += q
                 n -= q

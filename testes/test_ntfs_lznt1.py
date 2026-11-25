@@ -217,6 +217,53 @@ class TestNtfsComprimido(BaseImagem):
         mod_achados.normalizar('j', a)
 
 
+class LeitorCurto:
+    """Leitor falso: repassa tudo, mas na leitura que começa em `em` devolve menos: 1 byte a menos ou, com
+    `no_chunk`, só até o fim do primeiro chunk LZNT1 (corte limpo: a descompressão não percebe sozinha)."""
+    def __init__(self, real, em=None, no_chunk=False):
+        self.real, self.em, self.no_chunk = real, em, no_chunk
+        self.tamanho = real.tamanho
+
+    def ler(self, off, n):
+        dados = self.real.ler(off, n)
+        if off != self.em:
+            return dados
+        return dados[:2 + (dados[0] | dados[1] << 8 & 0xFFF) + 1] if self.no_chunk else dados[:-1]
+
+
+class TestLeituraCurtaNoVolume(BaseImagem):
+    def entrada(self, vol):
+        return next(e for e in vol.varrer() if e.nome == 'comprimido.dat')
+
+    def test_leitura_curta_no_meio_de_unidade_comprimida_falha_explicitamente(self):
+        with leitor_mod.abrir(self.imagem()) as l:
+            vol = sa.detectar(l)
+            e = self.entrada(vol)
+            comp = [x for x in e.extents_lznt1 if len(x) == 3]
+            vol.leitor = LeitorCurto(l, comp[0][0], no_chunk=True)  # unidade 0 chega só até o fim do 1o chunk
+            with self.assertRaises(OSError):
+                b''.join(vol.ler(e))
+            vol.leitor = LeitorCurto(l, comp[1][0])                 # 1 byte a menos no meio de outra unidade
+            with self.assertRaises(OSError):
+                b''.join(vol.ler(e))
+
+    def test_leitura_curta_em_extent_comum_tambem_falha(self):
+        with leitor_mod.abrir(self.imagem()) as l:
+            vol = sa.detectar(l)
+            e = self.entrada(vol)
+            cru = next(x for x in e.extents_lznt1 if len(x) == 2 and x[0] is not None)
+            vol.leitor = LeitorCurto(l, cru[0])
+            with self.assertRaises(OSError):
+                b''.join(vol.ler(e))
+
+    def test_leitor_normal_continua_igual(self):
+        with leitor_mod.abrir(self.imagem()) as l:
+            vol = sa.detectar(l)
+            e = self.entrada(vol)
+            vol.leitor = LeitorCurto(l, None)
+            self.assertEqual(sha(b''.join(vol.ler(e))), sha(self.original))
+
+
 class TestRecuperacaoDeComprimido(BaseImagem, BaseVarredura):
     def recuperar(self, caminho):
         job = self.varrer(caminho, 'sistema')
