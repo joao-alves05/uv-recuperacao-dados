@@ -1564,6 +1564,176 @@ def ogg(j, off, limite, a):
     return res(pos - off, estado, 100 if estado == 'bom' else 50, tipo=tipo, extensao=ext, grupo=grupo)
 
 
+# --- FLAC nativo ---------------------------------------------------------------------------------------------------------
+_FLAC_SYNC = re.compile(rb'\xff[\xf8\xf9]')
+_FLAC_8 = []
+_FLAC_16 = []                          # tabela de 65536 entradas (2 bytes por passo), montada na primeira vez que precisa
+
+
+def _flac_tabelas():
+    for i in range(256):
+        r = i << 8
+        for _ in range(8):
+            r = ((r << 1) ^ 0x8005) & 0xFFFF if r & 0x8000 else (r << 1) & 0xFFFF
+        _FLAC_8.append(r)
+    _FLAC_16.extend(((x << 8) & 0xFFFF) ^ _FLAC_8[x >> 8] for x in range(65536))
+    _FLAC_16[:] = [((y << 8) & 0xFFFF) ^ _FLAC_8[y >> 8] for y in _FLAC_16]
+
+
+def _crc16_flac(dados):
+    """CRC-16 do FLAC (0x8005, sem reflexão, início 0). Dá 0 sobre o quadro inteiro, com o CRC no fim."""
+    if not _FLAC_8:
+        _flac_tabelas()
+    r = 0
+    n = len(dados) // 2
+    t = _FLAC_16
+    for w in struct.unpack('>%dH' % n, dados[:2 * n]):
+        r = t[r ^ w]
+    if len(dados) & 1:
+        r = ((r << 8) & 0xFFFF) ^ _FLAC_8[(r >> 8) ^ dados[-1]]
+    return r
+
+
+def _crc8_flac(dados):
+    r = 0
+    for b in dados:
+        r ^= b
+        for _ in range(8):
+            r = ((r << 1) ^ 0x07) & 0xFF if r & 0x80 else (r << 1) & 0xFF
+    return r
+
+
+def _flac_cab(b, i, max_bloco):
+    """(tamanho_do_cabeçalho, amostras) do quadro em b[i:] se o cabeçalho é válido (sync, campos e CRC-8), senão None."""
+    if len(b) < i + 7 or b[i] != 0xFF or b[i + 1] not in (0xF8, 0xF9):
+        return None
+    bs, sr, ch, sz = b[i + 2] >> 4, b[i + 2] & 15, b[i + 3] >> 4, (b[i + 3] >> 1) & 7
+    if bs == 0 or sr == 15 or ch > 10 or sz == 3 or b[i + 3] & 1:
+        return None
+    c = b[i + 4]
+    n = 8 - (~c & 0xFF).bit_length()                   # bytes do número do quadro (UTF-8 estendido)
+    n = 1 if n == 0 else n
+    if n == 1 and c >= 0x80 or n > 7:
+        return None
+    p = i + 4 + n
+    if len(b) < p + 5 or any(x & 0xC0 != 0x80 for x in b[i + 5:p]):
+        return None
+    if bs == 6:
+        amostras, p = b[p] + 1, p + 1
+    elif bs == 7:
+        amostras, p = u16(b, p, False) + 1, p + 2
+    else:
+        amostras = 192 if bs == 1 else 576 << (bs - 2) if bs <= 5 else 256 << (bs - 8)
+    p += {12: 1, 13: 2, 14: 2}.get(sr, 0)
+    if len(b) < p + 1 or amostras > max_bloco or _crc8_flac(b[i:p]) != b[p]:
+        return None
+    return p + 1 - i, amostras
+
+
+def flac(j, off, limite, a):
+    """`fLaC` + STREAMINFO (obrigatório, com o total de amostras) + os quadros. Sem decodificar o áudio: anda de
+    cabeçalho de quadro (sync + CRC-8) em cabeçalho, e um quadro só vale quando o CRC-16 dele fecha em 0 no ponto
+    onde o próximo começa. O último quadro fecha pelo total de amostras do STREAMINFO (CRC-16 em 0 no fim); sem total,
+    só se acabar exatamente no fim dos dados. O fim é o do último quadro verificado; falta de quadros = `parcial`."""
+    fim = off + limite
+    h = j.ler(off, 8)
+    if len(h) < 8 or h[:4] != b'fLaC' or h[4] & 0x7F or h[5:8] != b'\x00\x00\x22':
+        return None
+    si = j.ler(off + 8, 34)
+    if len(si) < 34:
+        return None
+    min_b, max_b = u16(si, 0, False), u16(si, 2, False)
+    min_f, max_f = int.from_bytes(si[4:7], 'big'), int.from_bytes(si[7:10], 'big')
+    pacote = int.from_bytes(si[10:18], 'big')
+    taxa, total = pacote >> 44, pacote & ((1 << 36) - 1)
+    if min_b < 16 or max_b < min_b or not 0 < taxa <= 655350 or (min_f and max_f and min_f > max_f):
+        return None
+    pos, ultimo, n_blocos = off + 42, h[4] >> 7, 0
+    while not ultimo:                                  # demais blocos de metadados (Vorbis comment, picture, padding...)
+        bh = j.ler(pos, 4)
+        if len(bh) < 4 or bh[0] & 0x7F == 127 or n_blocos > 4096:
+            return None
+        ultimo = bh[0] >> 7
+        pos += 4 + int.from_bytes(bh[1:4], 'big')
+        n_blocos += 1
+        if pos > fim:
+            return None
+    teto_q = max_f + 64 if max_f else 1 << 20          # tamanho máximo de um quadro
+    buf, base = j.ler(pos, 1 << 20), pos
+    cab = _flac_cab(buf, 0, max_b)
+    if cab is None:
+        return None
+    ini, amostras, fechado = 0, 0, pos                 # `ini`: posição do quadro atual em buf; `fechado`: fim absoluto do último verificado
+
+    def mais():
+        nonlocal buf
+        novo = j.ler(base + len(buf), min(1 << 20, fim - base - len(buf)))
+        buf += novo
+        return bool(novo)
+
+    estado = 'parcial'
+    while True:
+        hdr, n_q = cab
+        ultimo_q = bool(total) and amostras + n_q >= total
+        achou = None
+        busca, falhas = ini + hdr, 0
+        while not ultimo_q:
+            m = _FLAC_SYNC.search(buf, busca)
+            if m is None:
+                antes = len(buf)
+                if len(buf) - ini > teto_q or not mais():
+                    break
+                busca = max(busca, antes - 1)
+                continue
+            c = m.start()
+            if c - ini > teto_q:
+                break
+            if len(buf) < c + 24 and mais():
+                continue
+            nc = _flac_cab(buf, c, max_b)
+            if nc is None:
+                busca = c + 1
+                continue
+            if _crc16_flac(buf[ini:c]) == 0:
+                achou = (c, nc)
+                break
+            falhas += 1
+            if falhas >= 8:
+                break
+            busca = c + 1
+        if achou:
+            c, cab = achou
+            amostras += n_q
+            fechado = base + c
+            buf, base, ini = buf[c:], base + c, 0
+            continue
+        # sem quadro seguinte verificado: o atual fecha no fim dos dados, ou, sendo o último pelo total, onde o CRC-16 zera
+        while len(buf) - ini < teto_q and mais():
+            pass
+        resto = buf[ini:ini + teto_q] if ultimo_q else buf[ini:]
+        e = None
+        if ultimo_q:
+            r = 0
+            for k in range(len(resto)):
+                b = resto[k]
+                r = ((r << 8) & 0xFFFF) ^ _FLAC_8[(r >> 8) ^ b]
+                if k + 1 >= hdr + 3 and r == 0:
+                    e = k + 1
+                    break
+        elif len(resto) <= teto_q:                     # tem de acabar no fim dos dados (zeros de enchimento depois valem)
+            ate = len(resto.rstrip(b'\x00'))              # CRC-16 sem xor final: zeros depois do CRC mantêm o resultado em 0
+            e = next((x for x in (ate, ate + 1, ate + 2) if hdr + 3 <= x <= len(resto) and _crc16_flac(resto[:x]) == 0), None)
+        if e is not None:
+            amostras += n_q
+            fechado = base + ini + e
+            if not total or amostras >= total:
+                estado = 'bom'
+        break
+    if not amostras:
+        return None
+    return res(fechado - off, estado, 100 if estado == 'bom' else 50, tipo='FLAC', extensao='flac', grupo='audio')
+
+
 VALIDADORES = {'jpg': jpg, 'png': png, 'gif': gif, 'bmp': bmp, 'tiff': tiff, 'iso': iso, 'riff': riff, 'mp3': mp3,
-               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'gz': gz, 'ogg': ogg, 'raf': raf, 'ole2': ole2, 'rtf': rtf,
+               'pdf': pdf, 'zip': zip_, 'rar': rar, '7z': sete_z, 'sqlite': sqlite, 'mkv': mkv, 'ts': ts, 'gz': gz, 'ogg': ogg, 'flac': flac, 'raf': raf, 'ole2': ole2, 'rtf': rtf,
                'generico': generico}
