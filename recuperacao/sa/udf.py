@@ -44,6 +44,7 @@ SETOR = 2048
 MAX_DIR = 64 << 20
 MAX_TOTAL_PASTAS = 256 << 20            # bytes de pastas lidos numa varredura (pastas que se sobrepõem não viram bomba)
 MAX_ANCORAS = 64
+MAX_RESSINC = 1 << 20                    # bytes procurados à frente por uma FID válida depois de uma FID corrompida
 MAX_SALTOS_ICB = 16                      # Indirect Entries seguidas até o File Entry; mais que isso é laço ou lixo
 MAX_BUSCA_VAT = 64                       # setores procurados de trás para frente atrás do File Entry da VAT
 MAX_VAT = 16 << 20                       # bytes de VAT aceitos (4 milhões de entradas): a VAT só tem um bloco por ICB (arquivo ou
@@ -529,7 +530,14 @@ class Udf(Volume):
         while off + 38 <= len(dados):
             t = _tag(dados[off: off + 16])
             if t is None or t[0] != 257:
-                break
+                if not any(dados[off:]):                      # só zeros: fim normal da pasta
+                    break
+                self.perdeu(pai)                              # FID corrompida: conta e retoma na próxima FID de tag válida
+                off = next((o for o in range(off + 4, min(len(dados) - 37, off + MAX_RESSINC), 4)
+                            if (tt := _tag(dados[o: o + 16])) and tt[0] == 257), None)
+                if off is None:
+                    break
+                continue
             carac, l_fi = dados[off + 18], dados[off + 19]
             icb_lbn = struct.unpack_from('<I', dados, off + 24)[0]
             icb_ref = struct.unpack_from('<H', dados, off + 28)[0]
@@ -547,6 +555,7 @@ class Udf(Volume):
                               estado='ruim', ident=icb_lbn, runs=[], nota='%s; arquivo não lido' % e)
                 continue
             except (ErroSA, OSError):
+                self.perdeu(juntar(pai, nome))                # ICB ilegível: o arquivo some da lista, mas a perda é contada
                 continue
             if f['tipo'] not in (0, 4, 5):
                 continue
@@ -572,4 +581,5 @@ class Udf(Volume):
                 except ErroTeto:
                     raise
                 except (ErroSA, OSError):
+                    self.perdeu(ent.caminho)
                     continue

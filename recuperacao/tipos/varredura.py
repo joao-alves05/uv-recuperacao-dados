@@ -92,7 +92,11 @@ def _erro_fatia(o, total=None, setor=512):
 
 MOTIVOS = {'sem_conteudo': 'arquivos apagados só com o nome (o sistema de arquivos apagou os ponteiros do conteúdo, '
                            'como ext3 e ext4 fazem; a busca por assinatura pode achar o conteúdo)',
-           'invalido': 'arquivos com posição inválida no disco (estrutura danificada)'}
+           'invalido': 'arquivos com posição inválida no disco (estrutura danificada)',
+           'cifrado': 'arquivos criptografados (EFS), que não dá para ler sem a chave',
+           'compressao_nao_suportada': 'arquivos com compressão que este programa não descomprime (LZVN/LZFSE)',
+           'hardlink_sem_inode': 'hard links cujo inode não está no catálogo (o conteúdo não foi achado)',
+           'ilegivel': 'arquivos cuja estrutura no disco está ilegível ou danificada (não são arquivos apagados)'}
 
 
 def _offsets_com_nome(store, job_id):
@@ -191,6 +195,9 @@ def _fase_sistema(ctrl, store, job_id, aberto, op, cp, tamanho, janela=None, res
     resultado['ilegiveis'] = ilegiveis
     if ilegiveis and not resultado.get('incompleta'):
         resultado['incompleta'] = '%d setores do sistema de arquivos estavam ilegíveis' % ilegiveis
+        onde = [c for va in lista for c in (va.volume.ilegiveis_onde or [])]
+        if onde:
+            resultado['incompleta'] += ' (não abriu: %s%s)' % (', '.join(onde[:5]), ' e outros' if len(onde) > 5 else '')
     gravar()
     if resultado.get('incompleta'):
         ctrl.aviso_final = _aviso_lista_incompleta(resultado['incompleta'], op)

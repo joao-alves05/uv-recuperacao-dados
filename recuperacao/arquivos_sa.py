@@ -99,7 +99,9 @@ def _data(*candidatas):
 
 def achado_de(e, prefixo=''):
     """Entrada de `sa/` -> (dict do contrato de achados, None) ou (None, motivo) quando não dá para recuperar:
-    `pasta`, `sem_conteudo` (nome sem bytes recuperáveis, p.ex. ext3/ext4 apagado) ou `invalido` (posição negativa).
+    `pasta`, `invalido` (posição negativa) ou o `motivo` da entrada (`sem_conteudo`: inode apagado sem ponteiros, como
+    ext3/ext4; `cifrado`; `compressao_nao_suportada`; `hardlink_sem_inode`) e, sem motivo informado, `ilegivel`.
+    A `nota` da entrada vai no campo `nota` do achado.
     Arquivo esparso entra: o buraco vira o extent `[None, n]` (n bytes de zeros)."""
     if e.eh_dir:
         return None, 'pasta'
@@ -108,7 +110,7 @@ def achado_de(e, prefixo=''):
         return None, 'invalido'                              # offset negativo: estrutura danificada, nada a ler
     cobre = sum(n for _, n in runs)
     if cobre == 0 and (e.tamanho > 0 or e.estado == 'ruim'):
-        return None, 'sem_conteudo'
+        return None, e.motivo or 'ilegivel'
     estado = e.estado
     if cobre < e.tamanho and estado == 'bom':
         estado = 'parcial'
@@ -117,6 +119,8 @@ def achado_de(e, prefixo=''):
     a = {'nome': e.nome[:255], 'caminho': prefixo + e.caminho, 'apagado': bool(e.apagado), 'tamanho': cobre,
          'grupo': EXT_GRUPO.get((ext or '').lower(), 'outro'), 'estado': estado,
          'pontuacao': PONTUACAO.get((estado, bool(e.apagado)), 10), 'data': _data(e.modificado, e.criado, e.acessado)}
+    if e.nota:
+        a['nota'] = e.nota
     if ext:
         a['extensao'] = ext
         a['tipo'] = ext.upper()

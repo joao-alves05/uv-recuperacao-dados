@@ -14,15 +14,16 @@ from .sa.ntfs import lznt1_descomprimir
 GRUPOS = ('foto', 'video', 'audio', 'documento', 'compactado', 'banco', 'outro')
 ESTADOS = ('bom', 'parcial', 'ruim')
 MAX_NOME = 255
+MAX_NOTA = 200                        # texto curto: o que o sistema de arquivos disse sobre o arquivo (parcial, reaproveitado...)
 MAX_UNIDADE = 1 << 26                 # bytes de uma unidade comprimida (NTFS LZNT1), antes e depois de descomprimir
 SETOR_NOME = 512                      # o número no nome gerado (f0001234.jpg) é o setor de 512 bytes onde o achado começa
 
 # coluna -> tipo SQL das colunas que a fase 5 acrescentou à tabela `achados` da fase 1 (migração em JobStore)
 COLUNAS_NOVAS = (('nome', 'TEXT'), ('grupo', 'TEXT'), ('extensao', 'TEXT'), ('apagado', 'INTEGER'),
                  ('extents', 'TEXT'), ('pontuacao', 'INTEGER'), ('largura', 'INTEGER'), ('altura', 'INTEGER'),
-                 ('recuperado_em', 'REAL'), ('tamanho_total', 'INTEGER'))
+                 ('recuperado_em', 'REAL'), ('tamanho_total', 'INTEGER'), ('nota', 'TEXT'))
 COLUNAS_GRAVAVEIS = ('job_id', 'nome', 'caminho', 'apagado', 'grupo', 'tipo', 'extensao', 'tamanho', 'offset',
-                     'extents', 'estado', 'pontuacao', 'data', 'largura', 'altura', 'tamanho_total')
+                     'extents', 'estado', 'pontuacao', 'data', 'largura', 'altura', 'tamanho_total', 'nota')
 _DATA = re.compile(r'\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?')
 
 
@@ -114,13 +115,18 @@ def normalizar(job_id, a):
     data = a.get('data')
     if data is not None and (not isinstance(data, str) or not _DATA.fullmatch(data)):
         raise ValueError('achado: "data" precisa ser AAAA-MM-DD ou AAAA-MM-DD HH:MM:SS')
+    nota = a.get('nota')
+    if nota is not None:
+        if not isinstance(nota, str):
+            raise ValueError('achado: "nota" precisa ser texto')
+        nota = nota.replace('\x00', '')[:MAX_NOTA] or None
     apagado = a.get('apagado')
     if apagado is not None:
         apagado = 1 if apagado else 0
     return (job_id, nome, caminho, apagado, grupo, tipo, extensao, tamanho, offset, extents, estado,
             _int(a.get('pontuacao'), 'pontuacao', 0, 100, True), data,
             _int(a.get('largura'), 'largura', 0, opcional=True), _int(a.get('altura'), 'altura', 0, opcional=True),
-            _int(a.get('tamanho_total'), 'tamanho_total', tamanho + 1, opcional=True))
+            _int(a.get('tamanho_total'), 'tamanho_total', tamanho + 1, opcional=True), nota)
 
 
 def como_dict(linha):

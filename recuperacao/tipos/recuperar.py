@@ -426,7 +426,7 @@ _tam = relatorio.tam
 
 def linhas_do_relatorio(store, job):
     sql = ('SELECT r.ordem, r.arquivo, r.resultado, r.bytes, r.sha256, r.motivo, a.nome, a.caminho, a.grupo, a.tipo, a.estado, '
-           'a.pontuacao, a.tamanho, a.tamanho_total, a.data FROM recuperacoes r LEFT JOIN achados a ON a.id=r.achado_id '
+           'a.pontuacao, a.tamanho, a.tamanho_total, a.data, a.nota FROM recuperacoes r LEFT JOIN achados a ON a.id=r.achado_id '
            'WHERE r.job_id=? ORDER BY r.ordem')
     linhas = [dict(l) for l in store._con().execute(sql, (job['id'],))]
     for l in linhas:
@@ -456,11 +456,11 @@ def escrever_relatorio(store, job):
         f.write('﻿')
         w = csv.writer(f)
         w.writerow(['arquivo_recuperado', 'nome', 'caminho_original', 'grupo', 'tipo', 'estado', 'pontuacao', 'tamanho',
-                    'bytes_gravados', 'resultado', 'motivo', 'sha256', 'data'])
+                    'bytes_gravados', 'resultado', 'motivo', 'sha256', 'data', 'nota'])
         for l in linhas:
             w.writerow([_celula(x) for x in (l['arquivo'], l['nome'], l['caminho'], l['grupo'], l['tipo'], l['estado'],
                                              l['pontuacao'], l['tamanho'], l['bytes'], RESULTADOS.get(l['resultado'], l['resultado']),
-                                             l['motivo'], l['sha256'], l['data'])])
+                                             l['motivo'], l['sha256'], l['data'], l['nota'])])
     nomes.append(os.path.basename(caminho))
     caminho, f = _criar_exclusivo(destino, 'relatorio', '.html', job['id'])
     with f:
@@ -486,7 +486,8 @@ def _html(linhas, job):
         out.write('<tr><td>%s</td><td>%s</td><td class="%s">%s</td><td>%s</td><td class="num">%s</td><td>%s</td><td>%s</td></tr>'
                   % (e(l['arquivo'] or ''), e(l['tipo'] or ''), e(l['estado'] or ''), e(ROTULO_ESTADO.get(l['estado'], l['estado'] or '')),
                      e('' if l['pontuacao'] is None else str(l['pontuacao'])), _tam(l['bytes'] or l['tamanho']),
-                     e(RESULTADOS.get(l['resultado'], l['resultado']) + (': ' + l['motivo'] if l['motivo'] else '')),
+                     e(RESULTADOS.get(l['resultado'], l['resultado']) + (': ' + l['motivo'] if l['motivo'] else '')
+                       + (' [nota: ' + l['nota'] + ']' if l['nota'] else '')),
                      e(l['sha256'] or '')))
     out.write('</table><p>Estado: <b>bom</b> = o arquivo está inteiro e coerente; <b>parcial</b> = só o começo é confiável; '
               '<b>ruim</b> = inteiro, mas o conteúdo falhou numa conferência. Confira sempre abrindo os arquivos.</p>')

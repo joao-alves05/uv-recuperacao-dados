@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 BLOCO = 1 << 20
 MAX_PROFUNDIDADE = 64
+MAX_ONDE = 20                            # caminhos que não abriram guardados para o aviso (o resto só entra na conta)
 
 
 class ErroSA(Exception):
@@ -38,6 +39,8 @@ class Entrada:
     inline: bytes = None            # conteúdo guardado dentro do próprio registro (NTFS residente, ext4 inline)
     ident: int = 0                  # primeiro cluster / registro MFT / inode: identifica a entrada dentro do volume
     nota: str = ''
+    motivo: str = ''                # por que não há conteúdo a recuperar (cifrado, compressao_nao_suportada, hardlink_sem_inode,
+                                    # sem_conteudo = apagado sem ponteiros); vazio = não informado (vira `ilegivel`)
 
     def como_dict(self):
         return {'nome': self.nome, 'caminho': self.caminho, 'eh_dir': self.eh_dir, 'tamanho': self.tamanho,
@@ -79,6 +82,15 @@ class Volume:
     limitacao = ''
     ao_ler = None           # callback(fração) que quem lista instala: chamado a cada pasta lida; pode levantar exceção
     ilegiveis = 0           # setores que não deu para ler ao montar a lista (o resto da lista segue sem eles)
+    ilegiveis_onde = None   # caminhos das pastas/arquivos que não abriram (até MAX_ONDE); o job cita no aviso
+
+    def perdeu(self, caminho, setores=1):
+        """Pasta ou arquivo que sumiu da lista por falha de leitura: entra em `ilegiveis` e o caminho no aviso."""
+        self.ilegiveis += max(1, setores)
+        if self.ilegiveis_onde is None:
+            self.ilegiveis_onde = []
+        if len(self.ilegiveis_onde) < MAX_ONDE and caminho not in self.ilegiveis_onde:
+            self.ilegiveis_onde.append(caminho)
 
     def __init__(self, leitor, inicio=0, tamanho=None):
         self.leitor = leitor

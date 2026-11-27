@@ -352,7 +352,7 @@ class Hfs(Volume):
 
     def _dados(self, e, r):
         if r['fork'] is None:
-            e.estado, e.nota = 'ruim', 'hard link sem inode'
+            e.estado, e.nota, e.motivo = 'ruim', 'hard link sem inode', 'hardlink_sem_inode'
             return
         if r['comprimido']:
             self._dados_decmpfs(e, r)
@@ -395,10 +395,10 @@ class Hfs(Volume):
             return
         tipo, tam = struct.unpack_from('<IQ', attr, 4)
         if tipo in (7, 8, 11, 12):
-            e.nota = 'compressão LZVN/LZFSE não suportada'
+            e.nota, e.motivo = 'compressão LZVN/LZFSE não suportada', 'compressao_nao_suportada'
             return
         if tipo not in (3, 4):
-            e.nota = 'compressão decmpfs tipo %d não suportada' % tipo
+            e.nota, e.motivo = 'compressão decmpfs tipo %d não suportada' % tipo, 'compressao_nao_suportada'
             return
         try:
             ext = []
@@ -560,7 +560,8 @@ class Hfs(Volume):
             e = self._entrada(r, pastas, memo, True)
             if e is not None and e is not _ADIAR:
                 if real is None:
-                    e.estado, e.nota = 'ruim', 'hard link: o inode iNode%d não está no catálogo' % r['hlnk']
+                    e.estado, e.nota, e.motivo = 'ruim', 'hard link: o inode iNode%d não está no catálogo' % r['hlnk'], \
+                        'hardlink_sem_inode'
                 yield e
         if self.ao_ler:
             self.ao_ler(1.0)

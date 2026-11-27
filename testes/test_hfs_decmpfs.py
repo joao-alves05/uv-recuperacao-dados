@@ -119,7 +119,7 @@ class TestHfsDecmpfs(ImagemDecmpfs, CasoComPasta):
     def test_tipo8_continua_na_lista_como_ruim(self):
         with leitor_mod.abrir(self.montar()) as l:
             e = next(x for x in sa.detectar(l).varrer() if x.nome == 'lzvn.bin')
-            self.assertEqual(arquivos_sa.achado_de(e), (None, 'sem_conteudo'))     # como já era: ruim, sem bytes
+            self.assertEqual(arquivos_sa.achado_de(e), (None, 'compressao_nao_suportada'))     # ruim, sem bytes; antes caía em sem_conteudo ('apagado só com o nome')
 
 
 class TestRecuperacaoDecmpfs(ImagemDecmpfs, BaseVarredura):

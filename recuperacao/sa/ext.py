@@ -241,7 +241,7 @@ class Ext(Volume):
         except (ErroSA, OSError, struct.error):
             fis = []
         if apagado and (tam == 0 or not any(p for p, _ in fis)):
-            ent.estado = 'ruim'
+            ent.estado, ent.motivo = 'ruim', 'sem_conteudo'
             ent.nota = ('o ' + self.tipo + ' zerou os ponteiros ao apagar: o nome ficou, o conteúdo não dá para '
                         'recuperar pelo sistema de arquivos (só por carving)')
             ent.runs = []

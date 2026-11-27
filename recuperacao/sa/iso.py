@@ -155,8 +155,9 @@ class Iso(Volume):
                 n = n[:-1]
         return limpar_nome(n)
 
-    def _registros(self, dados):
-        """Gera os registros de uma pasta (bytes); registros não cruzam o limite de setor."""
+    def _registros(self, dados, pai='/'):
+        """Gera os registros de uma pasta (bytes); registros não cruzam o limite de setor. Registro com tamanho impossível
+        não para a pasta: o resto do setor é descartado (conta em `ilegiveis`, com o caminho) e a leitura segue no próximo."""
         off = 0
         while off < len(dados):
             n = dados[off]
@@ -164,7 +165,9 @@ class Iso(Volume):
                 off = (off // SETOR + 1) * SETOR
                 continue
             if n < 34 or off + n > len(dados):
-                return
+                self.perdeu(pai)
+                off = (off // SETOR + 1) * SETOR
+                continue
             yield dados[off: off + n]
             off += n
 
@@ -185,7 +188,7 @@ class Iso(Volume):
 
     def _pasta(self, dados, pai, nivel, vistos):
         pendente = None                                      # arquivo em várias extensões
-        for r in self._registros(dados):
+        for r in self._registros(dados, pai):
             lba = struct.unpack_from('<I', r, 2)[0]
             tam = struct.unpack_from('<I', r, 10)[0]
             flags = r[25]
@@ -229,6 +232,7 @@ class Iso(Volume):
                 except ErroTeto:
                     raise
                 except (OSError, ErroSA):
+                    self.perdeu(ent.caminho, -(-tam // SETOR))        # a pasta aparece na lista, mas sem o que tinha dentro
                     continue
                 yield from self._pasta(sub, ent.caminho, nivel + 1, vistos)
 

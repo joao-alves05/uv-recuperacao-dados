@@ -429,7 +429,7 @@ class Ntfs(Volume):
 
     def _dados(self, e, i):
         if i['cifrado']:
-            e.estado, e.nota = 'ruim', 'criptografado (EFS): não suportado'
+            e.estado, e.nota, e.motivo = 'ruim', 'criptografado (EFS): não suportado', 'cifrado'
             return
         if i['inline'] is not None:
             e.inline = i['inline']
